@@ -81,6 +81,7 @@
     <div class="footer">
       <div>Data source: <code>MVP mock</code> (next: poll + multi-gateway aggregate)</div>
       <div id="ts">—</div>
+      <div id="api" style="max-width:720px"></div>
     </div>
   </div>
 
@@ -95,19 +96,8 @@
 
     // MVP: purely mock; shaped to what we'll likely want later.
     const MODEL = {
-      hosts: [
-        {id:'host-a', zone:'tl'},
-        {id:'host-b', zone:'tr'},
-        {id:'host-c', zone:'bl'},
-        {id:'host-d', zone:'br'},
-      ],
-      agents: [
-        {id:'main@host-a', host:'host-a', name:'main', x:22, y:28, state:'reply'},
-        {id:'work@host-a', host:'host-a', name:'work', x:30, y:18, state:'think'},
-        {id:'group@host-b', host:'host-b', name:'group', x:74, y:24, state:'tool'},
-        {id:'notion@host-c', host:'host-c', name:'notion-bot', x:26, y:76, state:'wait'},
-        {id:'cron@host-d', host:'host-d', name:'cron', x:78, y:74, state:'wait'},
-      ]
+      hosts: [],
+      agents: [],
     };
 
     function zoneBounds(zone){
@@ -161,24 +151,78 @@
       }
     }
 
-    function tickMock(){
-      // random state churn (MVP stand-in for real polling)
-      for(const a of MODEL.agents){
-        if(Math.random() < 0.35){
-          const next = STATES[Math.floor(Math.random()*STATES.length)].key;
-          a.state = next;
+    async function tick(){
+      try{
+        const r = await fetch('/api/lobster-room', {cache: 'no-store'});
+        const data = await r.json();
+
+        // If not configured / errors, fallback to a tiny local mock.
+        if(!data || data.ok === false || !Array.isArray(data.agents)){
+          throw new Error((data && data.errors && data.errors.join('; ')) || 'no data');
         }
+
+        // Hosts come from configured gateways; map them into 4 corner zones (MVP).
+        const gws = Array.isArray(data.gateways) ? data.gateways : [];
+        const zones = ['tl','tr','bl','br'];
+        MODEL.hosts = gws.slice(0,4).map((g,i)=>({id:g.id, label:g.label, zone: zones[i]}));
+
+        // Agents from API; if more than 4 gateways, they still render but may overlap zones.
+        MODEL.agents = data.agents.map((a)=>({
+          id: a.id,
+          host: a.hostId,
+          name: a.name,
+          state: a.state || 'wait',
+          x: a.x,
+          y: a.y,
+        }));
+
+        // Update host labels in the UI blocks (MVP: 4 blocks).
+        const labels = {tl: 'host-a', tr: 'host-b', bl: 'host-c', br: 'host-d'};
+        for(const h of MODEL.hosts){ labels[h.zone] = h.label || h.id; }
+        document.querySelector('.hz-tl .host-label').textContent = labels.tl;
+        document.querySelector('.hz-tr .host-label').textContent = labels.tr;
+        document.querySelector('.hz-bl .host-label').textContent = labels.bl;
+        document.querySelector('.hz-br .host-label').textContent = labels.br;
+
+        renderAgents();
+        document.getElementById('ts').textContent = 'Updated: ' + new Date().toLocaleString();
+        document.getElementById('api').textContent = '';
+
+      }catch(e){
+        // fallback mock: keep prior behavior if API isn't ready
+        if(MODEL.hosts.length === 0 && MODEL.agents.length === 0){
+          MODEL.hosts = [
+            {id:'host-a', label:'host-a', zone:'tl'},
+            {id:'host-b', label:'host-b', zone:'tr'},
+            {id:'host-c', label:'host-c', zone:'bl'},
+            {id:'host-d', label:'host-d', zone:'br'},
+          ];
+          MODEL.agents = [
+            {id:'main@host-a', host:'host-a', name:'main', x:22, y:28, state:'reply'},
+            {id:'work@host-a', host:'host-a', name:'work', x:30, y:18, state:'think'},
+            {id:'group@host-b', host:'host-b', name:'group', x:74, y:24, state:'tool'},
+            {id:'notion@host-c', host:'host-c', name:'notion-bot', x:26, y:76, state:'wait'},
+            {id:'cron@host-d', host:'host-d', name:'cron', x:78, y:74, state:'wait'},
+          ];
+        }
+        // random churn so it still looks alive
+        for(const a of MODEL.agents){
+          if(Math.random() < 0.25){
+            a.state = STATES[Math.floor(Math.random()*STATES.length)].key;
+          }
+        }
+        renderAgents();
+        document.getElementById('ts').textContent = 'Updated (mock): ' + new Date().toLocaleString();
+        document.getElementById('api').textContent = 'API: ' + (e && e.message ? e.message : 'error');
+
       }
-      renderAgents();
-      document.getElementById('ts').textContent = 'Updated: ' + new Date().toLocaleString();
     }
 
     function init(){
       renderLegend();
-      renderAgents();
-      tickMock();
-      setInterval(tickMock, 1400);
-      document.getElementById('btn-refresh').addEventListener('click', tickMock);
+      tick();
+      setInterval(tick, 2000);
+      document.getElementById('btn-refresh').addEventListener('click', tick);
     }
 
     init();

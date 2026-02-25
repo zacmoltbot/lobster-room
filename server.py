@@ -134,6 +134,42 @@ def load_config():
         return {}
 
 
+def load_gateway_aggregator_config():
+    """Load multi-gateway config.
+
+    Expected shape (config.json):
+      { "gateways": [ {"id","label","baseUrl","tokenEnv"}, ... ] }
+
+    Tokens are never stored in config.json; they are read from environment.
+    """
+    cfg = load_config()
+    gateways = cfg.get("gateways", [])
+    if not isinstance(gateways, list):
+        gateways = []
+
+    norm = []
+    for g in gateways:
+        if not isinstance(g, dict):
+            continue
+        gid = (g.get("id") or "").strip()
+        label = (g.get("label") or gid).strip()
+        base_url = (g.get("baseUrl") or "").strip().rstrip("/")
+        token_env = (g.get("tokenEnv") or "").strip()
+        if not gid or not base_url:
+            continue
+        norm.append({
+            "id": gid,
+            "label": label or gid,
+            "baseUrl": base_url,
+            "tokenEnv": token_env,
+        })
+
+    return {
+        "gateways": norm,
+        "pollSeconds": int((cfg.get("lobsterRoom") or {}).get("pollSeconds", 2)),
+    }
+
+
 def read_dotenv(path):
     """Read a KEY=VALUE .env file, return dict. Ignores comments and blanks."""
     result = {}
@@ -266,6 +302,101 @@ def call_gateway(system, history, question, port, token, model):
         return {"error": f"Unexpected error: {e}"}
 
 
+
+
+def _fetch_json(url, headers=None, timeout=6):
+    req = urllib.request.Request(url, headers=headers or {})
+    with urllib.request.urlopen(req, timeout=timeout) as resp:
+        raw = resp.read().decode("utf-8", errors="ignore")
+    return json.loads(raw)
+
+
+def _gateway_headers_from_env(token_env):
+    if not token_env:
+        return {}
+    token = os.environ.get(token_env, "").strip()
+    if not token:
+        return {}
+    return {"Authorization": f"Bearer {token}"}
+
+
+def build_lobster_room_state():
+    """Aggregate multi-gateway status into a single payload for lobster-room.html.
+
+    MVP: pulls each gateway's dashboard JSON via /api/refresh and maps sessions to
+    a coarse state bubble.
+    """
+    agg_cfg = load_gateway_aggregator_config()
+    gateways = agg_cfg.get("gateways", [])
+
+    out = {
+        "ok": True,
+        "generatedAt": int(time.time()),
+        "gateways": [],
+        "agents": [],
+        "errors": [],
+    }
+
+    if not gateways:
+        out["ok"] = False
+        out["errors"].append("No gateways configured. Add gateways[] to config.json")
+        return out
+
+    for gw in gateways:
+        base = gw["baseUrl"]
+        url = f"{base}/api/refresh"
+        headers = _gateway_headers_from_env(gw.get("tokenEnv", ""))
+        if gw.get("tokenEnv") and not headers:
+            out["ok"] = False
+            out["errors"].append(f"{gw['id']} missing env var: {gw['tokenEnv']}")
+            continue
+
+        try:
+            data = _fetch_json(url, headers=headers, timeout=8)
+            out["gateways"].append({
+                "id": gw["id"],
+                "label": gw["label"],
+                "baseUrl": gw["baseUrl"],
+                "status": (data.get("gateway") or {}).get("status") or "unknown",
+                "sessionCount": data.get("sessionCount"),
+                "lastRefresh": data.get("lastRefresh"),
+            })
+
+            for s in (data.get("sessions") or []):
+                kind = (s.get("type") or "").lower()
+                status = (s.get("status") or "").lower()
+
+                state = "wait"
+                if status in ("error", "failed"):
+                    state = "err"
+                elif kind in ("dm", "group", "telegram"):
+                    state = "reply"
+                elif kind in ("subagent",):
+                    state = "think"
+                elif kind in ("cron",):
+                    state = "tool"
+
+                out["agents"].append({
+                    "id": f"{s.get('name') or s.get('sessionKey') or 'session'}@{gw['id']}",
+                    "hostId": gw["id"],
+                    "hostLabel": gw["label"],
+                    "name": s.get("name") or s.get("sessionKey") or "agent",
+                    "state": state,
+                    "meta": {
+                        "type": s.get("type"),
+                        "model": s.get("model"),
+                        "contextPct": s.get("contextPct"),
+                    },
+                })
+
+        except urllib.error.HTTPError as e:
+            out["ok"] = False
+            out["errors"].append(f"{gw['id']} HTTP {e.code} at {url}")
+        except Exception as e:
+            out["ok"] = False
+            out["errors"].append(f"{gw['id']} error: {e}")
+
+    return out
 class DashboardHandler(http.server.SimpleHTTPRequestHandler):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, directory=DIR, **kwargs)
@@ -294,6 +425,8 @@ class DashboardHandler(http.server.SimpleHTTPRequestHandler):
 
         if self.path == "/api/refresh" or self.path.startswith("/api/refresh?"):
             self.handle_refresh()
+        elif self.path == "/api/lobster-room" or self.path.startswith("/api/lobster-room?"):
+            self.handle_lobster_room()
         else:
             super().do_GET()
 
@@ -330,6 +463,11 @@ class DashboardHandler(http.server.SimpleHTTPRequestHandler):
             self.send_header("Content-Type", "application/json")
             self.end_headers()
             self.wfile.write(json.dumps({"error": str(e)}).encode())
+
+    def handle_lobster_room(self):
+        payload = build_lobster_room_state()
+        # Always return JSON; caller can render errors.
+        self._send_json(200, payload)
 
     def handle_chat(self):
         if not _ai_cfg.get("enabled", True):

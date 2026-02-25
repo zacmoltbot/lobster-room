@@ -30,5 +30,6 @@
     "model": "kimi-coding/k2p5",
     "maxHistory": 6,
     "dotenvPath": "~/.openclaw/.env"
-  }
+  },
+  "gateways": []
 }
