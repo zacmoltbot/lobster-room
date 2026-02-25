@@ -359,7 +359,7 @@ def build_lobster_room_state():
 
     for gw in gateways:
         base = gw["baseUrl"]
-        url = f"{base}/api/refresh"
+        url = f"{base}/tools/invoke"
         headers = _gateway_headers_from_env(gw.get("tokenEnv", ""))
         if gw.get("tokenEnv") and not headers:
             out["ok"] = False
@@ -367,17 +367,32 @@ def build_lobster_room_state():
             continue
 
         try:
-            data = _fetch_json(url, headers=headers, timeout=8)
+            # Use the official Tools Invoke HTTP API to list sessions.
+            payload = {"tool": "sessions_list", "action": "json", "args": {}}
+            req = urllib.request.Request(
+                url,
+                data=json.dumps(payload).encode("utf-8"),
+                headers={**headers, "Content-Type": "application/json"},
+                method="POST",
+            )
+            with urllib.request.urlopen(req, timeout=8) as resp:
+                raw = resp.read().decode("utf-8", errors="ignore")
+            data = json.loads(raw)
+            if not data.get("ok"):
+                raise Exception(str(data.get("error") or "tools/invoke failed"))
+            details = (data.get("result") or {}).get("details") or {}
+            sessions = details.get("sessions") or []
+
             out["gateways"].append({
                 "id": gw["id"],
                 "label": gw["label"],
                 "baseUrl": gw["baseUrl"],
-                "status": (data.get("gateway") or {}).get("status") or "unknown",
-                "sessionCount": data.get("sessionCount"),
-                "lastRefresh": data.get("lastRefresh"),
+                "status": "ok",
+                "sessionCount": details.get("count"),
+                "lastRefresh": None,
             })
 
-            for s in (data.get("sessions") or []):
+            for s in sessions:
                 kind = (s.get("type") or "").lower()
                 status = (s.get("status") or "").lower()
 
