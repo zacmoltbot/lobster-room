@@ -137,13 +137,28 @@ def load_config():
 def load_gateway_aggregator_config():
     """Load multi-gateway config.
 
-    Expected shape (config.json):
-      { "gateways": [ {"id","label","baseUrl","tokenEnv"}, ... ] }
+    Sources (priority):
+      1) env LOBSTER_ROOM_GATEWAYS_JSON (JSON array)
+      2) config.json gateways
+
+    Each gateway object:
+      {"id","label","baseUrl","tokenEnv"}
 
     Tokens are never stored in config.json; they are read from environment.
     """
     cfg = load_config()
-    gateways = cfg.get("gateways", [])
+
+    gateways = None
+    env_raw = os.environ.get("LOBSTER_ROOM_GATEWAYS_JSON")
+    if env_raw:
+        try:
+            gateways = json.loads(env_raw)
+        except json.JSONDecodeError:
+            gateways = []
+
+    if gateways is None:
+        gateways = cfg.get("gateways", [])
+
     if not isinstance(gateways, list):
         gateways = []
 
