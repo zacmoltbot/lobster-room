@@ -279,6 +279,10 @@ class DashboardHandler(http.server.SimpleHTTPRequestHandler):
         super().end_headers()
 
     def do_GET(self):
+        # Friendly routes
+        if self.path in ("/lobster-room", "/lobster-room/"):
+            self.path = "/lobster-room.html"
+
         if self.path == "/api/refresh" or self.path.startswith("/api/refresh?"):
             self.handle_refresh()
         else:
