@@ -279,6 +279,15 @@ class DashboardHandler(http.server.SimpleHTTPRequestHandler):
         super().end_headers()
 
     def do_GET(self):
+        # Healthcheck (for Zeabur / platform health probes)
+        if self.path in ("/healthz", "/healthz/"):
+            self.send_response(200)
+            self.send_header("Content-Type", "text/plain; charset=utf-8")
+            self.send_header("Cache-Control", "no-cache")
+            self.end_headers()
+            self.wfile.write(b"ok")
+            return
+
         # Friendly routes
         if self.path in ("/lobster-room", "/lobster-room/"):
             self.path = "/lobster-room.html"
@@ -449,8 +458,18 @@ def main():
     if _ai_cfg.get("enabled", True) and not _gateway_token:
         print("[dashboard] WARNING: ai.enabled=true but OPENCLAW_GATEWAY_TOKEN not found in dotenv")
 
-    env_bind = os.environ.get("DASHBOARD_BIND", cfg_bind)
-    env_port = int(os.environ.get("DASHBOARD_PORT", cfg_port))
+    # Deployment-friendly env vars
+    # - Zeabur/Heroku-like platforms typically provide PORT
+    # - Keep existing DASHBOARD_BIND/DASHBOARD_PORT for explicit control
+    env_port_raw = os.environ.get("DASHBOARD_PORT")
+    if env_port_raw is None:
+        env_port_raw = os.environ.get("PORT")
+    env_port = int(env_port_raw) if env_port_raw is not None else int(cfg_port)
+
+    env_bind = os.environ.get("DASHBOARD_BIND")
+    if env_bind is None:
+        # If PORT is provided, assume we're in a platform environment and bind publicly.
+        env_bind = "0.0.0.0" if os.environ.get("PORT") else cfg_bind
 
     parser = argparse.ArgumentParser(
         description="OpenClaw Dashboard Server",
