@@ -363,7 +363,7 @@ def build_lobster_room_state():
         headers = _gateway_headers_from_env(gw.get("tokenEnv", ""))
         if gw.get("tokenEnv") and not headers:
             out["ok"] = False
-            out["errors"].append(f"{gw['id']} missing env var: {gw['tokenEnv']}")
+            out["errors"].append(f"{gw['id']} missing env var: {gw['tokenEnv']} (for {base})")
             continue
 
         try:
@@ -377,7 +377,11 @@ def build_lobster_room_state():
             )
             with urllib.request.urlopen(req, timeout=8) as resp:
                 raw = resp.read().decode("utf-8", errors="ignore")
-            data = json.loads(raw)
+            try:
+                data = json.loads(raw)
+            except json.JSONDecodeError:
+                snippet = raw[:200].replace('\n', ' ')
+                raise Exception(f"Non-JSON response from tools/invoke: {snippet}")
             if not data.get("ok"):
                 raise Exception(str(data.get("error") or "tools/invoke failed"))
             details = (data.get("result") or {}).get("details") or {}
