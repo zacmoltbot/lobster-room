@@ -204,7 +204,39 @@
             {id:'notion@host-c', host:'host-c', name:'notion-bot', x:26, y:76, state:'wait'},
             {id:'cron@host-d', host:'host-d', name:'cron', x:78, y:74, state:'wait'},
           ];
+    async function tick(){
+      try{
+        // First try the real aggregator endpoint.
+        const res = await fetch('/api/lobster-room', {cache:'no-store'});
+        if(res.ok){
+          const data = await res.json();
+          MODEL.gateways = data.gateways || [];
+          MODEL.agents = (data.agents || []).map(a => ({
+            id: a.id,
+            host: a.hostId,
+            name: a.name,
+            state: a.state,
+          }));
+          // Optional: backend can tell frontend how often to poll.
+          if(typeof data.pollSeconds === 'number' && isFinite(data.pollSeconds)){
+            MODEL.pollMs = Math.max(1000, Math.floor(data.pollSeconds * 1000));
+          }
+          placeAgents();
+          renderAgents();
+          document.getElementById('ts').textContent = 'Updated: ' + new Date().toLocaleString();
+          document.getElementById('api').textContent = 'API: /api/lobster-room';
+          return;
         }
+        throw new Error('HTTP ' + res.status);
+      }catch(e){
+        // Fallback mock (kept for offline dev / early MVP)
+        MODEL.agents = [
+          {id:'main@host-a', host:'host-a', name:'main', x:22, y:28, state:'reply'},
+          {id:'work@host-a', host:'host-a', name:'work', x:30, y:18, state:'think'},
+          {id:'group@host-b', host:'host-b', name:'group', x:74, y:24, state:'tool'},
+          {id:'notion@host-c', host:'host-c', name:'notion-bot', x:26, y:76, state:'wait'},
+          {id:'cron@host-d', host:'host-d', name:'cron', x:78, y:74, state:'wait'},
+        ];
         // random churn so it still looks alive
         for(const a of MODEL.agents){
           if(Math.random() < 0.25){
@@ -214,14 +246,23 @@
         renderAgents();
         document.getElementById('ts').textContent = 'Updated (mock): ' + new Date().toLocaleString();
         document.getElementById('api').textContent = 'API: ' + (e && e.message ? e.message : 'error');
-
       }
     }
 
     function init(){
       renderLegend();
       tick();
-      setInterval(tick, 2000);
+      // Default 2s; backend can override via /api/lobster-room pollSeconds.
+      MODEL.pollMs = 2000;
+      let timer = setInterval(tick, MODEL.pollMs);
+      // If backend changes pollSeconds, restart the interval.
+      setInterval(() => {
+        if(MODEL.pollMs && timer && MODEL._pollMsLast !== MODEL.pollMs){
+          clearInterval(timer);
+          timer = setInterval(tick, MODEL.pollMs);
+          MODEL._pollMsLast = MODEL.pollMs;
+        }
+      }, 500);
       document.getElementById('btn-refresh').addEventListener('click', tick);
     }
 
