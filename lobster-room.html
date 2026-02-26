@@ -79,7 +79,7 @@
     </div>
 
     <div class="footer">
-      <div>Data source: <code>MVP mock</code> (next: poll + multi-gateway aggregate)</div>
+      <div>Data source: <code id="data-source">(loading)</code></div>
       <div id="ts">—</div>
       <div id="api" style="max-width:720px"></div>
     </div>
@@ -191,6 +191,7 @@
           renderAgents();
           document.getElementById('ts').textContent = 'Updated: ' + new Date().toLocaleString();
           document.getElementById('api').textContent = 'API: /api/lobster-room';
+          document.getElementById('data-source').textContent = 'api';
           return;
         }
         throw new Error('HTTP ' + res.status);
@@ -220,6 +221,7 @@
         renderAgents();
         document.getElementById('ts').textContent = 'Updated (mock): ' + new Date().toLocaleString();
         document.getElementById('api').textContent = 'API error: ' + (e && e.message ? e.message : 'error');
+        document.getElementById('data-source').textContent = 'mock';
       }
     }
 
