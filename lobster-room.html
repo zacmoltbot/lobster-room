@@ -94,10 +94,12 @@
       {key:'err',   cls:'b-err',   label:'⚠️ error'},
     ];
 
-    // MVP: purely mock; shaped to what we'll likely want later.
+    // State model for the room.
     const MODEL = {
       hosts: [],
       agents: [],
+      pollMs: 2000,
+      _pollMsLast: null,
     };
 
     function zoneBounds(zone){
@@ -186,7 +188,6 @@
           document.querySelector('.hz-bl .host-label').textContent = labels.bl;
           document.querySelector('.hz-br .host-label').textContent = labels.br;
 
-          placeAgents();
           renderAgents();
           document.getElementById('ts').textContent = 'Updated: ' + new Date().toLocaleString();
           document.getElementById('api').textContent = 'API: /api/lobster-room';
