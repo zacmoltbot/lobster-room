@@ -382,6 +382,20 @@ def _active_window_ms_from_env_or_cfg(cfg):
         return 10000
 
 
+def _poll_seconds_from_env_or_cfg(cfg):
+    """Client poll interval (seconds) exposed via /api/lobster-room payload."""
+    env = os.environ.get("LOBSTER_ROOM_POLL_SECONDS", "").strip()
+    if env:
+        try:
+            return max(1, int(env))
+        except ValueError:
+            pass
+    try:
+        return max(1, int(cfg.get("pollSeconds", 2)))
+    except (TypeError, ValueError):
+        return 2
+
+
 def build_lobster_room_state():
     """Aggregate multi-gateway status into a single payload for lobster-room.html.
 
@@ -391,10 +405,12 @@ def build_lobster_room_state():
     agg_cfg = load_gateway_aggregator_config()
     gateways = agg_cfg.get("gateways", [])
     active_window_ms = _active_window_ms_from_env_or_cfg(agg_cfg)
+    poll_seconds = _poll_seconds_from_env_or_cfg(agg_cfg)
 
     out = {
         "ok": True,
         "generatedAt": int(time.time()),
+        "pollSeconds": poll_seconds,
         "gateways": [],
         "agents": [],
         "errors": [],
