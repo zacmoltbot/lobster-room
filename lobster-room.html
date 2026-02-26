@@ -153,74 +153,39 @@
 
     async function tick(){
       try{
-        const r = await fetch('/api/lobster-room', {cache: 'no-store'});
-        const data = await r.json();
-
-        // If not configured / errors, fallback to a tiny local mock.
-        if(!data || data.ok === false || !Array.isArray(data.agents)){
-          throw new Error((data && data.errors && data.errors.join('; ')) || 'no data');
-        }
-
-        // Hosts come from configured gateways; map them into 4 corner zones (MVP).
-        const gws = Array.isArray(data.gateways) ? data.gateways : [];
-        const zones = ['tl','tr','bl','br'];
-        MODEL.hosts = gws.slice(0,4).map((g,i)=>({id:g.id, label:g.label, zone: zones[i]}));
-
-        // Agents from API; if more than 4 gateways, they still render but may overlap zones.
-        MODEL.agents = data.agents.map((a)=>({
-          id: a.id,
-          host: a.hostId,
-          name: a.name,
-          state: a.state || 'wait',
-          x: a.x,
-          y: a.y,
-        }));
-
-        // Update host labels in the UI blocks (MVP: 4 blocks).
-        const labels = {tl: 'host-a', tr: 'host-b', bl: 'host-c', br: 'host-d'};
-        for(const h of MODEL.hosts){ labels[h.zone] = h.label || h.id; }
-        document.querySelector('.hz-tl .host-label').textContent = labels.tl;
-        document.querySelector('.hz-tr .host-label').textContent = labels.tr;
-        document.querySelector('.hz-bl .host-label').textContent = labels.bl;
-        document.querySelector('.hz-br .host-label').textContent = labels.br;
-
-        renderAgents();
-        document.getElementById('ts').textContent = 'Updated: ' + new Date().toLocaleString();
-        document.getElementById('api').textContent = '';
-
-      }catch(e){
-        // fallback mock: keep prior behavior if API isn't ready
-        if(MODEL.hosts.length === 0 && MODEL.agents.length === 0){
-          MODEL.hosts = [
-            {id:'host-a', label:'host-a', zone:'tl'},
-            {id:'host-b', label:'host-b', zone:'tr'},
-            {id:'host-c', label:'host-c', zone:'bl'},
-            {id:'host-d', label:'host-d', zone:'br'},
-          ];
-          MODEL.agents = [
-            {id:'main@host-a', host:'host-a', name:'main', x:22, y:28, state:'reply'},
-            {id:'work@host-a', host:'host-a', name:'work', x:30, y:18, state:'think'},
-            {id:'group@host-b', host:'host-b', name:'group', x:74, y:24, state:'tool'},
-            {id:'notion@host-c', host:'host-c', name:'notion-bot', x:26, y:76, state:'wait'},
-            {id:'cron@host-d', host:'host-d', name:'cron', x:78, y:74, state:'wait'},
-          ];
-    async function tick(){
-      try{
         // First try the real aggregator endpoint.
         const res = await fetch('/api/lobster-room', {cache:'no-store'});
         if(res.ok){
           const data = await res.json();
-          MODEL.gateways = data.gateways || [];
+
+          // Update hosts from gateways; map them into 4 corner zones.
+          const gws = Array.isArray(data.gateways) ? data.gateways : [];
+          const zones = ['tl','tr','bl','br'];
+          MODEL.hosts = gws.slice(0,4).map((g,i)=>({id:g.id, label:g.label, zone: zones[i]}));
+
+          // Agents from API.
           MODEL.agents = (data.agents || []).map(a => ({
             id: a.id,
             host: a.hostId,
             name: a.name,
-            state: a.state,
+            state: a.state || 'wait',
+            x: a.x,
+            y: a.y,
           }));
+
           // Optional: backend can tell frontend how often to poll.
           if(typeof data.pollSeconds === 'number' && isFinite(data.pollSeconds)){
             MODEL.pollMs = Math.max(1000, Math.floor(data.pollSeconds * 1000));
           }
+
+          // Update host labels in the UI blocks.
+          const labels = {tl: 'host-a', tr: 'host-b', bl: 'host-c', br: 'host-d'};
+          for(const h of MODEL.hosts){ labels[h.zone] = h.label || h.id; }
+          document.querySelector('.hz-tl .host-label').textContent = labels.tl;
+          document.querySelector('.hz-tr .host-label').textContent = labels.tr;
+          document.querySelector('.hz-bl .host-label').textContent = labels.bl;
+          document.querySelector('.hz-br .host-label').textContent = labels.br;
+
           placeAgents();
           renderAgents();
           document.getElementById('ts').textContent = 'Updated: ' + new Date().toLocaleString();
@@ -230,6 +195,14 @@
         throw new Error('HTTP ' + res.status);
       }catch(e){
         // Fallback mock (kept for offline dev / early MVP)
+        if(MODEL.hosts.length === 0){
+          MODEL.hosts = [
+            {id:'host-a', label:'host-a', zone:'tl'},
+            {id:'host-b', label:'host-b', zone:'tr'},
+            {id:'host-c', label:'host-c', zone:'bl'},
+            {id:'host-d', label:'host-d', zone:'br'},
+          ];
+        }
         MODEL.agents = [
           {id:'main@host-a', host:'host-a', name:'main', x:22, y:28, state:'reply'},
           {id:'work@host-a', host:'host-a', name:'work', x:30, y:18, state:'think'},
@@ -245,7 +218,7 @@
         }
         renderAgents();
         document.getElementById('ts').textContent = 'Updated (mock): ' + new Date().toLocaleString();
-        document.getElementById('api').textContent = 'API: ' + (e && e.message ? e.message : 'error');
+        document.getElementById('api').textContent = 'API error: ' + (e && e.message ? e.message : 'error');
       }
     }
 
