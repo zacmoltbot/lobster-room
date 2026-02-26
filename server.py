@@ -138,8 +138,12 @@ def load_gateway_aggregator_config():
     """Load multi-gateway config.
 
     Sources (priority):
-      1) env LOBSTER_ROOM_GATEWAYS_JSON (JSON array)
+      1) env LOBSTER_ROOM_GATEWAYS_JSON (JSON object or array)
       2) config.json gateways
+
+    Env formats supported:
+      - Array: [{"id","label","baseUrl","tokenEnv"}, ...]
+      - Object: {"gateways":[...], "activeWindowMs":10000, ...}
 
     Each gateway object:
       {"id","label","baseUrl","tokenEnv"}
@@ -148,13 +152,24 @@ def load_gateway_aggregator_config():
     """
     cfg = load_config()
 
-    gateways = None
     env_raw = os.environ.get("LOBSTER_ROOM_GATEWAYS_JSON")
+    env_obj = None
     if env_raw:
         try:
-            gateways = json.loads(env_raw)
+            env_obj = json.loads(env_raw)
         except json.JSONDecodeError:
-            gateways = []
+            env_obj = []
+
+    gateways = None
+    extra = {}
+    if isinstance(env_obj, dict):
+        gateways = env_obj.get("gateways")
+        # Allow top-level knobs in env JSON.
+        for k in ("pollSeconds", "activeWindowMs"):
+            if k in env_obj:
+                extra[k] = env_obj.get(k)
+    elif isinstance(env_obj, list):
+        gateways = env_obj
 
     if gateways is None:
         gateways = cfg.get("gateways", [])
@@ -170,19 +185,33 @@ def load_gateway_aggregator_config():
         label = (g.get("label") or gid).strip()
         base_url = (g.get("baseUrl") or "").strip().rstrip("/")
         token_env = (g.get("tokenEnv") or "").strip()
+        agent_label = (g.get("agentLabel") or "").strip()
         if not gid or not base_url:
             continue
-        norm.append({
+        item = {
             "id": gid,
             "label": label or gid,
             "baseUrl": base_url,
             "tokenEnv": token_env,
-        })
+        }
+        if agent_label:
+            item["agentLabel"] = agent_label
+        norm.append(item)
 
-    return {
+    poll_seconds = int((cfg.get("lobsterRoom") or {}).get("pollSeconds", 2))
+    if "pollSeconds" in extra:
+        try:
+            poll_seconds = int(extra["pollSeconds"])
+        except (TypeError, ValueError):
+            pass
+
+    out = {
         "gateways": norm,
-        "pollSeconds": int((cfg.get("lobsterRoom") or {}).get("pollSeconds", 2)),
+        "pollSeconds": poll_seconds,
     }
+    if "activeWindowMs" in extra:
+        out["activeWindowMs"] = extra["activeWindowMs"]
+    return out
 
 
 def read_dotenv(path):
@@ -335,6 +364,24 @@ def _gateway_headers_from_env(token_env):
     return {"Authorization": f"Bearer {token}"}
 
 
+def _active_window_ms_from_env_or_cfg(cfg):
+    """Active/idle cutoff (ms) for the lobster-room agent view.
+
+    v1 is intentionally coarse: sessions_list exposes `updatedAt` but not a
+    rich "running" status; we treat "anything updated recently" as active.
+    """
+    env = os.environ.get("LOBSTER_ROOM_ACTIVE_WINDOW_MS", "").strip()
+    if env:
+        try:
+            return max(0, int(env))
+        except ValueError:
+            pass
+    try:
+        return max(0, int(cfg.get("activeWindowMs", 10000)))
+    except (TypeError, ValueError):
+        return 10000
+
+
 def build_lobster_room_state():
     """Aggregate multi-gateway status into a single payload for lobster-room.html.
 
@@ -343,6 +390,7 @@ def build_lobster_room_state():
     """
     agg_cfg = load_gateway_aggregator_config()
     gateways = agg_cfg.get("gateways", [])
+    active_window_ms = _active_window_ms_from_env_or_cfg(agg_cfg)
 
     out = {
         "ok": True,
@@ -387,6 +435,15 @@ def build_lobster_room_state():
             details = (data.get("result") or {}).get("details") or {}
             sessions = details.get("sessions") or []
 
+            # v1: show one resident agent per gateway to avoid session noise.
+            max_updated_at = None
+            for s in sessions:
+                ts = s.get("updatedAt")
+                if isinstance(ts, (int, float)):
+                    ts = int(ts)
+                    if max_updated_at is None or ts > max_updated_at:
+                        max_updated_at = ts
+
             out["gateways"].append({
                 "id": gw["id"],
                 "label": gw["label"],
@@ -394,34 +451,24 @@ def build_lobster_room_state():
                 "status": "ok",
                 "sessionCount": details.get("count"),
                 "lastRefresh": None,
+                "maxUpdatedAt": max_updated_at,
             })
 
-            for s in sessions:
-                kind = (s.get("type") or "").lower()
-                status = (s.get("status") or "").lower()
-
-                state = "wait"
-                if status in ("error", "failed"):
-                    state = "err"
-                elif kind in ("dm", "group", "telegram"):
-                    state = "reply"
-                elif kind in ("subagent",):
-                    state = "think"
-                elif kind in ("cron",):
-                    state = "tool"
-
-                out["agents"].append({
-                    "id": f"{s.get('name') or s.get('sessionKey') or 'session'}@{gw['id']}",
-                    "hostId": gw["id"],
-                    "hostLabel": gw["label"],
-                    "name": s.get("name") or s.get("sessionKey") or "agent",
-                    "state": state,
-                    "meta": {
-                        "type": s.get("type"),
-                        "model": s.get("model"),
-                        "contextPct": s.get("contextPct"),
-                    },
-                })
+            now_ms = int(time.time() * 1000)
+            is_active = bool(max_updated_at and (now_ms - max_updated_at) <= active_window_ms)
+            out["agents"].append({
+                "id": f"resident@{gw['id']}",
+                "hostId": gw["id"],
+                "hostLabel": gw["label"],
+                "name": gw.get("agentLabel") or gw.get("label") or gw["id"],
+                "state": "think" if is_active else "wait",
+                "meta": {
+                    "active": is_active,
+                    "activeWindowMs": active_window_ms,
+                    "maxUpdatedAt": max_updated_at,
+                    "sessionCount": details.get("count"),
+                },
+            })
 
         except urllib.error.HTTPError as e:
             out["ok"] = False
