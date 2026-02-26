@@ -232,8 +232,88 @@ def read_dotenv(path):
     return result
 
 
-def build_dashboard_prompt(data):
-    """Build a compressed system prompt from data.json for the AI assistant."""
+def build_dashboard_data_via_gateways(agg_cfg):
+    """Generate a minimal data.json-compatible payload via gateway HTTP.
+
+    This is used by /api/refresh in hosted deployments where the dashboard
+    cannot read the gateway's local filesystem.
+
+    We only populate the fields needed to keep the main dashboard "online" and
+    to show a session list; other panels may remain empty.
+    """
+    now_ms = int(time.time() * 1000)
+    ts = time.strftime('%Y-%m-%d %H:%M:%S', time.localtime())
+
+    sessions_out = []
+    errors = []
+    for gw in agg_cfg.get("gateways", []):
+        base = gw["baseUrl"].rstrip("/")
+        url = f"{base}/tools/invoke"
+        headers = _gateway_headers_from_env(gw.get("tokenEnv", ""))
+        if gw.get("tokenEnv") and not headers:
+            errors.append(f"{gw['id']} missing env var: {gw['tokenEnv']} (for {base})")
+            continue
+
+        payload = {"tool": "sessions_list", "action": "json", "args": {}}
+        req = urllib.request.Request(
+            url,
+            data=json.dumps(payload).encode("utf-8"),
+            headers={**headers, "Content-Type": "application/json"},
+            method="POST",
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=8) as resp:
+                raw = resp.read().decode("utf-8", errors="ignore")
+            data = json.loads(raw)
+            if not data.get("ok"):
+                raise Exception(str(data.get("error") or "tools/invoke failed"))
+            details = (data.get("result") or {}).get("details") or {}
+            sessions = details.get("sessions") or []
+
+            for s in sessions:
+                # Map the gateway session shape into the dashboard session shape.
+                sessions_out.append({
+                    "name": (s.get("displayName") or s.get("key") or "session"),
+                    "sessionKey": s.get("key"),
+                    "type": s.get("kind"),
+                    "model": s.get("model"),
+                    "contextPct": None,
+                    "updatedAt": s.get("updatedAt"),
+                    "hostId": gw.get("id"),
+                    "hostLabel": gw.get("label"),
+                })
+        except Exception as e:
+            errors.append(f"{gw['id']} error: {e}")
+
+    # The main dashboard expects these top-level keys.
+    out = {
+        "botName": "OpenClaw Dashboard",
+        "botEmoji": "\U0001F99E",
+        "lastRefresh": ts,
+        "lastRefreshMs": now_ms,
+        "gateway": {
+            # This is an aggregate view; treat as online if we got any sessions
+            # or no configured-gateway errors.
+            "status": "online" if sessions_out or not errors else "offline",
+            "pid": None,
+            "uptime": None,
+            "memory": None,
+        },
+        "sessionCount": len(sessions_out),
+        "sessions": sessions_out,
+        "alerts": ([{"severity": "error", "message": msg} for msg in errors] if errors else []),
+        "crons": [],
+        "skills": [],
+        "agentConfig": {},
+        "totalCostToday": 0,
+        "subagentCostToday": 0,
+        "totalCostAllTime": 0,
+        "projectedMonthly": 0,
+        "costBreakdown": [],
+    }
+    return out
+
+
     gw = data.get("gateway") or {}
     ac = data.get("agentConfig") or {}
 
@@ -650,7 +730,12 @@ def resolve_config_value(key, cli_val, env_var, config_path, default):
 
 
 def run_refresh():
-    """Run refresh.sh with debounce and timeout."""
+    """Refresh dashboard data.json.
+
+    Prefer an HTTP-based refresh when LOBSTER_ROOM_GATEWAYS_JSON is configured,
+    so the dashboard can run on a different host than the OpenClaw gateway.
+    Fallback to refresh.sh (local filesystem) otherwise.
+    """
     global _last_refresh
     now = time.time()
 
@@ -658,6 +743,22 @@ def run_refresh():
         if now - _last_refresh < _debounce_sec:
             return True  # debounced, serve cached
 
+        # If lobster-room gateways are configured, generate a minimal dashboard
+        # payload via Tools Invoke instead of relying on local OpenClaw files.
+        try:
+            agg_cfg = load_gateway_aggregator_config()
+            if agg_cfg.get("gateways"):
+                data = build_dashboard_data_via_gateways(agg_cfg)
+                tmp = DATA_FILE + ".tmp"
+                with open(tmp, "w") as f:
+                    json.dump(data, f)
+                os.replace(tmp, DATA_FILE)
+                _last_refresh = time.time()
+                return True
+        except Exception as e:
+            print(f"[dashboard] gateway refresh failed: {e}")
+
+        # Fallback: local refresh script (original behavior)
         try:
             subprocess.run(
                 ["bash", REFRESH_SCRIPT],
