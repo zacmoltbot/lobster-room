@@ -597,7 +597,9 @@ class DashboardHandler(http.server.SimpleHTTPRequestHandler):
             return
 
         # Friendly routes
-        if self.path in ("/lobster-room", "/lobster-room/"):
+        if self.path in ("/", ""):
+            self.path = "/lobster-room.html"
+        elif self.path in ("/lobster-room", "/lobster-room/"):
             self.path = "/lobster-room.html"
 
         if self.path == "/api/refresh" or self.path.startswith("/api/refresh?"):
