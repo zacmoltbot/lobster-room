@@ -23,6 +23,10 @@ DIR = os.path.dirname(os.path.abspath(__file__))
 CONFIG_FILE = os.path.join(DIR, "config.json")
 
 
+def _debug_enabled():
+    return os.environ.get("LOBSTER_ROOM_DEBUG", "").strip().lower() in ("1", "true", "yes", "on")
+
+
 # Server-side cache to prevent UI disappearance / flapping when gateways time out.
 _cache_lock = threading.Lock()
 _cache_last_ok = None  # last successful payload
@@ -241,6 +245,9 @@ def build_lobster_room_state():
             continue
 
         try:
+            debug = {"gatewayId": gw.get("id"), "timingsMs": {}, "sessionCandidates": [], "decision": {}}
+            t0 = int(time.time() * 1000)
+
             # 1) sessions_list
             payload = {"tool": "sessions_list", "action": "json", "args": {}}
             req = urllib.request.Request(
@@ -249,8 +256,10 @@ def build_lobster_room_state():
                 headers={**headers, "Content-Type": "application/json"},
                 method="POST",
             )
+            t_list_0 = int(time.time() * 1000)
             with urllib.request.urlopen(req, timeout=4) as resp:
                 raw = resp.read().decode("utf-8", errors="ignore")
+            debug["timingsMs"]["sessions_list"] = int(time.time() * 1000) - t_list_0
             data = json.loads(raw)
             if not data.get("ok"):
                 raise Exception(str(data.get("error") or "tools/invoke failed"))
@@ -274,6 +283,19 @@ def build_lobster_room_state():
 
             # If we have enough signal already (recent activity), avoid extra RPC calls.
             recent_activity = bool(max_updated_at and (now_ms - max_updated_at) <= active_window_ms)
+
+            # Debug: show candidate sessions and the recency window used.
+            for s in sessions_sorted[:10]:
+                debug["sessionCandidates"].append({
+                    "key": s.get("key"),
+                    "kind": s.get("kind"),
+                    "updatedAt": int(s.get("updatedAt")) if isinstance(s.get("updatedAt"), (int, float)) else None,
+                })
+            debug["decision"]["recentActivity"] = recent_activity
+            debug["decision"]["maxUpdatedAt"] = max_updated_at
+            debug["decision"]["nowMs"] = now_ms
+            debug["decision"]["activeWindowMs"] = active_window_ms
+            debug["decision"]["toolTtlMs"] = tool_ttl_ms
             # Ensure we always include the resident session if present.
             resident_key = _pick_resident_session(sessions)
             if resident_key and all(s.get("key") != resident_key for s in top_sessions):
@@ -299,8 +321,10 @@ def build_lobster_room_state():
                         headers={**headers, "Content-Type": "application/json"},
                         method="POST",
                     )
+                    t_stat_0 = int(time.time() * 1000)
                     with urllib.request.urlopen(req2, timeout=2) as resp:
                         raw2 = resp.read().decode("utf-8", errors="ignore")
+                    debug.setdefault("timingsMs", {}).setdefault("session_status", {})[k] = int(time.time() * 1000) - t_stat_0
                     data2 = json.loads(raw2)
                     if not data2.get("ok"):
                         continue
@@ -349,8 +373,10 @@ def build_lobster_room_state():
                             headers={**headers, "Content-Type": "application/json"},
                             method="POST",
                         )
+                        t_hist_0 = int(time.time() * 1000)
                         with urllib.request.urlopen(req3, timeout=2) as resp:
                             raw3 = resp.read().decode("utf-8", errors="ignore")
+                        debug.setdefault("timingsMs", {}).setdefault("sessions_history", {})[k] = int(time.time() * 1000) - t_hist_0
                         data3 = json.loads(raw3)
                         if not data3.get("ok"):
                             continue
@@ -402,37 +428,52 @@ def build_lobster_room_state():
                 elif within_ttl and last_part_type == "text" and last_msg_role == "assistant":
                     state = "reply"
 
-            out["agents"].append(
-                {
-                    "id": f"resident@{gw['id']}",
-                    "hostId": gw["id"],
-                    "hostLabel": gw["label"],
-                    "name": gw.get("agentLabel") or gw.get("label") or gw["id"],
-                    "state": state,
-                    "meta": {
-                        "active": is_active,
-                        "activeWindowMs": active_window_ms,
-                        "toolTtlMs": tool_ttl_ms,
-                        "maxUpdatedAt": max_updated_at,
-                        "sessionKeyForStatus": session_key_for_status,
-                        "statusSessionKey": status_session_key,
-                        "historySessionKey": history_session_key,
-                        "queueDepth": queue_depth,
-                        "statusText": status_text,
-                        "historyTypes": history_types,
-                        "historyLastRole": last_msg_role,
-                        "historyLastType": last_part_type,
-                        "sessionCount": details.get("count"),
-                    },
-                }
-            )
+            debug["decision"]["queueDepth"] = queue_depth
+            debug["decision"]["statusSessionKey"] = status_session_key
+            debug["decision"]["historySessionKey"] = history_session_key
+            debug["decision"]["historyLastType"] = last_part_type
+            debug["decision"]["historyLastRole"] = last_msg_role
+            debug["decision"]["finalState"] = state
+            debug["timingsMs"]["gatewayTotal"] = int(time.time() * 1000) - t0
+
+            agent_payload = {
+                "id": f"resident@{gw['id']}",
+                "hostId": gw["id"],
+                "hostLabel": gw["label"],
+                "name": gw.get("agentLabel") or gw.get("label") or gw["id"],
+                "state": state,
+                "meta": {
+                    "active": is_active,
+                    "activeWindowMs": active_window_ms,
+                    "toolTtlMs": tool_ttl_ms,
+                    "maxUpdatedAt": max_updated_at,
+                    "sessionKeyForStatus": session_key_for_status,
+                    "statusSessionKey": status_session_key,
+                    "historySessionKey": history_session_key,
+                    "queueDepth": queue_depth,
+                    "statusText": status_text,
+                    "historyTypes": history_types,
+                    "historyLastRole": last_msg_role,
+                    "historyLastType": last_part_type,
+                    "sessionCount": details.get("count"),
+                },
+            }
+            if _debug_enabled():
+                agent_payload["debug"] = debug
+            out["agents"].append(agent_payload)
 
         except urllib.error.HTTPError as e:
             out["ok"] = False
-            out["errors"].append(f"{gw['id']} HTTP {e.code} at {url}")
+            msg = f"{gw['id']} HTTP {e.code} at {url}"
+            out["errors"].append(msg)
+            if _debug_enabled():
+                print(json.dumps({"kind": "lobster_room", "gatewayId": gw.get("id"), "error": msg}))
         except Exception as e:
             out["ok"] = False
-            out["errors"].append(f"{gw['id']} error: {e}")
+            msg = f"{gw['id']} error: {e}"
+            out["errors"].append(msg)
+            if _debug_enabled():
+                print(json.dumps({"kind": "lobster_room", "gatewayId": gw.get("id"), "error": msg}))
 
     # If we got at least one agent, treat as good and update cache.
     if out.get("ok") and out.get("agents"):
