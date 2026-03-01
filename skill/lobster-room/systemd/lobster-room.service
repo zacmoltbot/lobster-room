@@ -1,0 +1,19 @@
+[Unit]
+Description=Lobster Room (OpenClaw) portal
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+# Adjust this path to where you install the repo/files on the OpenClaw host.
+WorkingDirectory=/opt/lobster-room
+ExecStart=/usr/bin/python3 /opt/lobster-room/server.py --bind 127.0.0.1 --port 18080
+Restart=on-failure
+RestartSec=2
+
+# Environment
+# Put these in /etc/default/lobster-room (Debian/Ubuntu) or /etc/sysconfig/lobster-room (RHEL)
+EnvironmentFile=-/etc/default/lobster-room
+
+[Install]
+WantedBy=multi-user.target

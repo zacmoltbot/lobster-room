@@ -1,0 +1,23 @@
+version: "3.8"
+
+services:
+  lobster-room:
+    image: zacmoltbot/lobster-room:latest
+    # If you prefer building locally from the repo:
+    # build: ../..
+    container_name: lobster-room
+    restart: unless-stopped
+    environment:
+      # Required:
+      - LOBSTER_ROOM_GATEWAYS_JSON=${LOBSTER_ROOM_GATEWAYS_JSON}
+      # Optional:
+      - LOBSTER_ROOM_POLL_SECONDS=${LOBSTER_ROOM_POLL_SECONDS:-2}
+      - LOBSTER_ROOM_ACTIVE_WINDOW_MS=${LOBSTER_ROOM_ACTIVE_WINDOW_MS:-10000}
+      - LOBSTER_ROOM_TOOL_TTL_MS=${LOBSTER_ROOM_TOOL_TTL_MS:-8000}
+      - LOBSTER_ROOM_CACHE_TTL_MS=${LOBSTER_ROOM_CACHE_TTL_MS:-5000}
+      - LOBSTER_ROOM_DEBUG=${LOBSTER_ROOM_DEBUG:-0}
+      # Tokens referenced by tokenEnv in LOBSTER_ROOM_GATEWAYS_JSON:
+      # - OPENCLAW_GATEWAY_TOKEN=...
+    ports:
+      # Bind only on localhost for safety; use a reverse proxy to expose /lobster-room.
+      - "127.0.0.1:18080:8080"

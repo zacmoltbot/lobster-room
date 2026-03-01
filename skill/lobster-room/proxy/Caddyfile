@@ -1,0 +1,9 @@
+# Caddy reverse proxy snippet (example)
+# Mount Lobster Room under the SAME domain as OpenClaw:
+#   https://<openclaw-host>/lobster-room
+
+# Assumes Lobster Room listens on 127.0.0.1:18080
+
+handle_path /lobster-room* {
+  reverse_proxy 127.0.0.1:18080
+}

@@ -17,15 +17,22 @@ This repo is a fork of `mudrii/openclaw-dashboard` (MIT) and has been heavily si
   - `POST {baseUrl}/tools/invoke` with `{ "tool": "sessions_list", "action": "json", "args": {} }`
 - Tokens are never stored in this repo; they are read from environment variables.
 
-## Deploy (Zeabur / Docker)
+## Deploy (hosted) and Install (same host as OpenClaw)
 
-This repo ships with a Dockerfile.
+This repo ships with a Dockerfile for hosted deployments, and also includes a
+"skill-style" installer to run Lobster Room on the *same host* as OpenClaw and
+mount it under the same domain:
 
-Required env vars:
+- `https://<openclaw-host>/lobster-room`
 
-- `LOBSTER_ROOM_GATEWAYS_JSON`
-  - Supports object or array format.
-  - Object format example:
+### Option 1: Hosted (Docker platform)
+
+Set env vars (tokens via env only):
+
+- `LOBSTER_ROOM_GATEWAYS_JSON` (object or array format)
+- token env vars referenced by `tokenEnv` (e.g. `OPENCLAW_GATEWAY_TOKEN`)
+
+Object format example:
 
 ```json
 {
@@ -42,13 +49,13 @@ Required env vars:
 }
 ```
 
-- One token env var per gateway, referenced by `tokenEnv`.
-  - Example: `OPENCLAW_GATEWAY_TOKEN`
-
 Optional env vars:
 
 - `LOBSTER_ROOM_ACTIVE_WINDOW_MS` (default: 10000)
 - `LOBSTER_ROOM_POLL_SECONDS` (default: 2)
+- `LOBSTER_ROOM_TOOL_TTL_MS` (default: 8000)
+- `LOBSTER_ROOM_CACHE_TTL_MS` (default: 5000)
+- `LOBSTER_ROOM_DEBUG` (default: 0)
 
 Healthcheck:
 
@@ -56,11 +63,40 @@ Healthcheck:
 
 API:
 
-- `GET /api/lobster-room` -> aggregated JSON used by the portal
+- `GET /api/lobster-room`
 
-Portal:
+### Option 2: Same host as OpenClaw (recommended for "one URL")
 
-- `GET /` -> Lobster Room
+This repo contains install assets under:
+
+- `skill/lobster-room/`
+
+#### 2A) systemd install
+
+On your OpenClaw host (Linux), from the repo directory:
+
+```bash
+sudo ./skill/lobster-room/systemd/install-systemd.sh
+```
+
+This starts Lobster Room on:
+
+- `http://127.0.0.1:18080/`
+
+Then mount it under your OpenClaw domain using a reverse proxy.
+Templates:
+
+- Nginx: `skill/lobster-room/proxy/nginx.conf`
+- Caddy: `skill/lobster-room/proxy/Caddyfile`
+
+#### 2B) docker compose install
+
+Use:
+
+- `skill/lobster-room/docker/docker-compose.yml`
+
+Bind is localhost-only by default (`127.0.0.1:18080`) for safety; use a reverse
+proxy to expose `/lobster-room`.
 
 ## License / Attribution
 
