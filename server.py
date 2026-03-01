@@ -214,8 +214,35 @@ def build_lobster_room_state():
                 }
             )
 
+            # 3) sessions_history: infer finer-grained state from recent message types.
+            history_types = []
+            if session_key_for_status:
+                try:
+                    payload3 = {"tool": "sessions_history", "args": {"sessionKey": session_key_for_status, "limit": 12}}
+                    req3 = urllib.request.Request(
+                        url,
+                        data=json.dumps(payload3).encode("utf-8"),
+                        headers={**headers, "Content-Type": "application/json"},
+                        method="POST",
+                    )
+                    with urllib.request.urlopen(req3, timeout=8) as resp:
+                        raw3 = resp.read().decode("utf-8", errors="ignore")
+                    data3 = json.loads(raw3)
+                    if data3.get("ok"):
+                        msgs = ((data3.get("result") or {}).get("details") or {}).get("messages") or []
+                        for m in msgs:
+                            c = m.get("content")
+                            if isinstance(c, list):
+                                for part in c:
+                                    if isinstance(part, dict) and part.get("type"):
+                                        history_types.append(part.get("type"))
+                except Exception:
+                    # Best-effort: history is used for nicer bubbles, not correctness.
+                    history_types = history_types
+
             # v1 status:
-            # - If queue depth indicates pending work, show thinking.
+            # - Prefer queue depth (pending work).
+            # - If no pending work, use history types to label tool/reply.
             # - Else fallback to updatedAt recency.
             is_active = False
             if isinstance(queue_depth, int):
@@ -223,13 +250,20 @@ def build_lobster_room_state():
             if not is_active:
                 is_active = bool(max_updated_at and (now_ms - max_updated_at) <= active_window_ms)
 
+            state = "think" if is_active else "wait"
+            if not is_active:
+                if "toolCall" in history_types:
+                    state = "tool"
+                elif "text" in history_types:
+                    state = "reply"
+
             out["agents"].append(
                 {
                     "id": f"resident@{gw['id']}",
                     "hostId": gw["id"],
                     "hostLabel": gw["label"],
                     "name": gw.get("agentLabel") or gw.get("label") or gw["id"],
-                    "state": "think" if is_active else "wait",
+                    "state": state,
                     "meta": {
                         "active": is_active,
                         "activeWindowMs": active_window_ms,
@@ -237,6 +271,7 @@ def build_lobster_room_state():
                         "sessionKeyForStatus": session_key_for_status,
                         "queueDepth": queue_depth,
                         "statusText": status_text,
+                        "historyTypes": history_types,
                         "sessionCount": details.get("count"),
                     },
                 }
