@@ -140,8 +140,10 @@ def build_lobster_room_state():
 
     if not gateways:
         out["ok"] = False
-        out["errors"].append("No gateways configured. Set LOBSTER_ROOM_GATEWAYS_JSON or config.json gateways[]")
+        out["errors"].append("No gateways configured. Set LOBSTER_ROOM_GATEWAYS_JSON")
         return out
+
+    now_ms = int(time.time() * 1000)
 
     for gw in gateways:
         base = gw["baseUrl"]
@@ -153,6 +155,7 @@ def build_lobster_room_state():
             continue
 
         try:
+            # 1) sessions_list: used for max(updatedAt)
             payload = {"tool": "sessions_list", "action": "json", "args": {}}
             req = urllib.request.Request(
                 url,
@@ -162,23 +165,43 @@ def build_lobster_room_state():
             )
             with urllib.request.urlopen(req, timeout=8) as resp:
                 raw = resp.read().decode("utf-8", errors="ignore")
-            try:
-                data = json.loads(raw)
-            except json.JSONDecodeError:
-                snippet = raw[:200].replace("\n", " ")
-                raise Exception(f"Non-JSON response from tools/invoke: {snippet}")
+            data = json.loads(raw)
             if not data.get("ok"):
                 raise Exception(str(data.get("error") or "tools/invoke failed"))
             details = (data.get("result") or {}).get("details") or {}
             sessions = details.get("sessions") or []
 
             max_updated_at = None
+            session_key_for_status = None
             for s in sessions:
                 ts = s.get("updatedAt")
                 if isinstance(ts, (int, float)):
                     ts = int(ts)
                     if max_updated_at is None or ts > max_updated_at:
                         max_updated_at = ts
+                        session_key_for_status = s.get("key")
+
+            # 2) session_status: used for queue depth + status text (more accurate than updatedAt)
+            queue_depth = None
+            status_text = None
+            if session_key_for_status:
+                payload2 = {"tool": "session_status", "args": {"sessionKey": session_key_for_status}}
+                req2 = urllib.request.Request(
+                    url,
+                    data=json.dumps(payload2).encode("utf-8"),
+                    headers={**headers, "Content-Type": "application/json"},
+                    method="POST",
+                )
+                with urllib.request.urlopen(req2, timeout=8) as resp:
+                    raw2 = resp.read().decode("utf-8", errors="ignore")
+                data2 = json.loads(raw2)
+                if data2.get("ok"):
+                    det2 = (data2.get("result") or {}).get("details") or {}
+                    status_text = det2.get("statusText")
+                    if isinstance(det2.get("queueDepth"), (int, float)):
+                        queue_depth = int(det2.get("queueDepth"))
+                    elif isinstance(det2.get("queue"), dict) and isinstance(det2["queue"].get("depth"), (int, float)):
+                        queue_depth = int(det2["queue"].get("depth"))
 
             out["gateways"].append(
                 {
@@ -191,8 +214,15 @@ def build_lobster_room_state():
                 }
             )
 
-            now_ms = int(time.time() * 1000)
-            is_active = bool(max_updated_at and (now_ms - max_updated_at) <= active_window_ms)
+            # v1 status:
+            # - If queue depth indicates pending work, show thinking.
+            # - Else fallback to updatedAt recency.
+            is_active = False
+            if isinstance(queue_depth, int):
+                is_active = queue_depth > 0
+            if not is_active:
+                is_active = bool(max_updated_at and (now_ms - max_updated_at) <= active_window_ms)
+
             out["agents"].append(
                 {
                     "id": f"resident@{gw['id']}",
@@ -204,6 +234,9 @@ def build_lobster_room_state():
                         "active": is_active,
                         "activeWindowMs": active_window_ms,
                         "maxUpdatedAt": max_updated_at,
+                        "sessionKeyForStatus": session_key_for_status,
+                        "queueDepth": queue_depth,
+                        "statusText": status_text,
                         "sessionCount": details.get("count"),
                     },
                 }
