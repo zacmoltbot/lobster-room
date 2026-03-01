@@ -196,32 +196,12 @@
         }
         throw new Error('HTTP ' + res.status);
       }catch(e){
-        // Fallback mock (kept for offline dev / early MVP)
-        if(MODEL.hosts.length === 0){
-          MODEL.hosts = [
-            {id:'host-a', label:'host-a', zone:'tl'},
-            {id:'host-b', label:'host-b', zone:'tr'},
-            {id:'host-c', label:'host-c', zone:'bl'},
-            {id:'host-d', label:'host-d', zone:'br'},
-          ];
-        }
-        MODEL.agents = [
-          {id:'main@host-a', host:'host-a', name:'main', x:22, y:28, state:'reply'},
-          {id:'work@host-a', host:'host-a', name:'work', x:30, y:18, state:'think'},
-          {id:'group@host-b', host:'host-b', name:'group', x:74, y:24, state:'tool'},
-          {id:'notion@host-c', host:'host-c', name:'notion-bot', x:26, y:76, state:'wait'},
-          {id:'cron@host-d', host:'host-d', name:'cron', x:78, y:74, state:'wait'},
-        ];
-        // random churn so it still looks alive
-        for(const a of MODEL.agents){
-          if(Math.random() < 0.25){
-            a.state = STATES[Math.floor(Math.random()*STATES.length)].key;
-          }
-        }
-        renderAgents();
-        document.getElementById('ts').textContent = 'Updated (mock): ' + new Date().toLocaleString();
+        // No mock data in hosted portal mode: show an explicit error state.
+        const room = document.getElementById('room');
+        Array.from(room.querySelectorAll('.lobster')).forEach(n=>n.remove());
+        document.getElementById('ts').textContent = 'Update failed: ' + new Date().toLocaleString();
         document.getElementById('api').textContent = 'API error: ' + (e && e.message ? e.message : 'error');
-        document.getElementById('data-source').textContent = 'mock';
+        document.getElementById('data-source').textContent = 'error';
       }
     }
 

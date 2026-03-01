@@ -24,11 +24,8 @@ CONFIG_FILE = os.path.join(DIR, "config.json")
 
 
 def load_config():
-    try:
-        with open(CONFIG_FILE, "r") as f:
-            return json.load(f)
-    except (FileNotFoundError, json.JSONDecodeError):
-        return {}
+    # This portal is designed for env-first configuration.
+    return {}
 
 
 def load_gateway_aggregator_config():
