@@ -23,6 +23,12 @@ DIR = os.path.dirname(os.path.abspath(__file__))
 CONFIG_FILE = os.path.join(DIR, "config.json")
 
 
+# Server-side cache to prevent UI disappearance / flapping when gateways time out.
+_cache_lock = threading.Lock()
+_cache_last_ok = None  # last successful payload
+_cache_last_ok_ms = 0
+
+
 def load_config():
     # This portal is designed for env-first configuration.
     return {}
@@ -136,6 +142,20 @@ def _tool_ttl_ms_from_env_or_cfg(cfg):
         return 8000
 
 
+def _cache_ttl_ms_from_env_or_cfg(cfg):
+    env = os.environ.get("LOBSTER_ROOM_CACHE_TTL_MS", "").strip()
+    if env:
+        try:
+            return max(0, int(env))
+        except ValueError:
+            pass
+    # Default: 1500ms gives stability without making it feel laggy.
+    try:
+        return max(0, int(cfg.get("cacheTtlMs", 1500)))
+    except (TypeError, ValueError):
+        return 1500
+
+
 def _pick_resident_session(sessions):
     """Pick a stable "resident" sessionKey to represent the agent.
 
@@ -183,7 +203,17 @@ def build_lobster_room_state():
     gateways = agg_cfg.get("gateways", [])
     active_window_ms = _active_window_ms_from_env_or_cfg(agg_cfg)
     tool_ttl_ms = _tool_ttl_ms_from_env_or_cfg(agg_cfg)
+    cache_ttl_ms = _cache_ttl_ms_from_env_or_cfg(agg_cfg)
     poll_seconds = _poll_seconds_from_env_or_cfg(agg_cfg)
+
+    # Cache hit: return last successful payload to avoid UI flapping.
+    now_ms = int(time.time() * 1000)
+    with _cache_lock:
+        if _cache_last_ok and (now_ms - _cache_last_ok_ms) <= cache_ttl_ms:
+            cached = dict(_cache_last_ok)
+            cached["cached"] = True
+            cached["cacheAgeMs"] = now_ms - _cache_last_ok_ms
+            return cached
 
     out = {
         "ok": True,
@@ -199,7 +229,7 @@ def build_lobster_room_state():
         out["errors"].append("No gateways configured. Set LOBSTER_ROOM_GATEWAYS_JSON")
         return out
 
-    now_ms = int(time.time() * 1000)
+    # now_ms already computed above (used for cache + status heuristics)
 
     for gw in gateways:
         base = gw["baseUrl"]
@@ -240,6 +270,9 @@ def build_lobster_room_state():
             sessions_sorted = [s for s in sessions if isinstance(s.get("key"), str) and isinstance(s.get("updatedAt"), (int, float))]
             sessions_sorted.sort(key=lambda s: int(s.get("updatedAt")), reverse=True)
             top_sessions = sessions_sorted[:5]
+
+            # If we have enough signal already (recent activity), avoid extra RPC calls.
+            recent_activity = bool(max_updated_at and (now_ms - max_updated_at) <= active_window_ms)
             # Ensure we always include the resident session if present.
             resident_key = _pick_resident_session(sessions)
             if resident_key and all(s.get("key") != resident_key for s in top_sessions):
@@ -393,6 +426,25 @@ def build_lobster_room_state():
         except Exception as e:
             out["ok"] = False
             out["errors"].append(f"{gw['id']} error: {e}")
+
+    # If we got at least one agent, treat as good and update cache.
+    if out.get("ok") and out.get("agents"):
+        with _cache_lock:
+            globals()["_cache_last_ok"] = out
+            globals()["_cache_last_ok_ms"] = now_ms
+        out["cached"] = False
+        out["cacheAgeMs"] = 0
+        return out
+
+    # If current fetch failed but we have last-known-good, return cached to prevent UI disappearing.
+    with _cache_lock:
+        if _cache_last_ok:
+            cached = dict(_cache_last_ok)
+            cached["cached"] = True
+            cached["cacheAgeMs"] = now_ms - _cache_last_ok_ms
+            cached.setdefault("errors", [])
+            cached["errors"] = list(cached["errors"]) + list(out.get("errors") or [])
+            return cached
 
     return out
 
