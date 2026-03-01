@@ -123,6 +123,19 @@ def _poll_seconds_from_env_or_cfg(cfg):
         return 2
 
 
+def _tool_ttl_ms_from_env_or_cfg(cfg):
+    env = os.environ.get("LOBSTER_ROOM_TOOL_TTL_MS", "").strip()
+    if env:
+        try:
+            return max(0, int(env))
+        except ValueError:
+            pass
+    try:
+        return max(0, int(cfg.get("toolTtlMs", 8000)))
+    except (TypeError, ValueError):
+        return 8000
+
+
 def _pick_resident_session(sessions):
     """Pick a stable "resident" sessionKey to represent the agent.
 
@@ -169,6 +182,7 @@ def build_lobster_room_state():
     agg_cfg = load_gateway_aggregator_config()
     gateways = agg_cfg.get("gateways", [])
     active_window_ms = _active_window_ms_from_env_or_cfg(agg_cfg)
+    tool_ttl_ms = _tool_ttl_ms_from_env_or_cfg(agg_cfg)
     poll_seconds = _poll_seconds_from_env_or_cfg(agg_cfg)
 
     out = {
@@ -298,9 +312,11 @@ def build_lobster_room_state():
 
             state = "think" if is_active else "wait"
             if not is_active:
-                if last_part_type == "toolCall":
+                # Avoid sticky tool/reply: only show these transient states for a short TTL.
+                within_ttl = bool(max_updated_at and (now_ms - max_updated_at) <= tool_ttl_ms)
+                if within_ttl and last_part_type == "toolCall":
                     state = "tool"
-                elif last_part_type == "text" and last_msg_role == "assistant":
+                elif within_ttl and last_part_type == "text" and last_msg_role == "assistant":
                     state = "reply"
 
             out["agents"].append(
@@ -313,6 +329,7 @@ def build_lobster_room_state():
                     "meta": {
                         "active": is_active,
                         "activeWindowMs": active_window_ms,
+                        "toolTtlMs": tool_ttl_ms,
                         "maxUpdatedAt": max_updated_at,
                         "sessionKeyForStatus": session_key_for_status,
                         "queueDepth": queue_depth,
