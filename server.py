@@ -249,7 +249,7 @@ def build_lobster_room_state():
                 headers={**headers, "Content-Type": "application/json"},
                 method="POST",
             )
-            with urllib.request.urlopen(req, timeout=5) as resp:
+            with urllib.request.urlopen(req, timeout=4) as resp:
                 raw = resp.read().decode("utf-8", errors="ignore")
             data = json.loads(raw)
             if not data.get("ok"):
@@ -283,37 +283,42 @@ def build_lobster_room_state():
             session_key_for_status = resident_key or (top_sessions[0].get("key") if top_sessions else None)
 
             # 2) session_status (aggregate over top sessions)
+            # If we already know there's recent activity, we can skip expensive per-session calls.
             queue_depth = None
             status_text = None
             status_session_key = None
-            for ss in top_sessions:
-                k = ss.get("key")
-                if not isinstance(k, str) or not k:
-                    continue
-                payload2 = {"tool": "session_status", "args": {"sessionKey": k}}
-                req2 = urllib.request.Request(
-                    url,
-                    data=json.dumps(payload2).encode("utf-8"),
-                    headers={**headers, "Content-Type": "application/json"},
-                    method="POST",
-                )
-                with urllib.request.urlopen(req2, timeout=3) as resp:
-                    raw2 = resp.read().decode("utf-8", errors="ignore")
-                data2 = json.loads(raw2)
-                if not data2.get("ok"):
-                    continue
-                det2 = (data2.get("result") or {}).get("details") or {}
-                qd = None
-                if isinstance(det2.get("queueDepth"), (int, float)):
-                    qd = int(det2.get("queueDepth"))
-                elif isinstance(det2.get("queue"), dict) and isinstance(det2["queue"].get("depth"), (int, float)):
-                    qd = int(det2.get("queue").get("depth"))
-                # Choose the session with the highest queue depth as the best signal.
-                if isinstance(qd, int):
-                    if queue_depth is None or qd > queue_depth:
-                        queue_depth = qd
-                        status_text = det2.get("statusText")
-                        status_session_key = k
+            if not recent_activity:
+                for ss in top_sessions:
+                    k = ss.get("key")
+                    if not isinstance(k, str) or not k:
+                        continue
+                    payload2 = {"tool": "session_status", "args": {"sessionKey": k}}
+                    req2 = urllib.request.Request(
+                        url,
+                        data=json.dumps(payload2).encode("utf-8"),
+                        headers={**headers, "Content-Type": "application/json"},
+                        method="POST",
+                    )
+                    with urllib.request.urlopen(req2, timeout=2) as resp:
+                        raw2 = resp.read().decode("utf-8", errors="ignore")
+                    data2 = json.loads(raw2)
+                    if not data2.get("ok"):
+                        continue
+                    det2 = (data2.get("result") or {}).get("details") or {}
+                    qd = None
+                    if isinstance(det2.get("queueDepth"), (int, float)):
+                        qd = int(det2.get("queueDepth"))
+                    elif isinstance(det2.get("queue"), dict) and isinstance(det2.get("queue").get("depth"), (int, float)):
+                        qd = int(det2.get("queue").get("depth"))
+                    # Choose the session with the highest queue depth as the best signal.
+                    if isinstance(qd, int):
+                        if queue_depth is None or qd > queue_depth:
+                            queue_depth = qd
+                            status_text = det2.get("statusText")
+                            status_session_key = k
+                        # Early-exit: any backlog means "active".
+                        if qd > 0:
+                            break
 
             out["gateways"].append(
                 {
@@ -331,54 +336,55 @@ def build_lobster_room_state():
             last_msg_role = None
             last_part_type = None
             history_session_key = None
-            for ss in top_sessions:
-                k = ss.get("key")
-                if not isinstance(k, str) or not k:
-                    continue
-                try:
-                    payload3 = {"tool": "sessions_history", "args": {"sessionKey": k, "limit": 12}}
-                    req3 = urllib.request.Request(
-                        url,
-                        data=json.dumps(payload3).encode("utf-8"),
-                        headers={**headers, "Content-Type": "application/json"},
-                        method="POST",
-                    )
-                    with urllib.request.urlopen(req3, timeout=3) as resp:
-                        raw3 = resp.read().decode("utf-8", errors="ignore")
-                    data3 = json.loads(raw3)
-                    if not data3.get("ok"):
+            if not recent_activity:
+                for ss in top_sessions:
+                    k = ss.get("key")
+                    if not isinstance(k, str) or not k:
                         continue
-                    msgs = ((data3.get("result") or {}).get("details") or {}).get("messages") or []
-                    if not msgs:
-                        continue
-                    last = msgs[0]
-                    c = last.get("content")
-                    # Extract first part type.
-                    lpt = None
-                    types = []
-                    if isinstance(c, list):
-                        for part in c:
-                            if isinstance(part, dict) and part.get("type"):
-                                types.append(part.get("type"))
-                                if lpt is None:
-                                    lpt = part.get("type")
-                    role = last.get("role")
+                    try:
+                        payload3 = {"tool": "sessions_history", "args": {"sessionKey": k, "limit": 8}}
+                        req3 = urllib.request.Request(
+                            url,
+                            data=json.dumps(payload3).encode("utf-8"),
+                            headers={**headers, "Content-Type": "application/json"},
+                            method="POST",
+                        )
+                        with urllib.request.urlopen(req3, timeout=2) as resp:
+                            raw3 = resp.read().decode("utf-8", errors="ignore")
+                        data3 = json.loads(raw3)
+                        if not data3.get("ok"):
+                            continue
+                        msgs = ((data3.get("result") or {}).get("details") or {}).get("messages") or []
+                        if not msgs:
+                            continue
+                        last = msgs[0]
+                        c = last.get("content")
+                        # Extract first part type.
+                        lpt = None
+                        types = []
+                        if isinstance(c, list):
+                            for part in c:
+                                if isinstance(part, dict) and part.get("type"):
+                                    types.append(part.get("type"))
+                                    if lpt is None:
+                                        lpt = part.get("type")
+                        role = last.get("role")
 
-                    # Prefer toolCall, then assistant text, otherwise keep searching.
-                    if lpt == "toolCall":
-                        history_session_key = k
-                        history_types = types
-                        last_part_type = lpt
-                        last_msg_role = role
-                        break
-                    if lpt == "text" and role == "assistant" and last_part_type is None:
-                        history_session_key = k
-                        history_types = types
-                        last_part_type = lpt
-                        last_msg_role = role
-                        # don't break; toolCall (if found later) should win
-                except Exception:
-                    continue
+                        # Prefer toolCall, then assistant text, otherwise keep searching.
+                        if lpt == "toolCall":
+                            history_session_key = k
+                            history_types = types
+                            last_part_type = lpt
+                            last_msg_role = role
+                            break
+                        if lpt == "text" and role == "assistant" and last_part_type is None:
+                            history_session_key = k
+                            history_types = types
+                            last_part_type = lpt
+                            last_msg_role = role
+                            # don't break; toolCall (if found later) should win
+                    except Exception:
+                        continue
 
             # Status selection
             is_active = False
