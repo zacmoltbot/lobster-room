@@ -149,7 +149,7 @@ def build_lobster_room_state():
         headers = _gateway_headers_from_env(gw.get("tokenEnv", ""))
         if gw.get("tokenEnv") and not headers:
             out["ok"] = False
-            out["errors"].append(f"{gw[id]} missing env var: {gw[tokenEnv]} (for {base})")
+            out["errors"].append(f"{gw['id']} missing env var: {gw['tokenEnv']} (for {base})")
             continue
 
         try:
@@ -195,7 +195,7 @@ def build_lobster_room_state():
             is_active = bool(max_updated_at and (now_ms - max_updated_at) <= active_window_ms)
             out["agents"].append(
                 {
-                    "id": f"resident@{gw[id]}",
+                    "id": f"resident@{gw['id']}",
                     "hostId": gw["id"],
                     "hostLabel": gw["label"],
                     "name": gw.get("agentLabel") or gw.get("label") or gw["id"],
@@ -211,10 +211,10 @@ def build_lobster_room_state():
 
         except urllib.error.HTTPError as e:
             out["ok"] = False
-            out["errors"].append(f"{gw[id]} HTTP {e.code} at {url}")
+            out["errors"].append(f"{gw['id']} HTTP {e.code} at {url}")
         except Exception as e:
             out["ok"] = False
-            out["errors"].append(f"{gw[id]} error: {e}")
+            out["errors"].append(f"{gw['id']} error: {e}")
 
     return out
 
