@@ -149,9 +149,9 @@ def _cache_ttl_ms_from_env_or_cfg(cfg):
             return max(0, int(env))
         except ValueError:
             pass
-    # Default: 1500ms gives stability without making it feel laggy.
+    # Default: 5000ms gives stability and reduces gateway load/timeouts.
     try:
-        return max(0, int(cfg.get("cacheTtlMs", 1500)))
+        return max(0, int(cfg.get("cacheTtlMs", 5000)))
     except (TypeError, ValueError):
         return 1500
 
@@ -249,7 +249,7 @@ def build_lobster_room_state():
                 headers={**headers, "Content-Type": "application/json"},
                 method="POST",
             )
-            with urllib.request.urlopen(req, timeout=8) as resp:
+            with urllib.request.urlopen(req, timeout=5) as resp:
                 raw = resp.read().decode("utf-8", errors="ignore")
             data = json.loads(raw)
             if not data.get("ok"):
@@ -269,7 +269,8 @@ def build_lobster_room_state():
             # For richer status, don't rely on a single session; evaluate a few.
             sessions_sorted = [s for s in sessions if isinstance(s.get("key"), str) and isinstance(s.get("updatedAt"), (int, float))]
             sessions_sorted.sort(key=lambda s: int(s.get("updatedAt")), reverse=True)
-            top_sessions = sessions_sorted[:5]
+            # Keep this small to avoid timeouts (each extra session triggers extra /tools/invoke calls).
+            top_sessions = sessions_sorted[:2]
 
             # If we have enough signal already (recent activity), avoid extra RPC calls.
             recent_activity = bool(max_updated_at and (now_ms - max_updated_at) <= active_window_ms)
@@ -296,7 +297,7 @@ def build_lobster_room_state():
                     headers={**headers, "Content-Type": "application/json"},
                     method="POST",
                 )
-                with urllib.request.urlopen(req2, timeout=8) as resp:
+                with urllib.request.urlopen(req2, timeout=3) as resp:
                     raw2 = resp.read().decode("utf-8", errors="ignore")
                 data2 = json.loads(raw2)
                 if not data2.get("ok"):
@@ -342,7 +343,7 @@ def build_lobster_room_state():
                         headers={**headers, "Content-Type": "application/json"},
                         method="POST",
                     )
-                    with urllib.request.urlopen(req3, timeout=8) as resp:
+                    with urllib.request.urlopen(req3, timeout=3) as resp:
                         raw3 = resp.read().decode("utf-8", errors="ignore")
                     data3 = json.loads(raw3)
                     if not data3.get("ok"):
