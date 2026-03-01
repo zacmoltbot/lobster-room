@@ -123,6 +123,48 @@ def _poll_seconds_from_env_or_cfg(cfg):
         return 2
 
 
+def _pick_resident_session(sessions):
+    """Pick a stable "resident" sessionKey to represent the agent.
+
+    Heuristics (in order):
+    - Prefer agent:main:main (most stable for the resident agent)
+    - Avoid cron sessions
+    - Otherwise pick the most recently updated session
+    """
+    if not sessions:
+        return None
+
+    # Prefer explicit resident session.
+    for s in sessions:
+        k = s.get("key")
+        if isinstance(k, str) and k == "agent:main:main":
+            return k
+
+    # Prefer non-cron sessions.
+    best = None
+    best_ts = None
+    for s in sessions:
+        k = s.get("key")
+        kind = (s.get("kind") or "").lower()
+        ts = s.get("updatedAt")
+        if not isinstance(k, str) or not isinstance(ts, (int, float)):
+            continue
+        if kind == "cron":
+            continue
+        ts = int(ts)
+        if best is None or ts > best_ts:
+            best = k
+            best_ts = ts
+
+    if best:
+        return best
+
+    # Fallback: latest by updatedAt.
+    sessions2 = [s for s in sessions if isinstance(s.get("key"), str) and isinstance(s.get("updatedAt"), (int, float))]
+    if not sessions2:
+        return None
+    sessions2.sort(key=lambda s: int(s.get("updatedAt")), reverse=True)
+    return sessions2[0].get("key")
 def build_lobster_room_state():
     agg_cfg = load_gateway_aggregator_config()
     gateways = agg_cfg.get("gateways", [])
@@ -155,7 +197,7 @@ def build_lobster_room_state():
             continue
 
         try:
-            # 1) sessions_list: used for max(updatedAt)
+            # 1) sessions_list
             payload = {"tool": "sessions_list", "action": "json", "args": {}}
             req = urllib.request.Request(
                 url,
@@ -171,17 +213,19 @@ def build_lobster_room_state():
             details = (data.get("result") or {}).get("details") or {}
             sessions = details.get("sessions") or []
 
+            # For "activity window" we still use the max updatedAt across all sessions.
             max_updated_at = None
-            session_key_for_status = None
             for s in sessions:
                 ts = s.get("updatedAt")
                 if isinstance(ts, (int, float)):
                     ts = int(ts)
                     if max_updated_at is None or ts > max_updated_at:
                         max_updated_at = ts
-                        session_key_for_status = s.get("key")
 
-            # 2) session_status: used for queue depth + status text (more accurate than updatedAt)
+            # For richer status, pick a stable resident sessionKey.
+            session_key_for_status = _pick_resident_session(sessions)
+
+            # 2) session_status
             queue_depth = None
             status_text = None
             if session_key_for_status:
@@ -214,8 +258,7 @@ def build_lobster_room_state():
                 }
             )
 
-            # 3) sessions_history: infer finer-grained state from the *latest* message.
-            # We do NOT scan the whole history for toolCall/text because that tends to "stick".
+            # 3) sessions_history (latest message only)
             history_types = []
             last_msg_role = None
             last_part_type = None
@@ -241,16 +284,12 @@ def build_lobster_room_state():
                                 for part in c:
                                     if isinstance(part, dict) and part.get("type"):
                                         history_types.append(part.get("type"))
-                                        # Use the first part's type as the latest signal.
                                         if last_part_type is None:
                                             last_part_type = part.get("type")
                 except Exception:
                     pass
 
-            # v1 status:
-            # - Prefer queue depth (pending work) -> thinking.
-            # - Else use a short-lived latest-message heuristic (tool/reply).
-            # - Else fallback to updatedAt recency.
+            # Status selection
             is_active = False
             if isinstance(queue_depth, int):
                 is_active = queue_depth > 0
