@@ -214,8 +214,11 @@ def build_lobster_room_state():
                 }
             )
 
-            # 3) sessions_history: infer finer-grained state from recent message types.
+            # 3) sessions_history: infer finer-grained state from the *latest* message.
+            # We do NOT scan the whole history for toolCall/text because that tends to "stick".
             history_types = []
+            last_msg_role = None
+            last_part_type = None
             if session_key_for_status:
                 try:
                     payload3 = {"tool": "sessions_history", "args": {"sessionKey": session_key_for_status, "limit": 12}}
@@ -230,19 +233,23 @@ def build_lobster_room_state():
                     data3 = json.loads(raw3)
                     if data3.get("ok"):
                         msgs = ((data3.get("result") or {}).get("details") or {}).get("messages") or []
-                        for m in msgs:
-                            c = m.get("content")
+                        if msgs:
+                            last = msgs[0]
+                            last_msg_role = last.get("role")
+                            c = last.get("content")
                             if isinstance(c, list):
                                 for part in c:
                                     if isinstance(part, dict) and part.get("type"):
                                         history_types.append(part.get("type"))
+                                        # Use the first part's type as the latest signal.
+                                        if last_part_type is None:
+                                            last_part_type = part.get("type")
                 except Exception:
-                    # Best-effort: history is used for nicer bubbles, not correctness.
-                    history_types = history_types
+                    pass
 
             # v1 status:
-            # - Prefer queue depth (pending work).
-            # - If no pending work, use history types to label tool/reply.
+            # - Prefer queue depth (pending work) -> thinking.
+            # - Else use a short-lived latest-message heuristic (tool/reply).
             # - Else fallback to updatedAt recency.
             is_active = False
             if isinstance(queue_depth, int):
@@ -252,9 +259,9 @@ def build_lobster_room_state():
 
             state = "think" if is_active else "wait"
             if not is_active:
-                if "toolCall" in history_types:
+                if last_part_type == "toolCall":
                     state = "tool"
-                elif "text" in history_types:
+                elif last_part_type == "text" and last_msg_role == "assistant":
                     state = "reply"
 
             out["agents"].append(
@@ -272,6 +279,8 @@ def build_lobster_room_state():
                         "queueDepth": queue_depth,
                         "statusText": status_text,
                         "historyTypes": history_types,
+                        "historyLastRole": last_msg_role,
+                        "historyLastType": last_part_type,
                         "sessionCount": details.get("count"),
                     },
                 }
