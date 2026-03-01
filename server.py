@@ -32,6 +32,10 @@ _cache_lock = threading.Lock()
 _cache_last_ok = None  # last successful payload
 _cache_last_ok_ms = 0
 
+# Transient state cache: shows short-lived tool/reply even if updatedAt doesn't move.
+_transient_lock = threading.Lock()
+_transient = {}  # gatewayId -> {state, expiresAtMs, observedAtMs, sessionKey}
+
 
 def load_config():
     # This portal is designed for env-first configuration.
@@ -428,11 +432,42 @@ def build_lobster_room_state():
                 elif within_ttl and last_part_type == "text" and last_msg_role == "assistant":
                     state = "reply"
 
+            # Record transient observation (tool/reply) keyed by gateway.
+            gwid = gw.get("id")
+            if gwid and last_part_type in ("toolCall", "text"):
+                transient_state = None
+                if last_part_type == "toolCall":
+                    transient_state = "tool"
+                elif last_part_type == "text" and last_msg_role == "assistant":
+                    transient_state = "reply"
+                if transient_state:
+                    with _transient_lock:
+                        _transient[gwid] = {
+                            "state": transient_state,
+                            "observedAtMs": now_ms,
+                            "expiresAtMs": now_ms + tool_ttl_ms,
+                            "sessionKey": history_session_key,
+                        }
+
+            # Apply transient state if still valid.
+            transient_applied = False
+            if gwid:
+                with _transient_lock:
+                    tr = _transient.get(gwid)
+                if tr and now_ms <= int(tr.get("expiresAtMs") or 0):
+                    # Override only when we are otherwise idle-ish.
+                    if state == "wait":
+                        state = tr.get("state") or state
+                        transient_applied = True
+
             debug["decision"]["queueDepth"] = queue_depth
             debug["decision"]["statusSessionKey"] = status_session_key
             debug["decision"]["historySessionKey"] = history_session_key
             debug["decision"]["historyLastType"] = last_part_type
             debug["decision"]["historyLastRole"] = last_msg_role
+            debug["decision"]["transientState"] = (tr.get("state") if (gwid and 'tr' in locals() and tr) else None)
+            debug["decision"]["transientExpiresAtMs"] = (tr.get("expiresAtMs") if (gwid and 'tr' in locals() and tr) else None)
+            debug["decision"]["transientApplied"] = transient_applied
             debug["decision"]["finalState"] = state
             debug["timingsMs"]["gatewayTotal"] = int(time.time() * 1000) - t0
 
