@@ -433,8 +433,13 @@ def build_lobster_room_state():
                     state = "reply"
 
             # Record transient observation (tool/reply) keyed by gateway.
+            # IMPORTANT: only extend TTL when we see a NEW event fingerprint;
+            # otherwise the state can stick forever.
             gwid = gw.get("id")
+            fingerprint = None
             if gwid and last_part_type in ("toolCall", "text"):
+                # Best-effort fingerprint from the latest message signal.
+                fingerprint = f"{history_session_key}|{last_msg_role}|{last_part_type}|{','.join(history_types[:2])}"
                 transient_state = None
                 if last_part_type == "toolCall":
                     transient_state = "tool"
@@ -442,12 +447,17 @@ def build_lobster_room_state():
                     transient_state = "reply"
                 if transient_state:
                     with _transient_lock:
-                        _transient[gwid] = {
-                            "state": transient_state,
-                            "observedAtMs": now_ms,
-                            "expiresAtMs": now_ms + tool_ttl_ms,
-                            "sessionKey": history_session_key,
-                        }
+                        prev = _transient.get(gwid)
+                        prev_fp = prev.get("fingerprint") if isinstance(prev, dict) else None
+                        if prev_fp != fingerprint:
+                            _transient[gwid] = {
+                                "state": transient_state,
+                                "observedAtMs": now_ms,
+                                "firstObservedAtMs": (prev.get("firstObservedAtMs") if isinstance(prev, dict) and prev.get("state") == transient_state else now_ms),
+                                "expiresAtMs": now_ms + tool_ttl_ms,
+                                "sessionKey": history_session_key,
+                                "fingerprint": fingerprint,
+                            }
 
             # Apply transient state if still valid.
             transient_applied = False
@@ -457,8 +467,16 @@ def build_lobster_room_state():
                 if tr and now_ms <= int(tr.get("expiresAtMs") or 0):
                     # Override only when we are otherwise idle-ish.
                     if state == "wait":
-                        state = tr.get("state") or state
-                        transient_applied = True
+                        # Safety cap: don't allow a transient state to remain forever.
+                        max_ms = int(os.environ.get("LOBSTER_ROOM_TRANSIENT_MAX_MS", "15000") or "15000")
+                        first_ms = int(tr.get("firstObservedAtMs") or tr.get("observedAtMs") or now_ms)
+                        if (now_ms - first_ms) <= max_ms:
+                            state = tr.get("state") or state
+                            transient_applied = True
+                        else:
+                            # Past cap: clear it.
+                            with _transient_lock:
+                                _transient.pop(gwid, None)
 
             debug["decision"]["queueDepth"] = queue_depth
             debug["decision"]["statusSessionKey"] = status_session_key
@@ -467,6 +485,8 @@ def build_lobster_room_state():
             debug["decision"]["historyLastRole"] = last_msg_role
             debug["decision"]["transientState"] = (tr.get("state") if (gwid and 'tr' in locals() and tr) else None)
             debug["decision"]["transientExpiresAtMs"] = (tr.get("expiresAtMs") if (gwid and 'tr' in locals() and tr) else None)
+            debug["decision"]["transientFingerprint"] = (tr.get("fingerprint") if (gwid and 'tr' in locals() and tr) else None)
+            debug["decision"]["transientFirstObservedAtMs"] = (tr.get("firstObservedAtMs") if (gwid and 'tr' in locals() and tr) else None)
             debug["decision"]["transientApplied"] = transient_applied
             debug["decision"]["finalState"] = state
             debug["timingsMs"]["gatewayTotal"] = int(time.time() * 1000) - t0
