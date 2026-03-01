@@ -236,14 +236,27 @@ def build_lobster_room_state():
                     if max_updated_at is None or ts > max_updated_at:
                         max_updated_at = ts
 
-            # For richer status, pick a stable resident sessionKey.
-            session_key_for_status = _pick_resident_session(sessions)
+            # For richer status, don't rely on a single session; evaluate a few.
+            sessions_sorted = [s for s in sessions if isinstance(s.get("key"), str) and isinstance(s.get("updatedAt"), (int, float))]
+            sessions_sorted.sort(key=lambda s: int(s.get("updatedAt")), reverse=True)
+            top_sessions = sessions_sorted[:5]
+            # Ensure we always include the resident session if present.
+            resident_key = _pick_resident_session(sessions)
+            if resident_key and all(s.get("key") != resident_key for s in top_sessions):
+                top_sessions = ([{"key": resident_key}] + top_sessions)[:6]
 
-            # 2) session_status
+            # We'll also keep a primary sessionKey for meta/debug.
+            session_key_for_status = resident_key or (top_sessions[0].get("key") if top_sessions else None)
+
+            # 2) session_status (aggregate over top sessions)
             queue_depth = None
             status_text = None
-            if session_key_for_status:
-                payload2 = {"tool": "session_status", "args": {"sessionKey": session_key_for_status}}
+            status_session_key = None
+            for ss in top_sessions:
+                k = ss.get("key")
+                if not isinstance(k, str) or not k:
+                    continue
+                payload2 = {"tool": "session_status", "args": {"sessionKey": k}}
                 req2 = urllib.request.Request(
                     url,
                     data=json.dumps(payload2).encode("utf-8"),
@@ -253,13 +266,20 @@ def build_lobster_room_state():
                 with urllib.request.urlopen(req2, timeout=8) as resp:
                     raw2 = resp.read().decode("utf-8", errors="ignore")
                 data2 = json.loads(raw2)
-                if data2.get("ok"):
-                    det2 = (data2.get("result") or {}).get("details") or {}
-                    status_text = det2.get("statusText")
-                    if isinstance(det2.get("queueDepth"), (int, float)):
-                        queue_depth = int(det2.get("queueDepth"))
-                    elif isinstance(det2.get("queue"), dict) and isinstance(det2["queue"].get("depth"), (int, float)):
-                        queue_depth = int(det2["queue"].get("depth"))
+                if not data2.get("ok"):
+                    continue
+                det2 = (data2.get("result") or {}).get("details") or {}
+                qd = None
+                if isinstance(det2.get("queueDepth"), (int, float)):
+                    qd = int(det2.get("queueDepth"))
+                elif isinstance(det2.get("queue"), dict) and isinstance(det2["queue"].get("depth"), (int, float)):
+                    qd = int(det2.get("queue").get("depth"))
+                # Choose the session with the highest queue depth as the best signal.
+                if isinstance(qd, int):
+                    if queue_depth is None or qd > queue_depth:
+                        queue_depth = qd
+                        status_text = det2.get("statusText")
+                        status_session_key = k
 
             out["gateways"].append(
                 {
@@ -272,13 +292,17 @@ def build_lobster_room_state():
                 }
             )
 
-            # 3) sessions_history (latest message only)
+            # 3) sessions_history (latest message only, aggregate over top sessions)
             history_types = []
             last_msg_role = None
             last_part_type = None
-            if session_key_for_status:
+            history_session_key = None
+            for ss in top_sessions:
+                k = ss.get("key")
+                if not isinstance(k, str) or not k:
+                    continue
                 try:
-                    payload3 = {"tool": "sessions_history", "args": {"sessionKey": session_key_for_status, "limit": 12}}
+                    payload3 = {"tool": "sessions_history", "args": {"sessionKey": k, "limit": 12}}
                     req3 = urllib.request.Request(
                         url,
                         data=json.dumps(payload3).encode("utf-8"),
@@ -288,20 +312,39 @@ def build_lobster_room_state():
                     with urllib.request.urlopen(req3, timeout=8) as resp:
                         raw3 = resp.read().decode("utf-8", errors="ignore")
                     data3 = json.loads(raw3)
-                    if data3.get("ok"):
-                        msgs = ((data3.get("result") or {}).get("details") or {}).get("messages") or []
-                        if msgs:
-                            last = msgs[0]
-                            last_msg_role = last.get("role")
-                            c = last.get("content")
-                            if isinstance(c, list):
-                                for part in c:
-                                    if isinstance(part, dict) and part.get("type"):
-                                        history_types.append(part.get("type"))
-                                        if last_part_type is None:
-                                            last_part_type = part.get("type")
+                    if not data3.get("ok"):
+                        continue
+                    msgs = ((data3.get("result") or {}).get("details") or {}).get("messages") or []
+                    if not msgs:
+                        continue
+                    last = msgs[0]
+                    c = last.get("content")
+                    # Extract first part type.
+                    lpt = None
+                    types = []
+                    if isinstance(c, list):
+                        for part in c:
+                            if isinstance(part, dict) and part.get("type"):
+                                types.append(part.get("type"))
+                                if lpt is None:
+                                    lpt = part.get("type")
+                    role = last.get("role")
+
+                    # Prefer toolCall, then assistant text, otherwise keep searching.
+                    if lpt == "toolCall":
+                        history_session_key = k
+                        history_types = types
+                        last_part_type = lpt
+                        last_msg_role = role
+                        break
+                    if lpt == "text" and role == "assistant" and last_part_type is None:
+                        history_session_key = k
+                        history_types = types
+                        last_part_type = lpt
+                        last_msg_role = role
+                        # don't break; toolCall (if found later) should win
                 except Exception:
-                    pass
+                    continue
 
             # Status selection
             is_active = False
@@ -332,6 +375,8 @@ def build_lobster_room_state():
                         "toolTtlMs": tool_ttl_ms,
                         "maxUpdatedAt": max_updated_at,
                         "sessionKeyForStatus": session_key_for_status,
+                        "statusSessionKey": status_session_key,
+                        "historySessionKey": history_session_key,
                         "queueDepth": queue_depth,
                         "statusText": status_text,
                         "historyTypes": history_types,
