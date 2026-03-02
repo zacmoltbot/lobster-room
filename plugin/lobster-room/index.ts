@@ -4,11 +4,11 @@ type PluginApi = {
   id: string;
   config: any;
   logger: { info: (msg: string, meta?: any) => void; warn: (msg: string, meta?: any) => void };
-  resolvePath: (p: string) => string;
   registerHttpRoute: (params: {
     path: string;
     handler: (req: IncomingMessage, res: ServerResponse) => void | Promise<void>;
   }) => void;
+  on: (hookName: string, handler: (event: any, ctx: any) => any, opts?: { priority?: number }) => void;
 };
 
 function sendJson(res: ServerResponse, status: number, body: unknown) {
@@ -19,8 +19,26 @@ function sendJson(res: ServerResponse, status: number, body: unknown) {
   res.end(text);
 }
 
+type ActivityState = "idle" | "thinking" | "tool" | "reply" | "error";
+
+type AgentActivity = {
+  agentId: string;
+  state: ActivityState;
+  sinceMs: number;
+  lastEventMs: number;
+  details?: Record<string, unknown> | null;
+  seq: number; // monotonic to guard async timers
+};
+
+function nowMs() {
+  return Date.now();
+}
+
 function readRequestUrl(req: IncomingMessage): URL {
-  return new URL(req.url ?? "/", `http://${req.headers.host ?? "localhost"}`);
+  // Respect reverse proxies when present.
+  const proto = (req.headers["x-forwarded-proto"] as string | undefined)?.split(",")[0]?.trim();
+  const host = (req.headers["x-forwarded-host"] as string | undefined)?.split(",")[0]?.trim() || req.headers.host;
+  return new URL(req.url ?? "/", `${proto || "http"}://${host || "localhost"}`);
 }
 
 function resolveGatewayPort(cfg: any): number {
@@ -71,12 +89,10 @@ async function toolsInvoke(params: {
   return json;
 }
 
-function inferStateFromSessions(params: { nowMs: number; maxUpdatedAtMs: number; activeWindowMs: number }): {
-  state: "think" | "wait";
-  active: boolean;
-} {
-  const recent = params.nowMs - params.maxUpdatedAtMs <= params.activeWindowMs;
-  return { state: recent ? "think" : "wait", active: recent };
+function mapActivityToUiState(s: ActivityState): "think" | "wait" | "tool" | "reply" | "error" {
+  if (s === "thinking") return "think";
+  if (s === "idle") return "wait";
+  return s;
 }
 
 export default {
@@ -88,10 +104,100 @@ export default {
     const pluginDir = dirname(fileURLToPath(import.meta.url));
     const assetPath = `${pluginDir}/assets/lobster-room.html`;
 
+    const cooldownMs = Number.parseInt((process.env.LOBSTER_ROOM_IDLE_COOLDOWN_MS || "1500").trim(), 10) || 1500;
+
+    const activity = new Map<string, AgentActivity>();
+
+    const ensure = (agentId: string): AgentActivity => {
+      const existing = activity.get(agentId);
+      if (existing) return existing;
+      const init: AgentActivity = {
+        agentId,
+        state: "idle",
+        sinceMs: nowMs(),
+        lastEventMs: nowMs(),
+        details: null,
+        seq: 0,
+      };
+      activity.set(agentId, init);
+      return init;
+    };
+
+    const setState = (agentId: string, next: ActivityState, details?: Record<string, unknown> | null) => {
+      const row = ensure(agentId);
+      const t = nowMs();
+      row.seq += 1;
+      row.lastEventMs = t;
+      if (row.state !== next) {
+        row.state = next;
+        row.sinceMs = t;
+      }
+      row.details = details ?? row.details ?? null;
+      return row.seq;
+    };
+
+    const setIdleWithCooldown = (agentId: string) => {
+      const row = ensure(agentId);
+      const seq = row.seq + 1;
+      row.seq = seq;
+      const scheduledAt = nowMs();
+      // Keep current state for a short cooldown to reduce UI flicker.
+      setTimeout(() => {
+        const cur = activity.get(agentId);
+        if (!cur) return;
+        if (cur.seq !== seq) return; // superseded
+        const t = nowMs();
+        cur.state = "idle";
+        cur.sinceMs = t;
+        cur.lastEventMs = t;
+        cur.details = null;
+      }, cooldownMs);
+      // Update lastEvent so API knows something just happened.
+      row.lastEventMs = scheduledAt;
+    };
+
+    // Hooks → real runtime state
+    api.on("before_agent_start", (_event, ctx) => {
+      const agentId = ctx?.agentId || "main";
+      setState(agentId, "thinking", { sessionKey: ctx?.sessionKey, messageProvider: ctx?.messageProvider });
+    });
+
+    api.on("before_tool_call", (event, ctx) => {
+      const agentId = ctx?.agentId || "main";
+      const toolName = event?.tool || event?.name || event?.toolName;
+      setState(agentId, "tool", { toolName, sessionKey: ctx?.sessionKey });
+    });
+
+    api.on("after_tool_call", (_event, ctx) => {
+      const agentId = ctx?.agentId || "main";
+      setState(agentId, "thinking", { sessionKey: ctx?.sessionKey });
+    });
+
+    api.on("message_sending", (event, _ctx) => {
+      const agentId = event?.agentId || "main";
+      setState(agentId, "reply", { channel: event?.channel, target: event?.target, sessionKey: event?.sessionKey });
+    });
+
+    api.on("message_sent", (event, _ctx) => {
+      const agentId = event?.agentId || "main";
+      setIdleWithCooldown(agentId);
+    });
+
+    api.on("agent_end", (event, ctx) => {
+      const agentId = ctx?.agentId || "main";
+      if (event?.success === false) {
+        setState(agentId, "error", { error: event?.error || "agent_end: unsuccessful" });
+        // Still cool down to idle after a bit (error bubble shouldn't stick forever).
+        setTimeout(() => setIdleWithCooldown(agentId), cooldownMs);
+      } else {
+        setIdleWithCooldown(agentId);
+      }
+    });
+
+    // HTTP: portal
     api.registerHttpRoute({
       path: "/lobster-room/",
       handler: async (_req, res) => {
-        // Lazy-read each time to keep it simple; can cache later.
         const fs = await import("node:fs/promises");
         try {
           const html = await fs.readFile(assetPath, "utf8");
@@ -100,54 +206,58 @@ export default {
           res.setHeader("cache-control", "no-store");
           res.end(html);
         } catch (err: any) {
-          sendJson(res, 500, { ok: false, error: { type: "asset_read_failed", message: String(err?.message || err) } });
+          sendJson(res, 500, {
+            ok: false,
+            error: { type: "asset_read_failed", message: String(err?.message || err) },
+          });
         }
       },
     });
 
+    // HTTP: API (plugin-native)
     api.registerHttpRoute({
       path: "/lobster-room/api/lobster-room",
       handler: async (req, res) => {
         const url = readRequestUrl(req);
-        const nowMs = Date.now();
-
-        const cfg = api.config;
-        const port = resolveGatewayPort(cfg);
-        const token = resolveGatewayToken(cfg);
-        if (!token) {
-          sendJson(res, 500, {
-            ok: false,
-            error: {
-              type: "missing_gateway_token",
-              message:
-                "Missing gateway token. Set OPENCLAW_GATEWAY_TOKEN (recommended) or gateway.auth.token so the plugin can call /tools/invoke.",
-            },
-          });
-          return;
-        }
-
+        const t = nowMs();
         const pollSeconds = Number.parseInt((process.env.LOBSTER_ROOM_POLL_SECONDS || "2").trim(), 10) || 2;
-        const activeWindowMs = Number.parseInt((process.env.LOBSTER_ROOM_ACTIVE_WINDOW_MS || "10000").trim(), 10) || 10000;
 
-        // Minimal single-gateway aggregation (self).
-        const sessions = await toolsInvoke({ port, token, tool: "sessions_list", args: { limit: 50, activeMinutes: 60 } });
-        if (!sessions?.ok) {
-          sendJson(res, 502, { ok: false, error: { type: "sessions_list_failed", detail: sessions } });
-          return;
-        }
+        // Ensure at least configured agents exist.
+        const configuredAgents: string[] = Array.isArray(api.config?.agents?.list)
+          ? api.config.agents.list.map((a: any) => a?.id).filter((x: any) => typeof x === "string" && x.trim())
+          : [];
+        if (configuredAgents.length === 0) configuredAgents.push("main");
+        for (const id of configuredAgents) ensure(id);
 
-        const list = Array.isArray(sessions.sessions) ? sessions.sessions : [];
-        const updatedAtList = list
-          .map((s: any) => (typeof s.updatedAt === "number" ? s.updatedAt : 0))
-          .filter((n: number) => n > 0);
-        const maxUpdatedAt = updatedAtList.length ? Math.max(...updatedAtList) : 0;
+        const agentsPayload = Array.from(activity.values()).map((row) => {
+          const uiState = mapActivityToUiState(row.state);
+          return {
+            id: `resident@${row.agentId}`,
+            hostId: "local",
+            hostLabel: "OpenClaw",
+            name: row.agentId,
+            state: uiState,
+            meta: {
+              active: row.state !== "idle",
+              sinceMs: row.sinceMs,
+            },
+            debug: {
+              decision: {
+                agentId: row.agentId,
+                activityState: row.state,
+                sinceMs: row.sinceMs,
+                lastEventMs: row.lastEventMs,
+                cooldownMs,
+                finalState: uiState,
+                details: row.details ?? null,
+              },
+            },
+          };
+        });
 
-        const { state, active } = inferStateFromSessions({ nowMs, maxUpdatedAtMs: maxUpdatedAt, activeWindowMs });
-
-        // For compatibility with existing frontend expectations.
-        const payload = {
+        sendJson(res, 200, {
           ok: true,
-          generatedAt: Math.floor(nowMs / 1000),
+          generatedAt: Math.floor(t / 1000),
           pollSeconds,
           gateways: [
             {
@@ -155,33 +265,13 @@ export default {
               label: "OpenClaw",
               baseUrl: url.origin,
               status: "ok",
-              sessionCount: list.length,
-              maxUpdatedAt,
+              sessionCount: null,
+              maxUpdatedAt: null,
             },
           ],
-          agents: [
-            {
-              id: "resident@local",
-              hostId: "local",
-              hostLabel: "OpenClaw",
-              name: "OpenClaw",
-              state,
-              meta: {
-                active,
-                activeWindowMs,
-                maxUpdatedAt,
-                sessionCount: list.length,
-              },
-              debug: {
-                timingsMs: {},
-                decision: { nowMs, activeWindowMs, maxUpdatedAt, finalState: state },
-              },
-            },
-          ],
+          agents: agentsPayload,
           errors: [],
-        };
-
-        sendJson(res, 200, payload);
+        });
       },
     });
 
@@ -195,6 +285,6 @@ export default {
       },
     });
 
-    api.logger.info("[lobster-room] plugin routes registered", { assetPath });
+    api.logger.info("[lobster-room] plugin routes registered", { assetPath, cooldownMs });
   },
 };
