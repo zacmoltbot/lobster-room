@@ -37,8 +37,7 @@ chmod +x ./skill/lobster-room/systemd/install-systemd.sh
 
 echo
 echo "Next steps:"
-echo "1) Copy example env to /etc/default/lobster-room and fill values:"
-echo "   cp $TMP/src/skill/lobster-room/examples/default.env /etc/default/lobster-room"
+echo "1) Edit /etc/default/lobster-room and fill values:"
 echo "   nano /etc/default/lobster-room"
 echo "   systemctl restart lobster-room"
 echo "2) Configure reverse proxy /lobster-room using templates in skill/lobster-room/proxy/"

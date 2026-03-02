@@ -93,7 +93,19 @@ This starts Lobster Room on:
 
 Environment example:
 
-- `skill/lobster-room/examples/default.env` -> copy to `/etc/default/lobster-room`
+- `skill/lobster-room/examples/default.env` -> `/etc/default/lobster-room`
+
+Quick self-check (before proxy):
+
+```bash
+curl -fsS http://127.0.0.1:18080/healthz && echo
+curl -fsS http://127.0.0.1:18080/api/lobster-room | head
+```
+
+After proxy, verify:
+
+- `https://<openclaw-host>/lobster-room/`
+- `https://<openclaw-host>/lobster-room/api/lobster-room`
 
 Then mount it under your OpenClaw domain using a reverse proxy.
 

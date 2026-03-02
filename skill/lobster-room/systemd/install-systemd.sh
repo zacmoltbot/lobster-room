@@ -27,8 +27,22 @@ cp -f "$SCRIPT_DIR/README.md" "$DEST/README.md" || true
 
 install -m 0644 "$UNIT_SRC" /etc/systemd/system/lobster-room.service
 
+# Install env file template if missing
+mkdir -p /etc/default
+if [[ ! -f /etc/default/lobster-room ]]; then
+  if [[ -f "$SCRIPT_DIR/skill/lobster-room/examples/default.env" ]]; then
+    cp -f "$SCRIPT_DIR/skill/lobster-room/examples/default.env" /etc/default/lobster-room
+    chmod 600 /etc/default/lobster-room || true
+  fi
+fi
+
 systemctl daemon-reload
 systemctl enable --now lobster-room.service
 
 echo "Installed. Service is listening on http://127.0.0.1:18080/"
-echo "Next: configure reverse proxy to expose /lobster-room on your OpenClaw domain."
+echo
+echo "Next steps:"
+echo "1) Edit /etc/default/lobster-room (required): set LOBSTER_ROOM_GATEWAYS_JSON + token envs"
+echo "2) Restart: systemctl restart lobster-room"
+echo "3) Quick check: curl -fsS http://127.0.0.1:18080/healthz && echo"
+echo "4) Configure reverse proxy to expose https://<openclaw-host>/lobster-room/ (templates in skill/lobster-room/proxy/)"
