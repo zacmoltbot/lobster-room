@@ -82,7 +82,11 @@ function inferStateFromSessions(params: { nowMs: number; maxUpdatedAtMs: number;
 export default {
   id: "lobster-room",
   async register(api: PluginApi) {
-    const assetPath = api.resolvePath("./assets/lobster-room.html");
+    // Resolve asset path relative to this plugin module (NOT the gateway cwd).
+    const { fileURLToPath } = await import("node:url");
+    const { dirname } = await import("node:path");
+    const pluginDir = dirname(fileURLToPath(import.meta.url));
+    const assetPath = `${pluginDir}/assets/lobster-room.html`;
 
     api.registerHttpRoute({
       path: "/lobster-room/",
