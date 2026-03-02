@@ -215,13 +215,19 @@ export default {
       setState(agentId, "thinking", { sessionKey: ctx?.sessionKey, persisted: true });
     });
 
-    api.on("message_sending", (event, _ctx) => {
-      const agentId = event?.agentId || "main";
-      setState(agentId, "reply", { channel: event?.channel, target: event?.target, sessionKey: event?.sessionKey });
+    api.on("message_sending", (event, ctx) => {
+      // Message hooks do not carry agentId in the event/ctx today.
+      // In plugin UX we default to the primary agent (main), unless later we add routing.
+      const agentId = "main";
+      setState(agentId, "reply", { to: event?.to, channelId: ctx?.channelId, conversationId: ctx?.conversationId });
     });
 
-    api.on("message_sent", (event, _ctx) => {
-      const agentId = event?.agentId || "main";
+    api.on("message_sent", (event, ctx) => {
+      const agentId = "main";
+      // Mark errors explicitly so UI can surface it.
+      if (event?.success === false) {
+        setState(agentId, "error", { error: event?.error || "message_sent failed", to: event?.to, channelId: ctx?.channelId });
+      }
       setIdleWithCooldown(agentId);
     });
 
