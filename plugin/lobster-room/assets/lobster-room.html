@@ -1,0 +1,22 @@
+<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <title>Lobster Room</title>
+    <meta http-equiv="cache-control" content="no-store" />
+  </head>
+  <body style="margin:0">
+    <!-- Plugin mode: we reuse the same portal file. -->
+    <iframe
+      src="/"
+      style="display:none"
+      title="hidden"
+    ></iframe>
+    <script>
+      // We embed the portal directly to keep the plugin self-contained.
+      // This file will be overwritten by the installer with the repo's lobster-room.html.
+      document.body.innerHTML = '<div style="font-family:system-ui;padding:12px">Lobster Room plugin installed, but assets not yet copied. Re-run installer.</div>';
+    </script>
+  </body>
+</html>

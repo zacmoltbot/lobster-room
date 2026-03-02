@@ -1,0 +1,11 @@
+{
+  "id": "lobster-room",
+  "name": "Lobster Room",
+  "description": "Bird's-eye Lobster Room dashboard served under /lobster-room/",
+  "version": "0.1.0",
+  "configSchema": {
+    "type": "object",
+    "additionalProperties": false,
+    "properties": {}
+  }
+}

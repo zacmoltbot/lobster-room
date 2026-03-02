@@ -67,7 +67,33 @@ API:
 
 ### Option 2: Same host as OpenClaw (recommended for "one URL")
 
-This repo contains install assets under:
+#### 2.0 Plugin install (recommended)
+
+This is the most "native" experience: Lobster Room is served directly by the
+OpenClaw Gateway under:
+
+- `https://<openclaw-host>/lobster-room/`
+
+Install (shared on the machine):
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/zacmoltbot/lobster-room/main/plugin/lobster-room/install.sh | bash
+```
+
+The installer will **try** to run `openclaw gateway restart`. If it fails,
+restart the gateway manually, then verify:
+
+- `https://<openclaw-host>/lobster-room/`
+- `https://<openclaw-host>/lobster-room/api/lobster-room`
+
+Notes:
+
+- The plugin calls `POST /tools/invoke` internally via loopback, so you must set
+  `OPENCLAW_GATEWAY_TOKEN` (or `gateway.auth.token`) on the gateway.
+
+#### 2.1 Fallback: systemd / docker install
+
+This repo also contains fallback install assets under:
 
 - `skill/lobster-room/`
 
