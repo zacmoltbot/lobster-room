@@ -105,6 +105,8 @@ export default {
     const assetPath = `${pluginDir}/assets/lobster-room.html`;
 
     const cooldownMs = Number.parseInt((process.env.LOBSTER_ROOM_IDLE_COOLDOWN_MS || "1500").trim(), 10) || 1500;
+    const staleMs = Number.parseInt((process.env.LOBSTER_ROOM_STALE_MS || "15000").trim(), 10) || 15000;
+    const toolMaxMs = Number.parseInt((process.env.LOBSTER_ROOM_TOOL_MAX_MS || "12000").trim(), 10) || 12000;
     // Default to only showing the primary agent.
     process.env.LOBSTER_ROOM_AGENT_IDS = process.env.LOBSTER_ROOM_AGENT_IDS || "main";
 
@@ -125,17 +127,49 @@ export default {
       return init;
     };
 
+    const scheduleWatchdog = (agentId: string, seq: number) => {
+      // Generic stale watchdog: if we stop receiving hooks, don't stick forever.
+      setTimeout(() => {
+        const cur = activity.get(agentId);
+        if (!cur) return;
+        if (cur.seq !== seq) return;
+        const t = nowMs();
+        if (t - cur.lastEventMs < staleMs) return;
+        cur.state = "idle";
+        cur.sinceMs = t;
+        cur.lastEventMs = t;
+        cur.details = { stale: true };
+      }, staleMs + 50);
+
+      // Tool-specific max duration: demote tool -> thinking -> (later) idle.
+      setTimeout(() => {
+        const cur = activity.get(agentId);
+        if (!cur) return;
+        if (cur.seq !== seq) return;
+        if (cur.state !== "tool") return;
+        const t = nowMs();
+        // If tool hasn't progressed, demote.
+        cur.state = "thinking";
+        cur.sinceMs = t;
+        cur.lastEventMs = t;
+        cur.details = { ...(cur.details || {}), toolMax: true };
+        setIdleWithCooldown(agentId);
+      }, toolMaxMs);
+    };
+
     const setState = (agentId: string, next: ActivityState, details?: Record<string, unknown> | null) => {
       const row = ensure(agentId);
       const t = nowMs();
       row.seq += 1;
+      const seq = row.seq;
       row.lastEventMs = t;
       if (row.state !== next) {
         row.state = next;
         row.sinceMs = t;
       }
       row.details = details ?? row.details ?? null;
-      return row.seq;
+      scheduleWatchdog(agentId, seq);
+      return seq;
     };
 
     const setIdleWithCooldown = (agentId: string) => {
@@ -173,6 +207,12 @@ export default {
     api.on("after_tool_call", (_event, ctx) => {
       const agentId = ctx?.agentId || "main";
       setState(agentId, "thinking", { sessionKey: ctx?.sessionKey });
+    });
+
+    // Some tools may not reliably fire after_tool_call in all paths; use persist as a backup.
+    api.on("tool_result_persist", (_event, ctx) => {
+      const agentId = ctx?.agentId || "main";
+      setState(agentId, "thinking", { sessionKey: ctx?.sessionKey, persisted: true });
     });
 
     api.on("message_sending", (event, _ctx) => {
@@ -288,6 +328,8 @@ export default {
                   sinceMs: row.sinceMs,
                   lastEventMs: row.lastEventMs,
                   cooldownMs,
+                  staleMs,
+                  toolMaxMs,
                   finalState: uiState,
                   details: row.details ?? null,
                 },
