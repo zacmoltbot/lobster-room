@@ -28,6 +28,7 @@ type AgentActivity = {
   lastEventMs: number;
   details?: Record<string, unknown> | null;
   seq: number; // monotonic to guard async timers
+  holdUntilMs?: number; // min-dwell for non-idle states
 };
 
 function nowMs() {
@@ -105,12 +106,29 @@ export default {
     const assetPath = `${pluginDir}/assets/lobster-room.html`;
 
     const cooldownMs = Number.parseInt((process.env.LOBSTER_ROOM_IDLE_COOLDOWN_MS || "1500").trim(), 10) || 1500;
+    const minDwellMs = Number.parseInt((process.env.LOBSTER_ROOM_MIN_DWELL_MS || "900").trim(), 10) || 900;
     const staleMs = Number.parseInt((process.env.LOBSTER_ROOM_STALE_MS || "15000").trim(), 10) || 15000;
     const toolMaxMs = Number.parseInt((process.env.LOBSTER_ROOM_TOOL_MAX_MS || "12000").trim(), 10) || 12000;
+    const pollSeconds = Number.parseInt((process.env.LOBSTER_ROOM_POLL_SECONDS || "1").trim(), 10) || 1;
     // Default to only showing the primary agent.
     process.env.LOBSTER_ROOM_AGENT_IDS = process.env.LOBSTER_ROOM_AGENT_IDS || "main";
 
     const activity = new Map<string, AgentActivity>();
+
+    // Ring buffer of recent hook events for self-debug (no secrets; truncate content).
+    const eventBuf: Array<{ ts: number; kind: string; agentId?: string; data?: any }> = [];
+    const pushEvent = (kind: string, params: { agentId?: string; data?: any }) => {
+      eventBuf.push({ ts: nowMs(), kind, agentId: params.agentId, data: params.data });
+      if (eventBuf.length > 30) eventBuf.splice(0, eventBuf.length - 30);
+    };
+
+    const priority: Record<ActivityState, number> = {
+      idle: 0,
+      thinking: 1,
+      reply: 2,
+      tool: 3,
+      error: 4,
+    };
 
     const ensure = (agentId: string): AgentActivity => {
       const existing = activity.get(agentId);
@@ -160,13 +178,32 @@ export default {
     const setState = (agentId: string, next: ActivityState, details?: Record<string, unknown> | null) => {
       const row = ensure(agentId);
       const t = nowMs();
+
+      // Min-dwell: don't let fast transitions to idle hide states between polls.
+      // Also enforce priority so high-signal states override lower ones.
+      const curHold = row.holdUntilMs || 0;
+      const inHold = t < curHold;
+      const curP = priority[row.state];
+      const nextP = priority[next];
+
+      if (inHold && nextP < curP) {
+        // Ignore downgrade during hold.
+        return row.seq;
+      }
+
       row.seq += 1;
       const seq = row.seq;
       row.lastEventMs = t;
+
       if (row.state !== next) {
         row.state = next;
         row.sinceMs = t;
       }
+
+      if (next !== "idle") {
+        row.holdUntilMs = t + minDwellMs;
+      }
+
       row.details = details ?? row.details ?? null;
       scheduleWatchdog(agentId, seq);
       return seq;
@@ -195,23 +232,27 @@ export default {
     // Hooks → real runtime state
     api.on("before_agent_start", (_event, ctx) => {
       const agentId = ctx?.agentId || "main";
+      pushEvent("before_agent_start", { agentId, data: { sessionKey: ctx?.sessionKey, messageProvider: ctx?.messageProvider } });
       setState(agentId, "thinking", { sessionKey: ctx?.sessionKey, messageProvider: ctx?.messageProvider });
     });
 
     api.on("before_tool_call", (event, ctx) => {
       const agentId = ctx?.agentId || "main";
-      const toolName = event?.tool || event?.name || event?.toolName;
+      const toolName = event?.toolName || event?.tool || event?.name;
+      pushEvent("before_tool_call", { agentId, data: { toolName, sessionKey: ctx?.sessionKey } });
       setState(agentId, "tool", { toolName, sessionKey: ctx?.sessionKey });
     });
 
-    api.on("after_tool_call", (_event, ctx) => {
+    api.on("after_tool_call", (event, ctx) => {
       const agentId = ctx?.agentId || "main";
+      pushEvent("after_tool_call", { agentId, data: { toolName: event?.toolName, durationMs: event?.durationMs } });
       setState(agentId, "thinking", { sessionKey: ctx?.sessionKey });
     });
 
     // Some tools may not reliably fire after_tool_call in all paths; use persist as a backup.
-    api.on("tool_result_persist", (_event, ctx) => {
+    api.on("tool_result_persist", (event, ctx) => {
       const agentId = ctx?.agentId || "main";
+      pushEvent("tool_result_persist", { agentId, data: { toolName: event?.toolName, toolCallId: event?.toolCallId, isSynthetic: event?.isSynthetic } });
       setState(agentId, "thinking", { sessionKey: ctx?.sessionKey, persisted: true });
     });
 
@@ -219,11 +260,16 @@ export default {
       // Message hooks do not carry agentId in the event/ctx today.
       // In plugin UX we default to the primary agent (main), unless later we add routing.
       const agentId = "main";
+      pushEvent("message_sending", {
+        agentId,
+        data: { to: event?.to, contentPreview: String(event?.content || "").slice(0, 80), channelId: ctx?.channelId },
+      });
       setState(agentId, "reply", { to: event?.to, channelId: ctx?.channelId, conversationId: ctx?.conversationId });
     });
 
     api.on("message_sent", (event, ctx) => {
       const agentId = "main";
+      pushEvent("message_sent", { agentId, data: { to: event?.to, success: event?.success, channelId: ctx?.channelId } });
       // Mark errors explicitly so UI can surface it.
       if (event?.success === false) {
         setState(agentId, "error", { error: event?.error || "message_sent failed", to: event?.to, channelId: ctx?.channelId });
@@ -233,6 +279,7 @@ export default {
 
     api.on("agent_end", (event, ctx) => {
       const agentId = ctx?.agentId || "main";
+      pushEvent("agent_end", { agentId, data: { success: event?.success, error: event?.error } });
       if (event?.success === false) {
         setState(agentId, "error", { error: event?.error || "agent_end: unsuccessful" });
         // Still cool down to idle after a bit (error bubble shouldn't stick forever).
@@ -268,7 +315,6 @@ export default {
       handler: async (req, res) => {
         const url = readRequestUrl(req);
         const t = nowMs();
-        const pollSeconds = Number.parseInt((process.env.LOBSTER_ROOM_POLL_SECONDS || "2").trim(), 10) || 2;
 
         // Ensure at least configured agents exist.
         const agentIdByDefault = "main";
@@ -338,6 +384,7 @@ export default {
                   toolMaxMs,
                   finalState: uiState,
                   details: row.details ?? null,
+                  recentEvents: eventBuf,
                 },
               },
             };
@@ -373,6 +420,13 @@ export default {
       },
     });
 
-    api.logger.info("[lobster-room] plugin routes registered", { assetPath, cooldownMs });
+    api.logger.info("[lobster-room] plugin routes registered", {
+      assetPath,
+      cooldownMs,
+      minDwellMs,
+      pollSeconds,
+      staleMs,
+      toolMaxMs,
+    });
   },
 };
