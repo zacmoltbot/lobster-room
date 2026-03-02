@@ -156,7 +156,8 @@
     async function tick(){
       try{
         // First try the real aggregator endpoint.
-        const res = await fetch('/api/lobster-room', {cache:'no-store'});
+        // Use relative URL so Lobster Room can be mounted under a subpath (e.g. /lobster-room/).
+        const res = await fetch('./api/lobster-room', {cache:'no-store'});
         if(res.ok){
           const data = await res.json();
 

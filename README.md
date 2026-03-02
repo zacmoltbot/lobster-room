@@ -96,6 +96,11 @@ Environment example:
 - `skill/lobster-room/examples/default.env` -> copy to `/etc/default/lobster-room`
 
 Then mount it under your OpenClaw domain using a reverse proxy.
+
+**Important (path mounting):** serve it at **`/lobster-room/` (with trailing slash)**.
+The proxy templates include a redirect from `/lobster-room` -> `/lobster-room/` so
+relative URLs (like `./api/...`) work correctly.
+
 Templates:
 
 - Nginx: `skill/lobster-room/proxy/nginx.conf`
