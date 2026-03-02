@@ -230,29 +230,49 @@ export default {
     };
 
     // Hooks → real runtime state
+    const resolveAgentId = (ctx: any): string => {
+      const sk = typeof ctx?.sessionKey === "string" ? String(ctx.sessionKey) : "";
+      // Prefer sessionKey: "agent:<agentId>:..." is canonical even when ctx.agentId is inconsistent.
+      const m = sk.match(/^agent:([^:]+):/);
+      if (m && m[1]) return m[1];
+      const id = typeof ctx?.agentId === "string" ? String(ctx.agentId).trim() : "";
+      return id || "main";
+    };
+
     api.on("before_agent_start", (_event, ctx) => {
-      const agentId = ctx?.agentId || "main";
+      const agentId = resolveAgentId(ctx);
       pushEvent("before_agent_start", { agentId, data: { sessionKey: ctx?.sessionKey, messageProvider: ctx?.messageProvider } });
       setState(agentId, "thinking", { sessionKey: ctx?.sessionKey, messageProvider: ctx?.messageProvider });
     });
 
     api.on("before_tool_call", (event, ctx) => {
-      const agentId = ctx?.agentId || "main";
+      const agentId = resolveAgentId(ctx);
       const toolName = event?.toolName || event?.tool || event?.name;
-      pushEvent("before_tool_call", { agentId, data: { toolName, sessionKey: ctx?.sessionKey } });
+
+      // Capture high-value params for debugging (truncate aggressively).
+      let toolData: any = { toolName, sessionKey: ctx?.sessionKey };
+      if (toolName === "exec") {
+        const cmd = (event?.params && (event.params.command || event.params.cmd || event.params.args)) || null;
+        toolData.command = cmd;
+      }
+
+      pushEvent("before_tool_call", { agentId, data: toolData });
       setState(agentId, "tool", { toolName, sessionKey: ctx?.sessionKey });
     });
 
     api.on("after_tool_call", (event, ctx) => {
-      const agentId = ctx?.agentId || "main";
+      const agentId = resolveAgentId(ctx);
       pushEvent("after_tool_call", { agentId, data: { toolName: event?.toolName, durationMs: event?.durationMs } });
       setState(agentId, "thinking", { sessionKey: ctx?.sessionKey });
     });
 
     // Some tools may not reliably fire after_tool_call in all paths; use persist as a backup.
     api.on("tool_result_persist", (event, ctx) => {
-      const agentId = ctx?.agentId || "main";
-      pushEvent("tool_result_persist", { agentId, data: { toolName: event?.toolName, toolCallId: event?.toolCallId, isSynthetic: event?.isSynthetic } });
+      const agentId = resolveAgentId(ctx);
+      pushEvent("tool_result_persist", {
+        agentId,
+        data: { toolName: event?.toolName, toolCallId: event?.toolCallId, isSynthetic: event?.isSynthetic },
+      });
       setState(agentId, "thinking", { sessionKey: ctx?.sessionKey, persisted: true });
     });
 
@@ -278,8 +298,8 @@ export default {
     });
 
     api.on("agent_end", (event, ctx) => {
-      const agentId = ctx?.agentId || "main";
-      pushEvent("agent_end", { agentId, data: { success: event?.success, error: event?.error } });
+      const agentId = resolveAgentId(ctx);
+      pushEvent("agent_end", { agentId, data: { success: event?.success, error: event?.error, sessionKey: ctx?.sessionKey } });
 
       // NOTE: message_sending/message_sent hooks are not currently wired by the gateway
       // in this OpenClaw version, so we synthesize a short-lived "reply" phase at the
