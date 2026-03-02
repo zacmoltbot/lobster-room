@@ -280,13 +280,18 @@ export default {
     api.on("agent_end", (event, ctx) => {
       const agentId = ctx?.agentId || "main";
       pushEvent("agent_end", { agentId, data: { success: event?.success, error: event?.error } });
+
+      // NOTE: message_sending/message_sent hooks are not currently wired by the gateway
+      // in this OpenClaw version, so we synthesize a short-lived "reply" phase at the
+      // end of a successful run to reflect that an outbound reply likely occurred.
       if (event?.success === false) {
         setState(agentId, "error", { error: event?.error || "agent_end: unsuccessful" });
-        // Still cool down to idle after a bit (error bubble shouldn't stick forever).
         setTimeout(() => setIdleWithCooldown(agentId), cooldownMs);
-      } else {
-        setIdleWithCooldown(agentId);
+        return;
       }
+
+      setState(agentId, "reply", { synthetic: true });
+      setIdleWithCooldown(agentId);
     });
 
     // HTTP: portal
