@@ -105,6 +105,8 @@ export default {
     const assetPath = `${pluginDir}/assets/lobster-room.html`;
 
     const cooldownMs = Number.parseInt((process.env.LOBSTER_ROOM_IDLE_COOLDOWN_MS || "1500").trim(), 10) || 1500;
+    // Default to only showing the primary agent.
+    process.env.LOBSTER_ROOM_AGENT_IDS = process.env.LOBSTER_ROOM_AGENT_IDS || "main";
 
     const activity = new Map<string, AgentActivity>();
 
@@ -223,37 +225,75 @@ export default {
         const pollSeconds = Number.parseInt((process.env.LOBSTER_ROOM_POLL_SECONDS || "2").trim(), 10) || 2;
 
         // Ensure at least configured agents exist.
-        const configuredAgents: string[] = Array.isArray(api.config?.agents?.list)
-          ? api.config.agents.list.map((a: any) => a?.id).filter((x: any) => typeof x === "string" && x.trim())
-          : [];
-        if (configuredAgents.length === 0) configuredAgents.push("main");
-        for (const id of configuredAgents) ensure(id);
+        const agentIdByDefault = "main";
 
-        const agentsPayload = Array.from(activity.values()).map((row) => {
-          const uiState = mapActivityToUiState(row.state);
-          return {
-            id: `resident@${row.agentId}`,
-            hostId: "local",
-            hostLabel: "OpenClaw",
-            name: row.agentId,
-            state: uiState,
-            meta: {
-              active: row.state !== "idle",
-              sinceMs: row.sinceMs,
-            },
-            debug: {
-              decision: {
-                agentId: row.agentId,
-                activityState: row.state,
+        const agentIdAllowRaw = (process.env.LOBSTER_ROOM_AGENT_IDS || "").trim();
+        const allowIds = agentIdAllowRaw
+          ? agentIdAllowRaw
+              .split(",")
+              .map((s) => s.trim())
+              .filter(Boolean)
+          : [agentIdByDefault];
+
+        // Bootstrap configured agents so they appear even before any events.
+        for (const id of allowIds) ensure(id);
+
+        const agentNameOverrides: Record<string, string> = (() => {
+          try {
+            const raw = (process.env.LOBSTER_ROOM_AGENT_NAME_MAP_JSON || "").trim();
+            if (!raw) return {};
+            const obj = JSON.parse(raw);
+            if (!obj || typeof obj !== "object" || Array.isArray(obj)) return {};
+            const out: Record<string, string> = {};
+            for (const [k, v] of Object.entries(obj)) {
+              if (typeof k === "string" && typeof v === "string" && k.trim() && v.trim()) out[k.trim()] = v.trim();
+            }
+            return out;
+          } catch {
+            return {};
+          }
+        })();
+
+        const identityNameByAgentId = new Map<string, string>();
+        const agentList = Array.isArray(api.config?.agents?.list) ? api.config.agents.list : [];
+        for (const a of agentList) {
+          const id = a?.id;
+          const nm = a?.identity?.name;
+          if (typeof id === "string" && id.trim() && typeof nm === "string" && nm.trim()) {
+            identityNameByAgentId.set(id.trim(), nm.trim());
+          }
+        }
+
+        const agentsPayload = allowIds
+          .map((agentId) => activity.get(agentId) || ensure(agentId))
+          .map((row) => {
+            const uiState = mapActivityToUiState(row.state);
+            const displayName =
+              agentNameOverrides[row.agentId] || identityNameByAgentId.get(row.agentId) || row.agentId;
+            return {
+              id: `resident@${row.agentId}`,
+              hostId: "local",
+              hostLabel: "OpenClaw",
+              name: displayName,
+              state: uiState,
+              meta: {
+                active: row.state !== "idle",
                 sinceMs: row.sinceMs,
-                lastEventMs: row.lastEventMs,
-                cooldownMs,
-                finalState: uiState,
-                details: row.details ?? null,
               },
-            },
-          };
-        });
+              debug: {
+                decision: {
+                  agentId: row.agentId,
+                  displayName,
+                  activityState: row.state,
+                  sinceMs: row.sinceMs,
+                  lastEventMs: row.lastEventMs,
+                  cooldownMs,
+                  finalState: uiState,
+                  details: row.details ?? null,
+                },
+              },
+            };
+          });
 
         sendJson(res, 200, {
           ok: true,
