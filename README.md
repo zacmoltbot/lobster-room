@@ -73,7 +73,15 @@ This repo contains install assets under:
 
 #### 2A) systemd install
 
-On your OpenClaw host (Linux), from the repo directory:
+On your OpenClaw host (Linux):
+
+**One-line install (recommended):**
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/zacmoltbot/lobster-room/main/skill/lobster-room/install.sh | sudo bash
+```
+
+Or, from the repo directory:
 
 ```bash
 sudo ./skill/lobster-room/systemd/install-systemd.sh
@@ -82,6 +90,10 @@ sudo ./skill/lobster-room/systemd/install-systemd.sh
 This starts Lobster Room on:
 
 - `http://127.0.0.1:18080/`
+
+Environment example:
+
+- `skill/lobster-room/examples/default.env` -> copy to `/etc/default/lobster-room`
 
 Then mount it under your OpenClaw domain using a reverse proxy.
 Templates:
@@ -94,6 +106,7 @@ Templates:
 Use:
 
 - `skill/lobster-room/docker/docker-compose.yml`
+- env example: `skill/lobster-room/docker/.env.example`
 
 Bind is localhost-only by default (`127.0.0.1:18080`) for safety; use a reverse
 proxy to expose `/lobster-room`.
