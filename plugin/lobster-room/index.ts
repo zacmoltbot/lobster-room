@@ -1,4 +1,7 @@
 import type { IncomingMessage, ServerResponse } from "node:http";
+import { fileURLToPath } from "node:url";
+import { dirname, join, extname } from "node:path";
+import fs from "node:fs/promises";
 
 type PluginApi = {
   id: string;
@@ -17,6 +20,58 @@ function sendJson(res: ServerResponse, status: number, body: unknown) {
   res.setHeader("content-type", "application/json; charset=utf-8");
   res.setHeader("cache-control", "no-store");
   res.end(text);
+}
+
+async function readBody(req: IncomingMessage, maxBytes = 8 * 1024 * 1024): Promise<Buffer> {
+  const chunks: Buffer[] = [];
+  let total = 0;
+  for await (const chunk of req) {
+    const buf = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+    total += buf.length;
+    if (total > maxBytes) throw new Error("body_too_large");
+    chunks.push(buf);
+  }
+  return Buffer.concat(chunks);
+}
+
+function parseMultipartFile(body: Buffer, boundary: string): { filename: string; contentType: string; data: Buffer } {
+  // Very small multipart parser for single file field.
+  const b = Buffer.from(`--${boundary}`);
+  const parts: Buffer[] = [];
+  let idx = 0;
+  while (idx < body.length) {
+    const start = body.indexOf(b, idx);
+    if (start === -1) break;
+    const next = body.indexOf(b, start + b.length);
+    if (next === -1) break;
+    parts.push(body.slice(start + b.length, next));
+    idx = next;
+  }
+  for (const raw of parts) {
+    // trim leading CRLF
+    let part = raw;
+    if (part.slice(0, 2).toString() === "\r\n") part = part.slice(2);
+    const headerEnd = part.indexOf(Buffer.from("\r\n\r\n"));
+    if (headerEnd === -1) continue;
+    const headerText = part.slice(0, headerEnd).toString("utf8");
+    const mFn = headerText.match(/filename="([^"]+)"/i);
+    if (!mFn) continue;
+    const mCt = headerText.match(/content-type:\s*([^\r\n]+)/i);
+    const filename = mFn[1];
+    const contentType = (mCt ? mCt[1].trim() : "application/octet-stream").toLowerCase();
+    let data = part.slice(headerEnd + 4);
+    // remove trailing CRLF
+    if (data.slice(-2).toString() === "\r\n") data = data.slice(0, -2);
+    return { filename, contentType, data };
+  }
+  throw new Error("multipart_no_file");
+}
+
+function extFromContentType(ct: string): string | null {
+  if (ct.includes("image/png")) return ".png";
+  if (ct.includes("image/jpeg") || ct.includes("image/jpg")) return ".jpg";
+  if (ct.includes("image/webp")) return ".webp";
+  return null;
 }
 
 type ActivityState = "idle" | "thinking" | "tool" | "reply" | "error";
@@ -42,68 +97,437 @@ function readRequestUrl(req: IncomingMessage): URL {
   return new URL(req.url ?? "/", `${proto || "http"}://${host || "localhost"}`);
 }
 
-function resolveGatewayPort(cfg: any): number {
-  const envRaw = (process.env.OPENCLAW_GATEWAY_PORT || process.env.CLAWDBOT_GATEWAY_PORT || "").trim();
-  if (envRaw) {
-    const n = Number.parseInt(envRaw, 10);
-    if (Number.isFinite(n) && n > 0) return n;
-  }
-  const configPort = cfg?.gateway?.port;
-  if (typeof configPort === "number" && Number.isFinite(configPort) && configPort > 0) return configPort;
-  return 18789;
-}
-
-function resolveGatewayToken(cfg: any): string | null {
-  const envTok = (process.env.OPENCLAW_GATEWAY_TOKEN || "").trim();
-  if (envTok) return envTok;
-  const cfgTok = (cfg?.gateway?.auth?.token || "").trim();
-  if (cfgTok) return cfgTok;
-  return null;
-}
-
-async function toolsInvoke(params: {
-  port: number;
-  token: string;
-  tool: string;
-  args?: Record<string, unknown>;
-  sessionKey?: string;
-}): Promise<any> {
-  const url = `http://127.0.0.1:${params.port}/tools/invoke`;
-  const res = await fetch(url, {
-    method: "POST",
-    headers: {
-      authorization: `Bearer ${params.token}`,
-      "content-type": "application/json",
-    },
-    body: JSON.stringify({ tool: params.tool, args: params.args ?? {}, sessionKey: params.sessionKey }),
-  });
-  const txt = await res.text();
-  let json: any = null;
-  try {
-    json = JSON.parse(txt);
-  } catch {
-    json = { ok: false, error: { type: "invalid_json", message: txt.slice(0, 500) } };
-  }
-  if (!res.ok) {
-    return { ok: false, error: { type: "http_error", status: res.status, body: json } };
-  }
-  return json;
-}
-
 function mapActivityToUiState(s: ActivityState): "think" | "wait" | "tool" | "reply" | "error" {
   if (s === "thinking") return "think";
   if (s === "idle") return "wait";
   return s;
 }
 
+function contentTypeByExt(ext: string): string | null {
+  const e = ext.toLowerCase();
+  if (e === ".svg") return "image/svg+xml; charset=utf-8";
+  if (e === ".png") return "image/png";
+  if (e === ".jpg" || e === ".jpeg") return "image/jpeg";
+  if (e === ".webp") return "image/webp";
+  if (e === ".gif") return "image/gif";
+  if (e === ".html") return "text/html; charset=utf-8";
+  if (e === ".css") return "text/css; charset=utf-8";
+  if (e === ".js") return "text/javascript; charset=utf-8";
+  if (e === ".json") return "application/json; charset=utf-8";
+  if (e === ".txt") return "text/plain; charset=utf-8";
+  return null;
+}
+
 export default {
   id: "lobster-room",
-  async register(api: PluginApi) {
+  register(api: PluginApi) {
     // Resolve asset path relative to this plugin module (NOT the gateway cwd).
-    const { fileURLToPath } = await import("node:url");
-    const { dirname } = await import("node:path");
     const pluginDir = dirname(fileURLToPath(import.meta.url));
-    const assetPath = `${pluginDir}/assets/lobster-room.html`;
+    const portalHtmlPath = join(pluginDir, "assets", "lobster-room.html");
+
+    // --- Rooms (multi-background profiles) ---
+    const rootUserDir = join(pluginDir, "assets", "user");
+    const roomsDir = join(rootUserDir, "rooms");
+    const roomsIndexPath = join(roomsDir, "index.json");
+
+    type RoomsIndex = {
+      activeRoomId: string;
+      rooms: Array<{ id: string; name: string; createdAt: number; updatedAt: number }>;
+    };
+
+    const defaultRoomId = "default";
+
+    const safeRoomId = (s: string) => /^[a-z0-9][a-z0-9_-]{0,40}$/i.test(s);
+
+    const readRoomsIndex = async (): Promise<RoomsIndex | null> => {
+      try {
+        const txt = await fs.readFile(roomsIndexPath, "utf8");
+        const obj = JSON.parse(txt);
+        if (!obj || typeof obj !== "object") return null;
+        const activeRoomId = typeof (obj as any).activeRoomId === "string" ? (obj as any).activeRoomId : defaultRoomId;
+        const rooms = Array.isArray((obj as any).rooms) ? (obj as any).rooms : [];
+        return { activeRoomId, rooms };
+      } catch {
+        return null;
+      }
+    };
+
+    const writeRoomsIndex = async (idx: RoomsIndex) => {
+      await fs.mkdir(roomsDir, { recursive: true });
+      await fs.writeFile(roomsIndexPath, JSON.stringify(idx, null, 2));
+    };
+
+    const roomPath = (roomId: string, rel: string) => join(roomsDir, roomId, rel);
+
+    const ensureDefaultRoomInitialized = async () => {
+      // One-time migration from legacy single-file storage:
+      // - assets/user/room-meta.json + room.(png/jpg/webp)
+      // - assets/user/manual-map.json
+      // into rooms/default/{room.jpg, manual-map.json}
+      await fs.mkdir(roomPath(defaultRoomId, ""), { recursive: true });
+
+      const idxExisting = await readRoomsIndex();
+      if (idxExisting && Array.isArray(idxExisting.rooms) && idxExisting.rooms.find((r) => r.id === defaultRoomId)) {
+        return;
+      }
+
+      const t = Date.now();
+
+      // Pick a source background image: prefer legacy user room image if present.
+      const legacyMetaPath = join(rootUserDir, "room-meta.json");
+      let legacyFile: string | null = null;
+      try {
+        const metaTxt = await fs.readFile(legacyMetaPath, "utf8");
+        const meta = JSON.parse(metaTxt);
+        legacyFile = typeof meta?.file === "string" ? meta.file : null;
+      } catch {
+        legacyFile = null;
+      }
+
+      const srcImg = legacyFile ? join(rootUserDir, legacyFile) : null;
+      const dstImg = roomPath(defaultRoomId, "room.jpg");
+      if (srcImg) {
+        try {
+          const buf = await fs.readFile(srcImg);
+          await fs.writeFile(dstImg, buf);
+        } catch {
+          // ignore
+        }
+      }
+
+      // Manual map: prefer legacy server manual-map.json if present.
+      const legacyMapPath = join(rootUserDir, "manual-map.json");
+      const dstMap = roomPath(defaultRoomId, "manual-map.json");
+      try {
+        const txt = await fs.readFile(legacyMapPath, "utf8");
+        await fs.writeFile(dstMap, txt);
+      } catch {
+        // default empty map (32x20)
+        const empty = { version: 1, tx: 32, ty: 20, cells: new Array(32 * 20).fill(null), updatedAt: null };
+        await fs.writeFile(dstMap, JSON.stringify(empty, null, 2));
+      }
+
+      // Create rooms index
+      const idx: RoomsIndex = {
+        activeRoomId: defaultRoomId,
+        rooms: [{ id: defaultRoomId, name: "Default", createdAt: t, updatedAt: t }],
+      };
+      await writeRoomsIndex(idx);
+    };
+
+    // Kick migration/initialization (best-effort, no throw)
+    ensureDefaultRoomInitialized().catch(() => undefined);
+
+    const getActiveRoomId = async (): Promise<string> => {
+      const idx = await readRoomsIndex();
+      const id = idx?.activeRoomId || defaultRoomId;
+      return safeRoomId(id) ? id : defaultRoomId;
+    };
+
+    // --- HTTP: dynamic handler (prefix routing) ---
+    // OpenClaw plugin httpRoutes are exact-path matches; use httpHandler for prefix routes like static assets.
+    api.registerHttpHandler(async (req, res) => {
+      const url = readRequestUrl(req);
+      // Normalize trailing slashes so routes work with or without a final '/'
+      const pRaw = url.pathname || "/";
+      const p = (pRaw !== "/") ? pRaw.replace(/\/+$/, "") : "/";
+
+      // Static assets: /lobster-room/assets/** → <pluginDir>/assets/**
+      const assetsPrefix = "/lobster-room/assets/";
+      if (p.startsWith(assetsPrefix)) {
+        let rel = p.slice(assetsPrefix.length);
+        try { rel = decodeURIComponent(rel); } catch {}
+        rel = rel.replace(/^\/+/, "");
+        if (!rel || rel.includes("..") || rel.includes("\\")) {
+          res.statusCode = 400;
+          res.end("bad_request");
+          return true;
+        }
+        const ct = contentTypeByExt(extname(rel));
+        if (!ct) {
+          res.statusCode = 415;
+          res.end("unsupported_media_type");
+          return true;
+        }
+        try {
+          const buf = await fs.readFile(join(pluginDir, "assets", rel));
+          res.statusCode = 200;
+          res.setHeader("content-type", ct);
+          res.setHeader("cache-control", "no-store");
+          res.end(buf);
+        } catch {
+          res.statusCode = 404;
+          res.end("not_found");
+        }
+        return true;
+      }
+
+      // Rooms API
+      if (p === "/lobster-room/api/rooms" || p === "/lobster-room/api/rooms/active" || p === "/lobster-room/api/rooms/delete") {
+        if ((req.method || "GET").toUpperCase() === "GET") {
+          const idx = (await readRoomsIndex()) || { activeRoomId: defaultRoomId, rooms: [{ id: defaultRoomId, name: "Default", createdAt: 0, updatedAt: 0 }] };
+          sendJson(res, 200, { ok: true, ...idx });
+          return true;
+        }
+        if ((req.method || "GET").toUpperCase() === "POST" && p.endsWith("/active")) {
+          try {
+            const buf = await readBody(req, 128 * 1024);
+            const obj = JSON.parse(buf.toString("utf8"));
+            const roomId = String(obj?.roomId || "").trim();
+            if (!safeRoomId(roomId)) throw new Error("bad_room_id");
+            const idx = (await readRoomsIndex()) || { activeRoomId: defaultRoomId, rooms: [{ id: defaultRoomId, name: "Default", createdAt: 0, updatedAt: 0 }] };
+            if (!idx.rooms.find((r) => r.id === roomId)) throw new Error("room_not_found");
+            idx.activeRoomId = roomId;
+            await writeRoomsIndex(idx);
+            sendJson(res, 200, { ok: true, activeRoomId: roomId });
+          } catch (err: any) {
+            sendJson(res, 400, { ok: false, error: String(err?.message || err) });
+          }
+          return true;
+        }
+
+        if ((req.method || "GET").toUpperCase() === "POST" && p.endsWith("/delete")) {
+          try {
+            const buf = await readBody(req, 128 * 1024);
+            const obj = JSON.parse(buf.toString("utf8"));
+            const roomId = String(obj?.roomId || "").trim();
+            if (!safeRoomId(roomId)) throw new Error("bad_room_id");
+            if (roomId === defaultRoomId) throw new Error("cannot_delete_default");
+            const idx = (await readRoomsIndex()) || { activeRoomId: defaultRoomId, rooms: [{ id: defaultRoomId, name: "Default", createdAt: 0, updatedAt: 0 }] };
+            if (!idx.rooms.find((r) => r.id === roomId)) throw new Error("room_not_found");
+
+            // Remove from index
+            idx.rooms = idx.rooms.filter((r) => r.id !== roomId);
+            if (idx.activeRoomId === roomId) idx.activeRoomId = defaultRoomId;
+            await writeRoomsIndex(idx);
+
+            // Delete directory best-effort
+            try {
+              // Node 22: fs.rm available
+              await fs.rm(roomPath(roomId, ""), { recursive: true, force: true });
+            } catch {}
+
+            sendJson(res, 200, { ok: true, activeRoomId: idx.activeRoomId });
+          } catch (err: any) {
+            sendJson(res, 400, { ok: false, error: String(err?.message || err) });
+          }
+          return true;
+        }
+
+        res.statusCode = 405;
+        res.end("method_not_allowed");
+        return true;
+      }
+
+      // Manual map API (user painted walkable zones) (per-active-room)
+      if (p === "/lobster-room/api/manual-map" || p === "/lobster-room/api/manual-map/reset") {
+        const roomId = await getActiveRoomId();
+        const mapPath = roomPath(roomId, "manual-map.json");
+
+        if (p.endsWith("/reset")) {
+          if ((req.method || "GET").toUpperCase() !== "POST") {
+            res.statusCode = 405;
+            res.end("method_not_allowed");
+            return true;
+          }
+          try {
+            await fs.unlink(mapPath).catch(() => undefined);
+            sendJson(res, 200, { ok: true });
+          } catch (err: any) {
+            sendJson(res, 500, { ok: false, error: String(err?.message || err) });
+          }
+          return true;
+        }
+
+        if ((req.method || "GET").toUpperCase() === "GET") {
+          try {
+            const txt = await fs.readFile(mapPath, "utf8");
+            res.statusCode = 200;
+            res.setHeader("content-type", "application/json; charset=utf-8");
+            res.setHeader("cache-control", "no-store");
+            res.end(txt);
+          } catch {
+            res.statusCode = 404;
+            res.end("not_found");
+          }
+          return true;
+        }
+
+        if ((req.method || "GET").toUpperCase() === "POST") {
+          try {
+            await fs.mkdir(dirname(mapPath), { recursive: true });
+            const buf = await readBody(req, 512 * 1024);
+            const txt = buf.toString("utf8");
+            const obj = JSON.parse(txt);
+            // lightweight validation
+            if (!obj || typeof obj !== "object") throw new Error("bad_json");
+            if (typeof (obj as any).tx !== "number" || typeof (obj as any).ty !== "number" || !Array.isArray((obj as any).cells)) {
+              throw new Error("bad_shape");
+            }
+            await fs.writeFile(mapPath, JSON.stringify(obj, null, 2));
+            // update room updatedAt
+            const idx = await readRoomsIndex();
+            if (idx) {
+              const r = idx.rooms.find((x) => x.id === roomId);
+              if (r) r.updatedAt = Date.now();
+              await writeRoomsIndex(idx);
+            }
+            sendJson(res, 200, { ok: true });
+          } catch (err: any) {
+            sendJson(res, 400, { ok: false, error: String(err?.message || err) });
+          }
+          return true;
+        }
+
+        res.statusCode = 405;
+        res.end("method_not_allowed");
+        return true;
+      }
+
+      // Room layout API (inferred regions)
+      if (p === "/lobster-room/api/room-layout" || p === "/lobster-room/api/room-layout/reset") {
+        const layoutPath = join(rootUserDir, "room-layout.json");
+
+        if (p.endsWith("/reset")) {
+          if ((req.method || "GET").toUpperCase() !== "POST") {
+            res.statusCode = 405;
+            res.end("method_not_allowed");
+            return true;
+          }
+          try {
+            await fs.unlink(layoutPath).catch(() => undefined);
+            sendJson(res, 200, { ok: true });
+          } catch (err: any) {
+            sendJson(res, 500, { ok: false, error: String(err?.message || err) });
+          }
+          return true;
+        }
+
+        if ((req.method || "GET").toUpperCase() === "GET") {
+          try {
+            const txt = await fs.readFile(layoutPath, "utf8");
+            res.statusCode = 200;
+            res.setHeader("content-type", "application/json; charset=utf-8");
+            res.setHeader("cache-control", "no-store");
+            res.end(txt);
+          } catch {
+            res.statusCode = 404;
+            res.end("not_found");
+          }
+          return true;
+        }
+
+        if ((req.method || "GET").toUpperCase() === "POST") {
+          try {
+            await fs.mkdir(rootUserDir, { recursive: true });
+            const buf = await readBody(req, 512 * 1024);
+            const txt = buf.toString("utf8");
+            // validate JSON shape lightly
+            const obj = JSON.parse(txt);
+            if (!obj || typeof obj !== "object") throw new Error("bad_json");
+            await fs.writeFile(layoutPath, JSON.stringify(obj, null, 2));
+            sendJson(res, 200, { ok: true });
+          } catch (err: any) {
+            sendJson(res, 400, { ok: false, error: String(err?.message || err) });
+          }
+          return true;
+        }
+
+        res.statusCode = 405;
+        res.end("method_not_allowed");
+        return true;
+      }
+
+      // Room image API (per-active-room)
+      if (p === "/lobster-room/api/room-image/info" || p === "/lobster-room/api/room-image" || p === "/lobster-room/api/room-image/reset") {
+        const roomId = await getActiveRoomId();
+        const imgPath = roomPath(roomId, "room.jpg");
+
+        // info
+        if (p.endsWith("/info")) {
+          const idx = await readRoomsIndex();
+          const room = idx?.rooms?.find((r) => r.id === roomId) || { id: roomId, name: roomId, createdAt: 0, updatedAt: 0 };
+          sendJson(res, 200, { ok: true, exists: true, roomId, roomName: room.name, updatedAt: room.updatedAt || null });
+          return true;
+        }
+
+        // reset = switch to default (do not delete)
+        if (p.endsWith("/reset")) {
+          if ((req.method || "GET").toUpperCase() !== "POST") {
+            res.statusCode = 405;
+            res.end("method_not_allowed");
+            return true;
+          }
+          try {
+            const idx = (await readRoomsIndex()) || { activeRoomId: defaultRoomId, rooms: [{ id: defaultRoomId, name: "Default", createdAt: 0, updatedAt: 0 }] };
+            idx.activeRoomId = defaultRoomId;
+            await writeRoomsIndex(idx);
+            sendJson(res, 200, { ok: true, activeRoomId: defaultRoomId });
+          } catch (err: any) {
+            sendJson(res, 500, { ok: false, error: String(err?.message || err) });
+          }
+          return true;
+        }
+
+        // GET image bytes
+        if ((req.method || "GET").toUpperCase() === "GET") {
+          try {
+            const buf = await fs.readFile(imgPath);
+            res.statusCode = 200;
+            res.setHeader("content-type", "image/jpeg");
+            res.setHeader("cache-control", "no-store");
+            res.end(buf);
+          } catch {
+            res.statusCode = 404;
+            res.end("not_found");
+          }
+          return true;
+        }
+
+        // POST upload multipart: create new room, set active, create empty manual map
+        if ((req.method || "GET").toUpperCase() === "POST") {
+          const ct = String(req.headers["content-type"] || "");
+          const m = ct.match(/multipart\/form-data;\s*boundary=([^;]+)/i);
+          if (!m) {
+            sendJson(res, 400, { ok: false, error: "expected_multipart" });
+            return true;
+          }
+          const boundary = m[1];
+          try {
+            const body = await readBody(req, 12 * 1024 * 1024);
+            const filePart = parseMultipartFile(body, boundary);
+            const ext = extFromContentType(filePart.contentType) || extname(filePart.filename).toLowerCase();
+            if (![".png", ".jpg", ".jpeg", ".webp"].includes(ext)) {
+              sendJson(res, 415, { ok: false, error: "unsupported_image_type", contentType: filePart.contentType });
+              return true;
+            }
+
+            const id = `room-${Date.now()}`;
+            await fs.mkdir(roomPath(id, ""), { recursive: true });
+            // Store as JPEG to simplify; keep bytes as-is (we don't transcode here).
+            await fs.writeFile(roomPath(id, "room.jpg"), filePart.data);
+            const empty = { version: 1, tx: 32, ty: 20, cells: new Array(32 * 20).fill(null), updatedAt: Date.now() };
+            await fs.writeFile(roomPath(id, "manual-map.json"), JSON.stringify(empty, null, 2));
+
+            const idx = (await readRoomsIndex()) || { activeRoomId: defaultRoomId, rooms: [{ id: defaultRoomId, name: "Default", createdAt: 0, updatedAt: 0 }] };
+            idx.rooms.push({ id, name: filePart.filename?.slice(0, 32) || id, createdAt: Date.now(), updatedAt: Date.now() });
+            idx.activeRoomId = id;
+            await writeRoomsIndex(idx);
+
+            sendJson(res, 200, { ok: true, roomId: id, activeRoomId: id });
+          } catch (err: any) {
+            sendJson(res, 500, { ok: false, error: String(err?.message || err) });
+          }
+          return true;
+        }
+
+        res.statusCode = 405;
+        res.end("method_not_allowed");
+        return true;
+      }
+
+      return false;
+    });
 
     const cooldownMs = Number.parseInt((process.env.LOBSTER_ROOM_IDLE_COOLDOWN_MS || "1500").trim(), 10) || 1500;
     const minDwellMs = Number.parseInt((process.env.LOBSTER_ROOM_MIN_DWELL_MS || "900").trim(), 10) || 900;
@@ -278,7 +702,6 @@ export default {
 
     api.on("message_sending", (event, ctx) => {
       // Message hooks do not carry agentId in the event/ctx today.
-      // In plugin UX we default to the primary agent (main), unless later we add routing.
       const agentId = "main";
       pushEvent("message_sending", {
         agentId,
@@ -290,7 +713,6 @@ export default {
     api.on("message_sent", (event, ctx) => {
       const agentId = "main";
       pushEvent("message_sent", { agentId, data: { to: event?.to, success: event?.success, channelId: ctx?.channelId } });
-      // Mark errors explicitly so UI can surface it.
       if (event?.success === false) {
         setState(agentId, "error", { error: event?.error || "message_sent failed", to: event?.to, channelId: ctx?.channelId });
       }
@@ -301,9 +723,6 @@ export default {
       const agentId = resolveAgentId(ctx);
       pushEvent("agent_end", { agentId, data: { success: event?.success, error: event?.error, sessionKey: ctx?.sessionKey } });
 
-      // NOTE: message_sending/message_sent hooks are not currently wired by the gateway
-      // in this OpenClaw version, so we synthesize a short-lived "reply" phase at the
-      // end of a successful run to reflect that an outbound reply likely occurred.
       if (event?.success === false) {
         setState(agentId, "error", { error: event?.error || "agent_end: unsuccessful" });
         setTimeout(() => setIdleWithCooldown(agentId), cooldownMs);
@@ -314,13 +733,52 @@ export default {
       setIdleWithCooldown(agentId);
     });
 
+    // --- Local assets via API (most reliable across gateway routers) ---
+    // Usage: /lobster-room/api/asset?path=furniture/sofa.svg
+    api.registerHttpRoute({
+      path: "/lobster-room/api/asset",
+      handler: async (req, res) => {
+        const url = readRequestUrl(req);
+        let rel = (url.searchParams.get("path") || "").trim();
+        try {
+          rel = decodeURIComponent(rel);
+        } catch {}
+        rel = rel.replace(/^\/+/, "");
+        if (!rel || rel.includes("..") || rel.includes("\\")) {
+          res.statusCode = 400;
+          res.end("bad_request");
+          return;
+        }
+        if (!rel.startsWith("furniture/")) {
+          res.statusCode = 403;
+          res.end("forbidden");
+          return;
+        }
+        const ct = contentTypeByExt(extname(rel));
+        if (!ct) {
+          res.statusCode = 415;
+          res.end("unsupported_media_type");
+          return;
+        }
+        try {
+          const buf = await fs.readFile(join(pluginDir, "assets", rel));
+          res.statusCode = 200;
+          res.setHeader("content-type", ct);
+          res.setHeader("cache-control", "no-store");
+          res.end(buf);
+        } catch {
+          res.statusCode = 404;
+          res.end("not_found");
+        }
+      },
+    });
+
     // HTTP: portal
     api.registerHttpRoute({
       path: "/lobster-room/",
       handler: async (_req, res) => {
-        const fs = await import("node:fs/promises");
         try {
-          const html = await fs.readFile(assetPath, "utf8");
+          const html = await fs.readFile(portalHtmlPath, "utf8");
           res.statusCode = 200;
           res.setHeader("content-type", "text/html; charset=utf-8");
           res.setHeader("cache-control", "no-store");
@@ -334,16 +792,117 @@ export default {
       },
     });
 
-    // HTTP: API (plugin-native)
+    // HTTP: API
     api.registerHttpRoute({
       path: "/lobster-room/api/lobster-room",
       handler: async (req, res) => {
         const url = readRequestUrl(req);
+
+        // NOTE: In this deployment, only this exact /api/lobster-room route reliably matches.
+        // Some proxies strip querystrings before reaching plugin routes, so we multiplex via POST body/content-type.
+        const roomMetaPath = join(rootUserDir, "room-meta.json");
+        const readRoomMeta = async (): Promise<{ file?: string; updatedAt?: number } | null> => {
+          try {
+            const txt = await fs.readFile(roomMetaPath, "utf8");
+            const obj = JSON.parse(txt);
+            if (!obj || typeof obj !== "object") return null;
+            return {
+              file: typeof (obj as any).file === "string" ? (obj as any).file : undefined,
+              updatedAt: typeof (obj as any).updatedAt === "number" ? (obj as any).updatedAt : undefined,
+            };
+          } catch {
+            return null;
+          }
+        };
+
+        // (1) Upload: POST multipart/form-data
+        if ((req.method || "GET").toUpperCase() === "POST") {
+          const ctype = String(req.headers["content-type"] || "");
+          if (/multipart\/form-data/i.test(ctype)) {
+            const m = ctype.match(/multipart\/form-data;\s*boundary=([^;]+)/i);
+            if (!m) {
+              sendJson(res, 400, { ok: false, error: "expected_multipart" });
+              return;
+            }
+            const boundary = m[1];
+            try {
+              await fs.mkdir(rootUserDir, { recursive: true });
+              const body = await readBody(req, 12 * 1024 * 1024);
+              const filePart = parseMultipartFile(body, boundary);
+              const ext = extFromContentType(filePart.contentType) || extname(filePart.filename).toLowerCase();
+              if (![".png", ".jpg", ".jpeg", ".webp"].includes(ext)) {
+                sendJson(res, 415, { ok: false, error: "unsupported_image_type", contentType: filePart.contentType });
+                return;
+              }
+              const outExt = ext === ".jpeg" ? ".jpg" : ext;
+              const outFile = `room${outExt}`;
+              await fs.writeFile(join(rootUserDir, outFile), filePart.data);
+              await fs.writeFile(roomMetaPath, JSON.stringify({ file: outFile, updatedAt: Date.now() }, null, 2));
+              sendJson(res, 200, { ok: true, file: outFile });
+            } catch (err: any) {
+              sendJson(res, 500, { ok: false, error: String(err?.message || err) });
+            }
+            return;
+          }
+
+          // (2) Control ops: POST application/json
+          if (/application\/json/i.test(ctype)) {
+            let payload: any = null;
+            try {
+              payload = JSON.parse((await readBody(req, 512 * 1024)).toString("utf8"));
+            } catch {
+              payload = null;
+            }
+            const op = String(payload?.op || "").trim();
+
+            if (op === "roomImageInfo") {
+              const meta = await readRoomMeta();
+              sendJson(res, 200, { ok: true, exists: !!meta?.file, file: meta?.file || null, updatedAt: meta?.updatedAt || null });
+              return;
+            }
+
+            if (op === "roomImageGet") {
+              const meta = await readRoomMeta();
+              const file = meta?.file;
+              if (!file) {
+                sendJson(res, 200, { ok: true, exists: false });
+                return;
+              }
+              const rel = file.replace(/^\/+/, "");
+              if (rel.includes("..") || rel.includes("\\")) {
+                sendJson(res, 400, { ok: false, error: "bad_request" });
+                return;
+              }
+              const ct = contentTypeByExt(extname(rel));
+              if (!ct || !ct.startsWith("image/")) {
+                sendJson(res, 415, { ok: false, error: "unsupported_media_type" });
+                return;
+              }
+              const buf = await fs.readFile(join(rootUserDir, rel));
+              const b64 = buf.toString("base64");
+              sendJson(res, 200, { ok: true, exists: true, contentType: ct.split(";")[0], dataUrl: `data:${ct.split(";")[0]};base64,${b64}`, updatedAt: meta?.updatedAt || null });
+              return;
+            }
+
+            if (op === "roomImageReset") {
+              try {
+                const meta = await readRoomMeta();
+                if (meta?.file) {
+                  try { await fs.unlink(join(rootUserDir, meta.file)); } catch {}
+                }
+                try { await fs.unlink(roomMetaPath); } catch {}
+                sendJson(res, 200, { ok: true });
+              } catch (err: any) {
+                sendJson(res, 500, { ok: false, error: String(err?.message || err) });
+              }
+              return;
+            }
+          }
+        }
+
         const t = nowMs();
 
-        // Ensure at least configured agents exist.
         const agentIdByDefault = "main";
-
         const agentIdAllowRaw = (process.env.LOBSTER_ROOM_AGENT_IDS || "").trim();
         const allowIds = agentIdAllowRaw
           ? agentIdAllowRaw
@@ -352,7 +911,6 @@ export default {
               .filter(Boolean)
           : [agentIdByDefault];
 
-        // Bootstrap configured agents so they appear even before any events.
         for (const id of allowIds) ensure(id);
 
         const agentNameOverrides: Record<string, string> = (() => {
@@ -385,8 +943,7 @@ export default {
           .map((agentId) => activity.get(agentId) || ensure(agentId))
           .map((row) => {
             const uiState = mapActivityToUiState(row.state);
-            const displayName =
-              agentNameOverrides[row.agentId] || identityNameByAgentId.get(row.agentId) || row.agentId;
+            const displayName = agentNameOverrides[row.agentId] || identityNameByAgentId.get(row.agentId) || row.agentId;
             return {
               id: `resident@${row.agentId}`,
               hostId: "local",
@@ -446,7 +1003,7 @@ export default {
     });
 
     api.logger.info("[lobster-room] plugin routes registered", {
-      assetPath,
+      portalHtmlPath,
       cooldownMs,
       minDwellMs,
       pollSeconds,

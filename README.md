@@ -25,6 +25,10 @@ containers), restart the Gateway service/container manually.
 - `https://<openclaw-host>/lobster-room/`
 - `https://<openclaw-host>/lobster-room/api/lobster-room`
 
+### Important: updates require a Gateway restart
+
+This is an OpenClaw **plugin**. When you change Lobster Room code, you must restart/redeploy the OpenClaw Gateway so it reloads plugin assets. A browser refresh (even incognito) cannot pick up a new build unless the server is updated.
+
 ## How status works (truth + evidence)
 
 This project monitors OpenClaw **in-process** via plugin lifecycle hooks.
