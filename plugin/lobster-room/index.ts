@@ -160,20 +160,28 @@ export default {
     const roomPath = (roomId: string, rel: string) => join(roomsDir, roomId, rel);
 
     const ensureDefaultRoomInitialized = async () => {
-      // One-time migration from legacy single-file storage:
-      // - assets/user/room-meta.json + room.(png/jpg/webp)
-      // - assets/user/manual-map.json
-      // into rooms/default/{room.jpg, manual-map.json}
+      // Initialize a usable default room.
+      // Priority order for seeding content:
+      // 1) Legacy single-file storage under assets/user (migration)
+      // 2) Bundled defaults shipped with the plugin (assets/default-room.jpg + assets/default-manual-map.json)
+      // 3) Empty map fallback
       await fs.mkdir(roomPath(defaultRoomId, ""), { recursive: true });
 
-      const idxExisting = await readRoomsIndex();
-      if (idxExisting && Array.isArray(idxExisting.rooms) && idxExisting.rooms.find((r) => r.id === defaultRoomId)) {
-        return;
-      }
-
       const t = Date.now();
+      const dstImg = roomPath(defaultRoomId, "room.jpg");
+      const dstMap = roomPath(defaultRoomId, "manual-map.json");
 
-      // Pick a source background image: prefer legacy user room image if present.
+      const fileExists = async (p: string) => {
+        try {
+          await fs.stat(p);
+          return true;
+        } catch {
+          return false;
+        }
+      };
+
+      // --- Background image seed ---
+      // Prefer legacy user room image if present.
       const legacyMetaPath = join(rootUserDir, "room-meta.json");
       let legacyFile: string | null = null;
       try {
@@ -184,30 +192,58 @@ export default {
         legacyFile = null;
       }
 
-      const srcImg = legacyFile ? join(rootUserDir, legacyFile) : null;
-      const dstImg = roomPath(defaultRoomId, "room.jpg");
-      if (srcImg) {
-        try {
-          const buf = await fs.readFile(srcImg);
-          await fs.writeFile(dstImg, buf);
-        } catch {
-          // ignore
+      const srcLegacyImg = legacyFile ? join(rootUserDir, legacyFile) : null;
+      const srcBundledImg = join(pluginDir, "assets", "default-room.jpg");
+
+      if (!(await fileExists(dstImg))) {
+        let seeded = false;
+        if (srcLegacyImg) {
+          try {
+            const buf = await fs.readFile(srcLegacyImg);
+            await fs.writeFile(dstImg, buf);
+            seeded = true;
+          } catch {}
+        }
+        if (!seeded) {
+          try {
+            const buf = await fs.readFile(srcBundledImg);
+            await fs.writeFile(dstImg, buf);
+            seeded = true;
+          } catch {}
         }
       }
 
-      // Manual map: prefer legacy server manual-map.json if present.
+      // --- Manual map seed ---
+      // Prefer legacy server manual-map.json if present.
       const legacyMapPath = join(rootUserDir, "manual-map.json");
-      const dstMap = roomPath(defaultRoomId, "manual-map.json");
-      try {
-        const txt = await fs.readFile(legacyMapPath, "utf8");
-        await fs.writeFile(dstMap, txt);
-      } catch {
-        // default empty map (32x20)
-        const empty = { version: 1, tx: 32, ty: 20, cells: new Array(32 * 20).fill(null), updatedAt: null };
-        await fs.writeFile(dstMap, JSON.stringify(empty, null, 2));
+      const srcBundledMap = join(pluginDir, "assets", "default-manual-map.json");
+      if (!(await fileExists(dstMap))) {
+        let seeded = false;
+        try {
+          const txt = await fs.readFile(legacyMapPath, "utf8");
+          await fs.writeFile(dstMap, txt);
+          seeded = true;
+        } catch {}
+        if (!seeded) {
+          try {
+            const txt = await fs.readFile(srcBundledMap, "utf8");
+            await fs.writeFile(dstMap, txt);
+            seeded = true;
+          } catch {}
+        }
+        if (!seeded) {
+          const empty = { version: 1, tx: 32, ty: 20, cells: new Array(32 * 20).fill(null), updatedAt: null };
+          await fs.writeFile(dstMap, JSON.stringify(empty, null, 2));
+        }
       }
 
-      // Create rooms index
+      // --- Rooms index ---
+      const idxExisting = await readRoomsIndex();
+      if (idxExisting && Array.isArray(idxExisting.rooms) && idxExisting.rooms.find((r) => r.id === defaultRoomId)) {
+        // Keep existing index; do not override activeRoomId.
+        return;
+      }
+
       const idx: RoomsIndex = {
         activeRoomId: defaultRoomId,
         rooms: [{ id: defaultRoomId, name: "Default", createdAt: t, updatedAt: t }],
