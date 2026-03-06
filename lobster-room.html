@@ -304,6 +304,12 @@
           </label>
         </div>
 
+        <div class="row">
+          <label class="hint" style="display:flex;gap:8px;align-items:center">
+            <input id="toggle-mvdbg" type="checkbox" /> Show Move Debug panel
+          </label>
+        </div>
+
         <div class="editor" id="room-editor">
           <div class="hint"><b>Room Editor (MVP)</b> — paint walkable areas per zone. Saved locally; placement will follow your painted zones.</div>
           <div class="editor-top">
@@ -383,6 +389,8 @@
 
     // ---------------- Movement debug instrumentation ----------------
     const MVDBG = {
+      // Panel visibility (UI affordance). Default off.
+      visible: false,
       enabled: false,
       freezeRoam: false,
       panelOpen: true,
@@ -394,6 +402,7 @@
     };
 
     function mvLoadPrefs(){
+      try{ MVDBG.visible = localStorage.getItem('lobsterRoom.mvdbg.visible')==='1'; }catch{}
       try{ MVDBG.enabled = localStorage.getItem('lobsterRoom.mvdbg.enabled')==='1'; }catch{}
       try{ MVDBG.freezeRoam = localStorage.getItem('lobsterRoom.mvdbg.freeze')==='1'; }catch{}
       try{ MVDBG.panelOpen = localStorage.getItem('lobsterRoom.mvdbg.open')!=='0'; }catch{}
@@ -401,6 +410,7 @@
     }
 
     function mvSavePrefs(){
+      try{ localStorage.setItem('lobsterRoom.mvdbg.visible', MVDBG.visible?'1':'0'); }catch{}
       try{ localStorage.setItem('lobsterRoom.mvdbg.enabled', MVDBG.enabled?'1':'0'); }catch{}
       try{ localStorage.setItem('lobsterRoom.mvdbg.freeze', MVDBG.freezeRoam?'1':'0'); }catch{}
       try{ localStorage.setItem('lobsterRoom.mvdbg.open', MVDBG.panelOpen?'1':'0'); }catch{}
@@ -437,7 +447,8 @@
     function mvRenderPanel(){
       const panel = document.getElementById('move-debug');
       if(!panel) return;
-      panel.style.display = 'block';
+      panel.style.display = MVDBG.visible ? 'block' : 'none';
+      if(!MVDBG.visible) return;
       const body = document.getElementById('md-body');
       if(body) body.style.display = MVDBG.panelOpen ? '' : 'none';
       const btn = document.getElementById('md-toggle');
@@ -631,7 +642,11 @@
       mvLoadPrefs();
       const panel = document.getElementById('move-debug');
       if(!panel) return;
-      panel.style.display = 'block';
+      panel.style.display = MVDBG.visible ? 'block' : 'none';
+      if(!MVDBG.visible){
+        try{ mvRenderOverlay(); }catch{}
+        return;
+      }
       const enabled = document.getElementById('md-enabled');
       const freeze = document.getElementById('md-freeze');
       const clear = document.getElementById('md-clear');
@@ -2268,6 +2283,7 @@
       const bgOp = document.getElementById('bg-opacity');
       const bgOpVal = document.getElementById('bg-opacity-val');
       const toggleRegions = document.getElementById('toggle-regions');
+      const toggleMvdbg = document.getElementById('toggle-mvdbg');
 
       // Room Editor
       const brushSeg = document.getElementById('brush-seg');
@@ -2377,6 +2393,26 @@
         }
 
         // (Removed) tile overlay / auto inference buttons for now; focus on manual Room Editor.
+      })();
+
+      // Move Debug panel visibility (default off)
+      (function initMoveDebugVisibility(){
+        mvLoadPrefs();
+        if(toggleMvdbg) toggleMvdbg.checked = !!MVDBG.visible;
+        mvRenderPanel();
+        if(toggleMvdbg){
+          toggleMvdbg.addEventListener('change', ()=>{
+            MVDBG.visible = !!toggleMvdbg.checked;
+            // If panel is hidden, also disable logging/overlay by default to reduce clutter.
+            if(!MVDBG.visible){
+              MVDBG.enabled = false;
+              MVDBG.overlayOn = false;
+            }
+            mvSavePrefs();
+            mvRenderPanel();
+            mvRenderOverlay();
+          });
+        }
       })();
 
       async function loadManualMapFromServer(){
