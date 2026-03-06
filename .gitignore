@@ -10,6 +10,10 @@ Thumbs.db
 # Logs
 *.log
 
+# Backup / scratch
+*.bak
+*.bak.*
+
 # Worktrees
 .worktrees/
 

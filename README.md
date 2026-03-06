@@ -9,16 +9,19 @@ Gateway under `/lobster-room/`.
 - Portal: `https://<openclaw-host>/lobster-room/`
 - API: `https://<openclaw-host>/lobster-room/api/lobster-room`
 
-## Install (one line)
+## Install / Update (one line)
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/zacmoltbot/lobster-room/main/plugin/lobster-room/install.sh | bash
 ```
 
-The installer will attempt `openclaw gateway restart`.
+The installer:
+- Installs into `~/.openclaw/extensions/lobster-room/`
+- Copies the portal HTML to `~/.openclaw/extensions/lobster-room/assets/lobster-room.html`
+- Seeds a **Default room** (background + manual walkable map) so the UI is usable immediately
+- Attempts `openclaw gateway restart` (best-effort)
 
-If it cannot restart the gateway in your environment (common in hosted
-containers), restart the Gateway service/container manually.
+If restart fails (common in hosted containers without systemd), restart the **Gateway service/container** manually.
 
 ## Verify
 
@@ -27,7 +30,11 @@ containers), restart the Gateway service/container manually.
 
 ### Important: updates require a Gateway restart
 
-This is an OpenClaw **plugin**. When you change Lobster Room code, you must restart/redeploy the OpenClaw Gateway so it reloads plugin assets. A browser refresh (even incognito) cannot pick up a new build unless the server is updated.
+This is an OpenClaw **plugin**. After updating, you must restart/redeploy the OpenClaw Gateway so it reloads plugin assets. A browser refresh (even incognito) cannot pick up a new build unless the server is updated.
+
+### UI version stamp
+
+Open the Move Debug panel (Settings → *Show Move Debug panel*) and check the `ui=<hash>` stamp. It’s the fastest way to confirm which frontend build is being served.
 
 ## How status works (truth + evidence)
 
@@ -49,6 +56,14 @@ are not wired in core, so `replying` is currently **synthetic**:
 (Next step is a core PR to wire outbound send hooks so `replying` becomes real.)
 
 ## Debug
+
+### Move Debug panel
+
+The Move Debug panel is **hidden by default**. Enable it in Settings when needed.
+
+### After uploading a new room background
+
+After a successful upload, Settings stays open and the UI prompts you to paint the manual walkable map for the new room.
 
 The API includes a ring buffer of recent hook events:
 
