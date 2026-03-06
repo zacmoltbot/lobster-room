@@ -2645,13 +2645,6 @@
             statusEl.textContent = 'Upload complete. Next: paint the walkable manual map below, then click Save.';
           }catch{}
           try{
-            // Helpful default: turn on zones overlay so it's easier to paint.
-            if(toggleRegions && !toggleRegions.checked){
-              toggleRegions.checked = true;
-              toggleRegions.dispatchEvent(new Event('change'));
-            }
-          }catch{}
-          try{
             renderEditor();
             const ed = document.getElementById('room-editor');
             if(ed && ed.scrollIntoView) ed.scrollIntoView({behavior:'smooth', block:'start'});
