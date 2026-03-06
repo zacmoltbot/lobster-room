@@ -269,6 +269,25 @@
     </div>
   </div>
 
+  <!-- Agent name mapping modal -->
+  <div class="modal-backdrop" id="labels-backdrop" aria-hidden="true">
+    <div class="modal" role="dialog" aria-modal="true" aria-label="Agent name mapping">
+      <div class="modal-h">
+        <div class="t">Agent names</div>
+        <button class="btn" id="btn-labels-close">Close</button>
+      </div>
+      <div class="modal-b">
+        <div class="hint">Map <b>agentId</b> → display name. Leave blank to show the agentId.</div>
+        <div id="labels-list" style="display:flex;flex-direction:column;gap:10px;margin-top:12px"></div>
+        <div class="row" style="justify-content:flex-start;gap:10px;margin-top:12px">
+          <button class="btn" id="btn-labels-add" type="button">Add mapping</button>
+          <button class="btn" id="btn-labels-save" type="button">Save</button>
+          <div class="hint" id="labels-status"></div>
+        </div>
+      </div>
+    </div>
+  </div>
+
   <!-- Settings modal -->
   <div class="modal-backdrop" id="settings-backdrop" aria-hidden="true">
     <div class="modal" role="dialog" aria-modal="true" aria-label="Settings">
@@ -310,11 +329,8 @@
           </label>
         </div>
 
-        <div class="hint" style="margin-top:12px">Agent name mapping (agentId → display name)</div>
-        <div class="hint" style="margin-top:6px">Example: <code>{"main":"Zac"}</code></div>
-        <textarea id="agent-labels" spellcheck="false" style="width:100%;height:90px;resize:vertical;background:#0f1115;border:1px solid rgba(255,255,255,.10);color:var(--text);padding:10px 12px;border-radius:10px;font-family:ui-monospace,SFMono-Regular,Menlo,Monaco,Consolas,monospace;font-size:12px"></textarea>
-        <div class="row" style="justify-content:flex-start;gap:10px">
-          <button class="btn" id="btn-agent-labels-save" type="button">Save mapping</button>
+        <div class="row" style="justify-content:flex-start;gap:10px;margin-top:12px">
+          <button class="btn" id="btn-agent-labels-open" type="button">Edit agent names</button>
           <div class="hint" id="agent-labels-status"></div>
         </div>
 
@@ -2292,9 +2308,16 @@
       const bgOpVal = document.getElementById('bg-opacity-val');
       const toggleRegions = document.getElementById('toggle-regions');
       const toggleMvdbg = document.getElementById('toggle-mvdbg');
-      const agentLabelsTa = document.getElementById('agent-labels');
       const agentLabelsStatus = document.getElementById('agent-labels-status');
-      const btnAgentLabelsSave = document.getElementById('btn-agent-labels-save');
+      const btnAgentLabelsOpen = document.getElementById('btn-agent-labels-open');
+
+      // Labels modal
+      const labelsBackdrop = document.getElementById('labels-backdrop');
+      const btnLabelsClose = document.getElementById('btn-labels-close');
+      const btnLabelsAdd = document.getElementById('btn-labels-add');
+      const btnLabelsSave = document.getElementById('btn-labels-save');
+      const labelsList = document.getElementById('labels-list');
+      const labelsStatus = document.getElementById('labels-status');
 
       // Room Editor
       const brushSeg = document.getElementById('brush-seg');
@@ -2439,30 +2462,105 @@
         }
       })();
 
-      // Agent labels mapping
+      // Agent labels mapping (modal UI)
       (function initAgentLabels(){
-        if(!btnAgentLabelsSave || !agentLabelsTa) return;
-        btnAgentLabelsSave.addEventListener('click', async ()=>{
-          let obj = null;
+        const openLabels = ()=>{ if(labelsBackdrop) labelsBackdrop.classList.add('show'); };
+        const closeLabels = ()=>{ if(labelsBackdrop) labelsBackdrop.classList.remove('show'); };
+
+        const makeRow = (agentId, label)=>{
+          const row = document.createElement('div');
+          row.className = 'row';
+          row.style.gap = '10px';
+          row.style.alignItems = 'center';
+          row.innerHTML = `
+            <div class="hint" style="min-width:120px">${agentId ? agentId : '<new agentId>'}</div>
+            <input class="grow" data-k="k" placeholder="agentId" value="${agentId||''}" style="background:#0f1115;border:1px solid rgba(255,255,255,.10);color:var(--text);padding:10px 12px;border-radius:10px" />
+            <input class="grow" data-k="v" placeholder="Display name (optional)" value="${label||''}" style="background:#0f1115;border:1px solid rgba(255,255,255,.10);color:var(--text);padding:10px 12px;border-radius:10px" />
+            <button class="btn" type="button" data-k="del">Remove</button>
+          `;
+          row.querySelector('[data-k=del]').addEventListener('click', ()=>{ try{ row.remove(); }catch{} });
+          return row;
+        };
+
+        const loadIntoModal = async ()=>{
+          if(!labelsList) return;
+          if(labelsStatus) labelsStatus.textContent = 'Loading…';
+          labelsList.innerHTML = '';
           try{
-            obj = JSON.parse(agentLabelsTa.value || '{}');
+            // Get known agentIds from the live API.
+            const r0 = await fetch('./api/lobster-room?ts=' + Date.now(), {cache:'no-store'});
+            const j0 = r0.ok ? await r0.json() : null;
+            const agentIds = new Set();
+            if(j0 && Array.isArray(j0.agents)){
+              for(const a of j0.agents){
+                const id = String(a && a.id || '');
+                const m = id.match(/^resident@(.+)$/);
+                agentIds.add(m ? m[1] : id);
+              }
+            }
+
+            // Get existing mapping.
+            const r = await fetch('./api/agent-labels?ts=' + Date.now(), {cache:'no-store'});
+            const j = r.ok ? await r.json() : null;
+            const labels = (j && j.ok && j.labels && typeof j.labels === 'object') ? j.labels : {};
+
+            // Render rows: all known agentIds first.
+            for(const id of Array.from(agentIds).sort()){
+              labelsList.appendChild(makeRow(id, labels[id]||''));
+            }
+            // Render any extra keys not in agentIds.
+            for(const [k,v] of Object.entries(labels)){
+              if(agentIds.has(k)) continue;
+              labelsList.appendChild(makeRow(k, v));
+            }
+            if(labelsStatus) labelsStatus.textContent = '';
           }catch{
-            if(agentLabelsStatus) agentLabelsStatus.textContent = 'Invalid JSON.';
-            return;
+            if(labelsStatus) labelsStatus.textContent = 'Load failed.';
           }
-          if(!obj || typeof obj !== 'object' || Array.isArray(obj)){
-            if(agentLabelsStatus) agentLabelsStatus.textContent = 'Mapping must be a JSON object.';
-            return;
+        };
+
+        const collectMapping = ()=>{
+          const out = {};
+          if(!labelsList) return out;
+          const rows = Array.from(labelsList.children);
+          for(const row of rows){
+            const k = (row.querySelector('input[data-k=k]')?.value || '').trim();
+            const v = (row.querySelector('input[data-k=v]')?.value || '').trim();
+            if(!k) continue;
+            if(v) out[k] = v;
           }
+          return out;
+        };
+
+        if(btnAgentLabelsOpen){
+          btnAgentLabelsOpen.addEventListener('click', async ()=>{
+            openLabels();
+            await loadIntoModal();
+          });
+        }
+        if(btnLabelsClose) btnLabelsClose.addEventListener('click', closeLabels);
+        if(labelsBackdrop) labelsBackdrop.addEventListener('click', (e)=>{ if(e.target===labelsBackdrop) closeLabels(); });
+
+        if(btnLabelsAdd) btnLabelsAdd.addEventListener('click', ()=>{ if(labelsList) labelsList.appendChild(makeRow('', '')); });
+
+        if(btnLabelsSave) btnLabelsSave.addEventListener('click', async ()=>{
+          const obj = collectMapping();
           if(agentLabelsStatus) agentLabelsStatus.textContent = 'Saving…';
+          if(labelsStatus) labelsStatus.textContent = 'Saving…';
           try{
             const r = await fetch('./api/agent-labels', {method:'POST', headers:{'content-type':'application/json'}, body: JSON.stringify({labels: obj})});
             const j = r.ok ? await r.json() : null;
             if(!j || !j.ok) throw new Error('save_failed');
-            agentLabelsTa.value = JSON.stringify(j.labels || obj, null, 2);
             if(agentLabelsStatus) agentLabelsStatus.textContent = 'Saved.';
+            if(labelsStatus) labelsStatus.textContent = 'Saved.';
+            // Re-render using server normalized form.
+            if(labelsList){
+              labelsList.innerHTML='';
+              for(const [k,v] of Object.entries(j.labels||obj)) labelsList.appendChild(makeRow(k,v));
+            }
           }catch{
             if(agentLabelsStatus) agentLabelsStatus.textContent = 'Save failed.';
+            if(labelsStatus) labelsStatus.textContent = 'Save failed.';
           }
         });
       })();
