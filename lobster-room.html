@@ -1813,9 +1813,10 @@
       if(!ptsPercent || ptsPercent.length===0) return;
 
       const now = Date.now();
-      const lockMs = (opts && opts.lockMs) ? opts.lockMs : 25000;
+      const lockMs = (opts && opts.lockMs) ? opts.lockMs : 10000;
       wrap._walking = true;
       wrap._lockedUntilMs = now + lockMs;
+      wrap._boost = false;
 
       // Debug
       try{
@@ -1831,6 +1832,7 @@
         if(i>=ptsPercent.length){
           wrap._walking = false;
           wrap._lockedUntilMs = 0;
+          wrap._boost = false;
           try{ mvLog(wrap.dataset.id || '?', 'ARRIVE', {pathLen: ptsPercent.length}); }catch{}
           return;
         }
@@ -1860,14 +1862,19 @@
         // Distance-based modifier (keeps motion feeling natural on different screen sizes)
         const dNorm = Math.max(0, Math.min(1, dist / 520));
         const distMul = 0.80 + 0.60 * dNorm; // 0.8x..1.4x
-        const dur = Math.round(Math.max(70, Math.min(1100, baseDur * distMul)));
+        let dur = Math.round(Math.max(70, Math.min(1100, baseDur * distMul)));
+
+        // Boost mode: when runtime state changes mid-walk, finish the current path quickly.
+        if(wrap._boost){
+          dur = 20;
+        }
 
         wrap.style.setProperty('--moveDur', dur + 'ms');
         wrap.dataset.px = String(px);
         wrap.dataset.py = String(py);
         wrap.style.left = px + '%';
         wrap.style.top  = py + '%';
-        wrap._pathTimer = setTimeout(step, Math.max(60, dur));
+        wrap._pathTimer = setTimeout(step, Math.max(20, dur));
       };
       step();
     }
@@ -1928,6 +1935,18 @@
         }
         const nt = wrap.querySelector('.n-text');
         if(nt) nt.textContent = a.name;
+
+        // If runtime state changes while walking, boost movement to finish quickly.
+        try{
+          const prevState = wrap.dataset.state || '';
+          const nextState = String(a.state||'');
+          const stateChanged = (prevState && nextState && prevState !== nextState);
+          wrap.dataset.state = nextState;
+          if(stateChanged && wrap._walking){
+            wrap._boost = true;
+            try{ mvLog(a.id,'BOOST_ON_STATE',{zone:a._zone, prevState, nextState}); }catch{}
+          }
+        }catch{}
         const nz = wrap.querySelector('.n-zone');
         if(nz) nz.textContent = '(' + zoneLabel + ')';
 
@@ -2009,7 +2028,7 @@
 
             // Lock target (shared with layoutAgentsByZone via localStorage)
             try{
-              localStorage.setItem(`lobsterRoom.lock.${a.id}`, JSON.stringify({zone:a._zone, idx:endIdx, untilMs: Date.now()+25000}));
+              localStorage.setItem(`lobsterRoom.lock.${a.id}`, JSON.stringify({zone:a._zone, idx:endIdx, untilMs: Date.now()+10000}));
             }catch{}
 
             const mm = MODEL.manualMap;
@@ -2048,7 +2067,7 @@
                 return [(x/info.tx)*100, (y/info.ty)*100];
               });
               try{ mvLog(a.id,'START',{zone:a._zone, startIdx, endIdx, pathLen:pathIdx.length}); }catch{}
-              startNodePath(wrap, pts, {lockMs:25000});
+              startNodePath(wrap, pts, {lockMs:10000});
             }else{
               // If path not found, do nothing (stay put) rather than crossing non-walkable.
               try{ mvLog(a.id,'FAIL_NO_PATH',{zone:a._zone, startIdx, endIdx, zoneChanged, targetChanged, pathLen: (pathIdx?pathIdx.length:0)}); }catch{}
