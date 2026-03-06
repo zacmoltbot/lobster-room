@@ -1848,18 +1848,26 @@
         const dx = (px - prevPx) / 100 * w;
         const dy = (py - prevPy) / 100 * h;
         const dist = Math.hypot(dx, dy);
-        // Speed model: near -> slower, far -> faster.
-        const slow = 120; // px/s
-        const fast = 520; // px/s
-        const t = Math.max(0, Math.min(1, dist / 520));
-        const speed = slow + (fast - slow) * t;
-        const dur = Math.round(Math.max(160, Math.min(1100, (dist / Math.max(1, speed)) * 1000)));
+        // Speed model:
+        // - Per-step duration still considers pixel distance (so big visual jumps are slower than tiny ones)
+        // - BUT long paths should overall move faster (so cross-zone travel doesn't take forever).
+        const pathN = Math.max(1, ptsPercent.length);
+        const longFastDur = 100; // ms per step for long paths (Edward request)
+        const shortDur = 260;    // ms per step for short paths
+        const f = Math.max(0, Math.min(1, (pathN - 8) / 30)); // 0..1, ramps up with path length
+        const baseDur = shortDur + (longFastDur - shortDur) * f;
+
+        // Distance-based modifier (keeps motion feeling natural on different screen sizes)
+        const dNorm = Math.max(0, Math.min(1, dist / 520));
+        const distMul = 0.80 + 0.60 * dNorm; // 0.8x..1.4x
+        const dur = Math.round(Math.max(70, Math.min(1100, baseDur * distMul)));
+
         wrap.style.setProperty('--moveDur', dur + 'ms');
         wrap.dataset.px = String(px);
         wrap.dataset.py = String(py);
         wrap.style.left = px + '%';
         wrap.style.top  = py + '%';
-        wrap._pathTimer = setTimeout(step, Math.max(80, dur));
+        wrap._pathTimer = setTimeout(step, Math.max(60, dur));
       };
       step();
     }
