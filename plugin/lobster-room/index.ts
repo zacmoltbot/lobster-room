@@ -566,6 +566,7 @@ export default {
     });
 
     const cooldownMs = Number.parseInt((process.env.LOBSTER_ROOM_IDLE_COOLDOWN_MS || "1500").trim(), 10) || 1500;
+    const replyCooldownMs = Number.parseInt((process.env.LOBSTER_ROOM_REPLY_COOLDOWN_MS || "2500").trim(), 10) || 2500;
     const minDwellMs = Number.parseInt((process.env.LOBSTER_ROOM_MIN_DWELL_MS || "900").trim(), 10) || 900;
     const staleMs = Number.parseInt((process.env.LOBSTER_ROOM_STALE_MS || "15000").trim(), 10) || 15000;
     const toolMaxMs = Number.parseInt((process.env.LOBSTER_ROOM_TOOL_MAX_MS || "12000").trim(), 10) || 12000;
@@ -669,11 +670,12 @@ export default {
       return seq;
     };
 
-    const setIdleWithCooldown = (agentId: string) => {
+    const setIdleWithCooldown = (agentId: string, overrideMs?: number) => {
       const row = ensure(agentId);
       const seq = row.seq + 1;
       row.seq = seq;
       const scheduledAt = nowMs();
+      const waitMs = (typeof overrideMs === "number" && Number.isFinite(overrideMs)) ? Math.max(0, overrideMs) : cooldownMs;
       // Keep current state for a short cooldown to reduce UI flicker.
       setTimeout(() => {
         const cur = activity.get(agentId);
@@ -684,7 +686,7 @@ export default {
         cur.sinceMs = t;
         cur.lastEventMs = t;
         cur.details = null;
-      }, cooldownMs);
+      }, waitMs);
       // Update lastEvent so API knows something just happened.
       row.lastEventMs = scheduledAt;
     };
@@ -766,7 +768,7 @@ export default {
       }
 
       setState(agentId, "reply", { synthetic: true });
-      setIdleWithCooldown(agentId);
+      setIdleWithCooldown(agentId, replyCooldownMs);
     });
 
     // --- Local assets via API (most reliable across gateway routers) ---
