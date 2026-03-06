@@ -310,6 +310,14 @@
           </label>
         </div>
 
+        <div class="hint" style="margin-top:12px">Agent name mapping (agentId → display name)</div>
+        <div class="hint" style="margin-top:6px">Example: <code>{"main":"Zac"}</code></div>
+        <textarea id="agent-labels" spellcheck="false" style="width:100%;height:90px;resize:vertical;background:#0f1115;border:1px solid rgba(255,255,255,.10);color:var(--text);padding:10px 12px;border-radius:10px;font-family:ui-monospace,SFMono-Regular,Menlo,Monaco,Consolas,monospace;font-size:12px"></textarea>
+        <div class="row" style="justify-content:flex-start;gap:10px">
+          <button class="btn" id="btn-agent-labels-save" type="button">Save mapping</button>
+          <div class="hint" id="agent-labels-status"></div>
+        </div>
+
         <div class="editor" id="room-editor">
           <div class="hint"><b>Room Editor (MVP)</b> — paint walkable areas per zone. Saved locally; placement will follow your painted zones.</div>
           <div class="editor-top">
@@ -2284,6 +2292,9 @@
       const bgOpVal = document.getElementById('bg-opacity-val');
       const toggleRegions = document.getElementById('toggle-regions');
       const toggleMvdbg = document.getElementById('toggle-mvdbg');
+      const agentLabelsTa = document.getElementById('agent-labels');
+      const agentLabelsStatus = document.getElementById('agent-labels-status');
+      const btnAgentLabelsSave = document.getElementById('btn-agent-labels-save');
 
       // Room Editor
       const brushSeg = document.getElementById('brush-seg');
@@ -2296,6 +2307,19 @@
       const openSettings = ()=>{
         backdrop.classList.add('show');
         refreshRoomsList();
+        // Load agent label mapping
+        (async ()=>{
+          if(!agentLabelsTa) return;
+          try{
+            const r = await fetch('./api/agent-labels?ts=' + Date.now(), {cache:'no-store'});
+            const j = r.ok ? await r.json() : null;
+            if(j && j.ok && j.labels && typeof j.labels === 'object'){
+              agentLabelsTa.value = JSON.stringify(j.labels, null, 2);
+              if(agentLabelsStatus) agentLabelsStatus.textContent = '';
+            }
+          }catch{}
+        })();
+
         // Ensure editor background renders immediately (room-bg may already be loaded).
         setTimeout(()=>{
           try{ renderEditor(); }catch{}
@@ -2413,6 +2437,34 @@
             mvRenderOverlay();
           });
         }
+      })();
+
+      // Agent labels mapping
+      (function initAgentLabels(){
+        if(!btnAgentLabelsSave || !agentLabelsTa) return;
+        btnAgentLabelsSave.addEventListener('click', async ()=>{
+          let obj = null;
+          try{
+            obj = JSON.parse(agentLabelsTa.value || '{}');
+          }catch{
+            if(agentLabelsStatus) agentLabelsStatus.textContent = 'Invalid JSON.';
+            return;
+          }
+          if(!obj || typeof obj !== 'object' || Array.isArray(obj)){
+            if(agentLabelsStatus) agentLabelsStatus.textContent = 'Mapping must be a JSON object.';
+            return;
+          }
+          if(agentLabelsStatus) agentLabelsStatus.textContent = 'Saving…';
+          try{
+            const r = await fetch('./api/agent-labels', {method:'POST', headers:{'content-type':'application/json'}, body: JSON.stringify({labels: obj})});
+            const j = r.ok ? await r.json() : null;
+            if(!j || !j.ok) throw new Error('save_failed');
+            agentLabelsTa.value = JSON.stringify(j.labels || obj, null, 2);
+            if(agentLabelsStatus) agentLabelsStatus.textContent = 'Saved.';
+          }catch{
+            if(agentLabelsStatus) agentLabelsStatus.textContent = 'Save failed.';
+          }
+        });
       })();
 
       async function loadManualMapFromServer(){

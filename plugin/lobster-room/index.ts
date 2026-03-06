@@ -298,6 +298,40 @@ export default {
         return true;
       }
 
+      // Agent label mapping API
+      if (p === "/lobster-room/api/agent-labels") {
+        if ((req.method || "GET").toUpperCase() === "GET") {
+          const m = await readAgentLabels();
+          sendJson(res, 200, { ok: true, labels: m });
+          return true;
+        }
+        if ((req.method || "GET").toUpperCase() === "POST") {
+          try {
+            const buf = await readBody(req, 128 * 1024);
+            const obj = JSON.parse(buf.toString("utf8"));
+            const labelsRaw = obj?.labels;
+            if (!labelsRaw || typeof labelsRaw !== "object" || Array.isArray(labelsRaw)) throw new Error("bad_labels");
+            const out: Record<string, string> = {};
+            for (const [k, v] of Object.entries(labelsRaw)) {
+              if (typeof k !== "string" || typeof v !== "string") continue;
+              const kk = k.trim();
+              const vv = v.trim();
+              if (!kk || !vv) continue;
+              if (kk.length > 64 || vv.length > 64) continue;
+              out[kk] = vv;
+            }
+            await writeAgentLabels(out);
+            sendJson(res, 200, { ok: true, labels: out });
+          } catch (err: any) {
+            sendJson(res, 400, { ok: false, error: String(err?.message || err) });
+          }
+          return true;
+        }
+        res.statusCode = 405;
+        res.end("method_not_allowed");
+        return true;
+      }
+
       // Rooms API
       if (p === "/lobster-room/api/rooms" || p === "/lobster-room/api/rooms/active" || p === "/lobster-room/api/rooms/delete") {
         if ((req.method || "GET").toUpperCase() === "GET") {
@@ -568,6 +602,29 @@ export default {
     const cooldownMs = Number.parseInt((process.env.LOBSTER_ROOM_IDLE_COOLDOWN_MS || "1500").trim(), 10) || 1500;
     const replyCooldownMs = Number.parseInt((process.env.LOBSTER_ROOM_REPLY_COOLDOWN_MS || "2500").trim(), 10) || 2500;
     const minDwellMs = Number.parseInt((process.env.LOBSTER_ROOM_MIN_DWELL_MS || "900").trim(), 10) || 900;
+
+    // Persisted agent display-name overrides (shared across browsers).
+    const agentLabelsPath = join(rootUserDir, "agent-labels.json");
+
+    const readAgentLabels = async (): Promise<Record<string, string>> => {
+      try {
+        const txt = await fs.readFile(agentLabelsPath, "utf8");
+        const obj = JSON.parse(txt);
+        if (!obj || typeof obj !== "object" || Array.isArray(obj)) return {};
+        const out: Record<string, string> = {};
+        for (const [k, v] of Object.entries(obj as any)) {
+          if (typeof k === "string" && typeof v === "string" && k.trim() && v.trim()) out[k.trim()] = v.trim();
+        }
+        return out;
+      } catch {
+        return {};
+      }
+    };
+
+    const writeAgentLabels = async (m: Record<string, string>) => {
+      await fs.mkdir(dirname(agentLabelsPath), { recursive: true });
+      await fs.writeFile(agentLabelsPath, JSON.stringify(m, null, 2));
+    };
     const staleMs = Number.parseInt((process.env.LOBSTER_ROOM_STALE_MS || "15000").trim(), 10) || 15000;
     const toolMaxMs = Number.parseInt((process.env.LOBSTER_ROOM_TOOL_MAX_MS || "12000").trim(), 10) || 12000;
     const pollSeconds = Number.parseInt((process.env.LOBSTER_ROOM_POLL_SECONDS || "1").trim(), 10) || 1;
@@ -951,7 +1008,7 @@ export default {
 
         for (const id of allowIds) ensure(id);
 
-        const agentNameOverrides: Record<string, string> = (() => {
+        const agentNameOverridesFromEnv: Record<string, string> = (() => {
           try {
             const raw = (process.env.LOBSTER_ROOM_AGENT_NAME_MAP_JSON || "").trim();
             if (!raw) return {};
@@ -966,6 +1023,12 @@ export default {
             return {};
           }
         })();
+
+        const agentNameOverridesFromFile = await readAgentLabels();
+        const agentNameOverrides: Record<string, string> = {
+          ...agentNameOverridesFromFile,
+          ...agentNameOverridesFromEnv, // env wins
+        };
 
         const identityNameByAgentId = new Map<string, string>();
         const agentList = Array.isArray(api.config?.agents?.list) ? api.config.agents.list : [];
