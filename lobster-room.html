@@ -1518,6 +1518,10 @@
         }
         const listAll = [...agents].sort((aa, bb) => (aa.id || '').localeCompare(bb.id || ''));
         const placed = [];
+        // Prevent overlap: ensure each agent gets a distinct cell when possible.
+        // (We include zone in the key so agents in different zones can reuse the same index.)
+        const usedCells = new Set(); // key: "<zone>:<idx>"
+
         for(const a of listAll){
           const z = zoneForAgent(a);
           const pool = (cellsByType[z] && cellsByType[z].length) ? cellsByType[z]
@@ -1530,23 +1534,42 @@
             const bucket = Math.floor(Date.now() / 10000);
             // Debug: optionally freeze roaming so we can isolate movement issues.
             const roamBucket = (MVDBG && MVDBG.freezeRoam) ? 0 : bucket;
-            const k = Math.floor(hash01(`${a.id}|${z}|${roamBucket}`) * pool.length) % pool.length;
-            const idx = pool[k];
+            const k0 = Math.floor(hash01(`${a.id}|${z}|${roamBucket}`) * pool.length) % pool.length;
+
             const lockKey = `lobsterRoom.lock.${a.id}`;
             let locked = null;
             try{ locked = JSON.parse(localStorage.getItem(lockKey) || 'null'); }catch{}
             const now = Date.now();
-            const idxFinal = (locked && locked.idx!=null && locked.zone===z && locked.untilMs>now && locked.idx>=0 && locked.idx<mm.cells.length && mm.cells[locked.idx]===z)
-              ? locked.idx
-              : idx;
+
+            // Try to keep the lock *only if* it doesn't collide with someone else.
+            let idxPick = null;
+            if(locked && locked.idx!=null && locked.zone===z && locked.untilMs>now && locked.idx>=0 && locked.idx<mm.cells.length && mm.cells[locked.idx]===z){
+              const lk = `${z}:${locked.idx}`;
+              if(!usedCells.has(lk)) idxPick = locked.idx;
+            }
+
+            // Otherwise pick the first free cell via linear probing from a stable start.
+            if(idxPick==null){
+              for(let step=0; step<pool.length; step++){
+                const idxTry = pool[(k0 + step) % pool.length];
+                const key = `${z}:${idxTry}`;
+                if(!usedCells.has(key)) { idxPick = idxTry; break; }
+              }
+            }
+
+            // Absolute fallback (no free cells): allow collision, but still place deterministically.
+            if(idxPick==null) idxPick = pool[k0];
+
+            usedCells.add(`${z}:${idxPick}`);
+
             // IMPORTANT: when using manualMap, keep position at exact cell centers.
             // Sub-cell jitter can visually drift the sprite into nearby blocked/obstacle pixels
             // and can also cause startIdx estimation to snap to an adjacent cell.
-            const x = (idxFinal % tx) + 0.5;
-            const y = Math.floor(idxFinal / tx) + 0.5;
+            const x = (idxPick % tx) + 0.5;
+            const y = Math.floor(idxPick / tx) + 0.5;
             const px = (x / tx) * 100;
             const py = (y / ty) * 100;
-            placed.push({...a, _zone: z, _px: px, _py: py, _cellIdx: idxFinal, _gridTx: tx, _gridTy: ty});
+            placed.push({...a, _zone: z, _px: px, _py: py, _cellIdx: idxPick, _gridTx: tx, _gridTy: ty});
             continue;
           }
           // If manualMap exists but we somehow have no cells at all, keep legacy fallback.

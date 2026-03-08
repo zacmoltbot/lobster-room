@@ -628,8 +628,6 @@ export default {
     const staleMs = Number.parseInt((process.env.LOBSTER_ROOM_STALE_MS || "15000").trim(), 10) || 15000;
     const toolMaxMs = Number.parseInt((process.env.LOBSTER_ROOM_TOOL_MAX_MS || "12000").trim(), 10) || 12000;
     const pollSeconds = Number.parseInt((process.env.LOBSTER_ROOM_POLL_SECONDS || "1").trim(), 10) || 1;
-    // Default to only showing the primary agent.
-    process.env.LOBSTER_ROOM_AGENT_IDS = process.env.LOBSTER_ROOM_AGENT_IDS || "main";
 
     const activity = new Map<string, AgentActivity>();
 
@@ -997,14 +995,36 @@ export default {
 
         const t = nowMs();
 
-        const agentIdByDefault = "main";
         const agentIdAllowRaw = (process.env.LOBSTER_ROOM_AGENT_IDS || "").trim();
-        const allowIds = agentIdAllowRaw
-          ? agentIdAllowRaw
-              .split(",")
-              .map((s) => s.trim())
-              .filter(Boolean)
-          : [agentIdByDefault];
+        let allowIds: string[] = [];
+        if (agentIdAllowRaw) {
+          allowIds = agentIdAllowRaw
+            .split(",")
+            .map((s) => s.trim())
+            .filter(Boolean);
+        } else {
+          const ids: string[] = [];
+          const seen = new Set<string>();
+          const agentListRaw = Array.isArray(api.config?.agents?.list) ? api.config.agents.list : [];
+          for (const a of agentListRaw) {
+            const id = a?.id;
+            if (typeof id === "string" && id.trim() && !seen.has(id.trim())) {
+              ids.push(id.trim());
+              seen.add(id.trim());
+            }
+          }
+          for (const id of activity.keys()) {
+            if (id && !seen.has(id)) {
+              ids.push(id);
+              seen.add(id);
+            }
+          }
+          if (!seen.has("main")) {
+            ids.push("main");
+            seen.add("main");
+          }
+          allowIds = ids.length ? ids : ["main"];
+        }
 
         for (const id of allowIds) ensure(id);
 
