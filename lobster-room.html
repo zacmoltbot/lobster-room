@@ -458,9 +458,29 @@
       mvRenderPanel();
     }
 
+    function mvActLog(agentId, kind, data){
+      // Activity debug piggybacks on the Move Debug panel (more convenient for screenshots).
+      mvLog(agentId, 'ACT_'+kind, data||{});
+    }
+
     function mvFmt(row){
       const d=row.data||{};
       const bits=[];
+
+      // Activity events
+      if(String(row.type||'').startsWith('ACT_')){
+        if(d.buildTag) bits.push('build='+d.buildTag);
+        if(d.state) bits.push('state='+d.state);
+        if(d.activityState) bits.push('aState='+d.activityState);
+        if(d.queueDepth!=null) bits.push('qd='+d.queueDepth);
+        if(d.lastEventMs!=null) bits.push('last='+d.lastEventMs);
+        if(d.sinceMs!=null) bits.push('since='+d.sinceMs);
+        if(d.recentEvents!=null) bits.push('ev='+d.recentEvents);
+        if(d.note) bits.push(d.note);
+        return `${row.t} ${row.id} ${row.type} ${bits.join(' ')}`.trim();
+      }
+
+      // Movement events
       if(d.zone) bits.push('z='+d.zone);
       if(d.zoneChanged!=null) bits.push('zc='+(d.zoneChanged?1:0));
       if(d.targetChanged!=null) bits.push('tc='+(d.targetChanged?1:0));
@@ -489,9 +509,10 @@
       if(meta){
         const room = (typeof MODEL!=='undefined' && MODEL.activeRoomId) ? MODEL.activeRoomId : '';
         const mr = (typeof MODEL!=='undefined' && MODEL.manualReady) ? 'ready' : 'loading';
+        const build = (typeof MODEL!=='undefined' && MODEL.buildTag) ? MODEL.buildTag : '';
         const v = MVDBG.lastValidate;
         const vTxt = v ? ` · islands: c=${v.corridorIslands} w=${v.workIslands} t=${v.toolsIslands} l=${v.loungeIslands} m=${v.meetingIslands}` : '';
-        meta.textContent = `ui=${UI_VERSION} · room=${room||'—'} map=${mr} log=${MVDBG.log.length}/${MVDBG.max}${vTxt}`;
+        meta.textContent = `ui=${UI_VERSION} · build=${build||'—'} · room=${room||'—'} map=${mr} log=${MVDBG.log.length}/${MVDBG.max}${vTxt}`;
       }
       const logEl = document.getElementById('md-log');
       if(logEl){
@@ -2252,6 +2273,9 @@
         if(res.ok){
           const data = await res.json();
 
+          // Build tag (backend)
+          MODEL.buildTag = data.buildTag || '';
+
           // Agents from API.
           MODEL.agents = (data.agents || []).map(a => ({
             id: a.id,
@@ -2261,6 +2285,40 @@
             y: a.y,
             debug: a.debug,
           }));
+          // Keep last-known-good snapshot so we can keep rendering on transient errors.
+          MODEL.lastGoodAgents = MODEL.agents;
+          MODEL.lastGoodAt = Date.now();
+          MODEL.lastApiError = null;
+
+          // Activity debug: log state changes + recentEvents into the Move Debug panel (HUD).
+          try{
+            MVDBG._actPrev = MVDBG._actPrev || {};
+            for(const a of MODEL.agents){
+              const aid = String(a && a.id || '');
+              const prev = MVDBG._actPrev[aid] || {};
+              const st = String(a && a.state || '');
+              const actState = a && a.debug && a.debug.decision ? String(a.debug.decision.activityState||'') : '';
+              const lastEventMs = a && a.debug && a.debug.decision ? a.debug.decision.lastEventMs : null;
+              const sinceMs = a && a.debug && a.debug.decision ? a.debug.decision.sinceMs : null;
+              const qd = a && a.meta ? a.meta.queueDepth : null;
+              const evN = a && a.debug && a.debug.decision && Array.isArray(a.debug.decision.recentEvents) ? a.debug.decision.recentEvents.length : null;
+
+              const changed = (prev.state!==st) || (prev.activityState!==actState);
+              const heartbeat = (!prev._t || (Date.now()-prev._t) > 10000);
+              if(changed || heartbeat){
+                mvActLog(aid, changed?'STATE':'BEAT', {
+                  buildTag: MODEL.buildTag || '',
+                  state: st,
+                  activityState: actState,
+                  queueDepth: qd,
+                  lastEventMs,
+                  sinceMs,
+                  recentEvents: evN,
+                });
+                MVDBG._actPrev[aid] = {state: st, activityState: actState, _t: Date.now()};
+              }
+            }
+          }catch{}
 
           // Derive a display name for footer activity.
           MODEL.selfName = (MODEL.agents.find(a=>String(a.id||'')==='main')?.name) || (MODEL.agents[0]?.name) || 'main';
@@ -2295,11 +2353,12 @@
         }
         throw new Error('HTTP ' + res.status);
       }catch(e){
+        // Do NOT clear the scene on transient API errors; keep last-known-good agents on screen.
+        // (Mobile networks / brief proxy hiccups should not make all lobsters disappear.)
         refreshActivity();
-        const room = document.getElementById('room');
-        Array.from(room.querySelectorAll('.lobster')).forEach(n=>n.remove());
-        document.getElementById('ts').textContent = 'Update failed: ' + new Date().toLocaleString();
-        document.getElementById('api').textContent = 'API error: ' + (e && e.message ? e.message : 'error');
+        MODEL.lastApiError = { at: Date.now(), message: (e && e.message) ? String(e.message) : 'error' };
+        document.getElementById('ts').textContent = 'Update failed (showing last state): ' + new Date().toLocaleString();
+        document.getElementById('api').textContent = 'API error: ' + (MODEL.lastApiError.message || 'error');
         document.getElementById('data-source').textContent = 'error';
       }
     }
@@ -2401,7 +2460,9 @@
               if(backdrop && backdrop.classList.contains('show')) renderEditor();
             }catch{}
           };
-          img.src = './api/room-image?ts=' + Date.now();
+          // Cache-busting strategy A: use versioned URL param derived from room-image/info.updatedAt.
+          // Backend serves ./api/room-image with long-lived immutable caching.
+          img.src = './api/room-image?v=' + ((j && j.updatedAt) ? j.updatedAt : 0);
           const nm = (j && j.roomName) ? j.roomName : '—';
           statusEl.textContent = 'Current room: ' + nm;
         }catch{

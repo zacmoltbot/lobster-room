@@ -90,6 +90,12 @@ function nowMs() {
   return Date.now();
 }
 
+function maxNum(a: any, b: any): number {
+  const na = (typeof a === "number" && Number.isFinite(a)) ? a : 0;
+  const nb = (typeof b === "number" && Number.isFinite(b)) ? b : 0;
+  return Math.max(na, nb);
+}
+
 function readRequestUrl(req: IncomingMessage): URL {
   // Respect reverse proxies when present.
   const proto = (req.headers["x-forwarded-proto"] as string | undefined)?.split(",")[0]?.trim();
@@ -118,9 +124,12 @@ function contentTypeByExt(ext: string): string | null {
   return null;
 }
 
+const BUILD_TAG = "2026-03-08-debug-hooks-1";
+
 export default {
   id: "lobster-room",
   register(api: PluginApi) {
+    api.logger.info("[lobster-room] register", { buildTag: BUILD_TAG });
     // Resolve asset path relative to this plugin module (NOT the gateway cwd).
     const pluginDir = dirname(fileURLToPath(import.meta.url));
     const portalHtmlPath = join(pluginDir, "assets", "lobster-room.html");
@@ -540,12 +549,28 @@ export default {
         }
 
         // GET image bytes
+        // Cache strategy A: serve the image with a long-lived immutable cache.
+        // Frontend uses a versioned query param (?v=<updatedAt>) so this is safe.
         if ((req.method || "GET").toUpperCase() === "GET") {
           try {
+            const st = await fs.stat(imgPath);
+            const etag = `W/"${st.size}-${Math.floor(st.mtimeMs)}"`;
+
+            res.setHeader("content-type", "image/jpeg");
+            res.setHeader("cache-control", "public, max-age=31536000, immutable");
+            res.setHeader("etag", etag);
+            res.setHeader("last-modified", st.mtime.toUTCString());
+
+            // Conditional GET: if the browser already has this exact content cached.
+            const inm = String(req.headers["if-none-match"] || "");
+            if (inm && inm === etag) {
+              res.statusCode = 304;
+              res.end();
+              return true;
+            }
+
             const buf = await fs.readFile(imgPath);
             res.statusCode = 200;
-            res.setHeader("content-type", "image/jpeg");
-            res.setHeader("cache-control", "no-store");
             res.end(buf);
           } catch {
             res.statusCode = 404;
@@ -632,10 +657,86 @@ export default {
     const activity = new Map<string, AgentActivity>();
 
     // Ring buffer of recent hook events for self-debug (no secrets; truncate content).
+    // IMPORTANT: In some deployments the HTTP route handler may not share memory with hook handlers.
+    // We therefore also persist a small snapshot to disk and the HTTP API reads from that snapshot.
     const eventBuf: Array<{ ts: number; kind: string; agentId?: string; data?: any }> = [];
+
+    const snapshotPath = join(rootUserDir, "agent-activity.json");
+    type ActivitySnapshot = {
+      buildTag: string;
+      updatedAtMs: number;
+      agents: Record<string, { state: ActivityState; sinceMs: number; lastEventMs: number; details?: any }>;
+      events: Array<{ ts: number; kind: string; agentId?: string; data?: any }>;
+    };
+    let snap: ActivitySnapshot = {
+      buildTag: BUILD_TAG,
+      updatedAtMs: nowMs(),
+      agents: {},
+      events: [],
+    };
+
+    // Best-effort: load existing snapshot from disk so multiple isolates can converge.
+    // NOTE: Avoid top-level `await` in case the plugin loader parses register() as sync.
+    fs
+      .readFile(snapshotPath, "utf8")
+      .then((txt) => {
+        const obj = JSON.parse(txt);
+        if (obj && typeof obj === "object") {
+          if (obj.agents && typeof obj.agents === "object") snap.agents = obj.agents;
+          if (Array.isArray(obj.events)) snap.events = obj.events;
+          if (typeof obj.updatedAtMs === "number") snap.updatedAtMs = obj.updatedAtMs;
+        }
+      })
+      .catch(() => {});
+
+    const mergeAndWriteSnapshot = async () => {
+      try {
+        await fs.mkdir(rootUserDir, { recursive: true });
+      } catch {}
+      try {
+        // Merge with existing on-disk snapshot to avoid isolate overwrites.
+        let disk: any = null;
+        try {
+          const txt = await fs.readFile(snapshotPath, "utf8");
+          disk = JSON.parse(txt);
+        } catch {
+          disk = null;
+        }
+        const merged: ActivitySnapshot = {
+          buildTag: BUILD_TAG,
+          updatedAtMs: snap.updatedAtMs,
+          agents: { ...(disk?.agents || {}), ...(snap.agents || {}) },
+          events: Array.isArray(disk?.events) ? disk.events.slice(-30) : [],
+        };
+        // Prefer the most recent events we have.
+        if (Array.isArray(snap.events) && snap.events.length) {
+          merged.events = [...merged.events, ...snap.events].slice(-30);
+        }
+        merged.updatedAtMs = maxNum(disk?.updatedAtMs, snap.updatedAtMs);
+        await fs.writeFile(snapshotPath, JSON.stringify(merged, null, 2));
+      } catch {}
+    };
+
+    let _snapWriteTimer: any = null;
+    const writeSnapshotSoon = () => {
+      try {
+        if (_snapWriteTimer) return;
+        _snapWriteTimer = setTimeout(async () => {
+          _snapWriteTimer = null;
+          await mergeAndWriteSnapshot();
+        }, 50);
+      } catch {}
+    };
+
     const pushEvent = (kind: string, params: { agentId?: string; data?: any }) => {
-      eventBuf.push({ ts: nowMs(), kind, agentId: params.agentId, data: params.data });
+      const ev = { ts: nowMs(), kind, agentId: params.agentId, data: params.data };
+      eventBuf.push(ev);
       if (eventBuf.length > 30) eventBuf.splice(0, eventBuf.length - 30);
+
+      snap.updatedAtMs = ev.ts;
+      snap.events.push(ev);
+      if (snap.events.length > 30) snap.events.splice(0, snap.events.length - 30);
+      writeSnapshotSoon();
     };
 
     const priority: Record<ActivityState, number> = {
@@ -694,6 +795,18 @@ export default {
     const setState = (agentId: string, next: ActivityState, details?: Record<string, unknown> | null) => {
       const row = ensure(agentId);
       const t = nowMs();
+
+      // Persist to snapshot for API consumers.
+      try {
+        const prev = snap.agents[agentId];
+        if (!prev || prev.state !== next) {
+          snap.agents[agentId] = { state: next, sinceMs: t, lastEventMs: t, details: details ?? null };
+        } else {
+          snap.agents[agentId] = { ...prev, lastEventMs: t, details: details ?? prev.details };
+        }
+        snap.updatedAtMs = t;
+        writeSnapshotSoon();
+      } catch {}
 
       // Min-dwell: don't let fast transitions to idle hide states between polls.
       // Also enforce priority so high-signal states override lower ones.
@@ -758,6 +871,7 @@ export default {
 
     api.on("before_agent_start", (_event, ctx) => {
       const agentId = resolveAgentId(ctx);
+      api.logger.info("[lobster-room] hook before_agent_start", { buildTag: BUILD_TAG, agentId, sessionKey: ctx?.sessionKey });
       pushEvent("before_agent_start", { agentId, data: { sessionKey: ctx?.sessionKey, messageProvider: ctx?.messageProvider } });
       setState(agentId, "thinking", { sessionKey: ctx?.sessionKey, messageProvider: ctx?.messageProvider });
     });
@@ -765,6 +879,7 @@ export default {
     api.on("before_tool_call", (event, ctx) => {
       const agentId = resolveAgentId(ctx);
       const toolName = event?.toolName || event?.tool || event?.name;
+      api.logger.info("[lobster-room] hook before_tool_call", { buildTag: BUILD_TAG, agentId, toolName, sessionKey: ctx?.sessionKey });
 
       // Capture high-value params for debugging (truncate aggressively).
       let toolData: any = { toolName, sessionKey: ctx?.sessionKey };
@@ -995,6 +1110,17 @@ export default {
 
         const t = nowMs();
 
+        // Load last known activity snapshot written by hook handlers.
+        // This avoids relying on in-memory sharing between hook callbacks and HTTP routes.
+        let snapDisk: ActivitySnapshot | null = null;
+        try {
+          const txt = await fs.readFile(snapshotPath, "utf8");
+          const obj = JSON.parse(txt);
+          if (obj && typeof obj === "object" && typeof (obj as any).buildTag === "string") snapDisk = obj as any;
+        } catch {
+          snapDisk = null;
+        }
+
         const agentIdAllowRaw = (process.env.LOBSTER_ROOM_AGENT_IDS || "").trim();
         let allowIds: string[] = [];
         if (agentIdAllowRaw) {
@@ -1014,6 +1140,15 @@ export default {
             }
           }
           for (const id of activity.keys()) {
+            if (id && !seen.has(id)) {
+              ids.push(id);
+              seen.add(id);
+            }
+          }
+          // IMPORTANT: hook handlers may run in a different isolate; in that case this HTTP handler
+          // won't see hook-updated in-memory `activity`, but it *will* see the on-disk snapshot.
+          const snapAgentIds = snapDisk && snapDisk.agents ? Object.keys(snapDisk.agents) : [];
+          for (const id of snapAgentIds) {
             if (id && !seen.has(id)) {
               ids.push(id);
               seen.add(id);
@@ -1060,41 +1195,152 @@ export default {
           }
         }
 
-        const agentsPayload = allowIds
-          .map((agentId) => activity.get(agentId) || ensure(agentId))
-          .map((row) => {
-            const uiState = mapActivityToUiState(row.state);
-            const displayName = agentNameOverrides[row.agentId] || identityNameByAgentId.get(row.agentId) || row.agentId;
-            return {
-              id: `resident@${row.agentId}`,
-              hostId: "local",
-              hostLabel: "OpenClaw",
-              name: displayName,
-              state: uiState,
-              meta: {
-                active: row.state !== "idle",
-                sinceMs: row.sinceMs,
+        // Derive activity by polling gateway session stores.
+        // (Hook-based signals are unreliable in some deployments / behind proxies.)
+        const gatewayToken: string | null = typeof api.config?.gateway?.auth?.token === "string" ? api.config.gateway.auth.token : null;
+        const invokeUrl = "http://127.0.0.1:18789/tools/invoke";
+        const invoke = async (tool: string, args: any) => {
+          const headers: Record<string, string> = { "content-type": "application/json" };
+          if (gatewayToken) headers.authorization = `Bearer ${gatewayToken}`;
+          const resp = await fetch(invokeUrl, { method: "POST", headers, body: JSON.stringify({ tool, args }) });
+          const data = await resp.json();
+          if (!data?.ok) throw new Error(String(data?.error || "invoke_failed"));
+          return data;
+        };
+
+        const skToAgentId = (sk: unknown): string | null => {
+          if (typeof sk !== "string") return null;
+          const m = sk.match(/^agent:([^:]+):/);
+          return m && m[1] ? m[1] : null;
+        };
+
+        let sessions: any[] = [];
+        try {
+          const r = await invoke("sessions_list", {});
+          const details = r?.result?.details || {};
+          sessions = Array.isArray(details.sessions) ? details.sessions : [];
+        } catch {
+          sessions = [];
+        }
+
+        const sessionsByAgent = new Map<string, any[]>();
+        for (const s of sessions) {
+          const aid = skToAgentId(s?.key);
+          if (!aid) continue;
+          const arr = sessionsByAgent.get(aid) || [];
+          arr.push(s);
+          sessionsByAgent.set(aid, arr);
+        }
+
+        const agentsPayload = [] as any[];
+        for (const agentId of allowIds) {
+          const displayName = agentNameOverrides[agentId] || identityNameByAgentId.get(agentId) || agentId;
+          const list = (sessionsByAgent.get(agentId) || []).filter((s) => typeof s?.key === "string");
+          list.sort((a, b) => (Number(b?.updatedAt || 0) - Number(a?.updatedAt || 0)));
+
+          const maxUpdatedAt = list.length ? Number(list[0]?.updatedAt || 0) : 0;
+          const recent = !!(maxUpdatedAt && (t - maxUpdatedAt) <= staleMs);
+
+          // session_status on the most recent session (best-effort)
+          let queueDepth: number | null = null;
+          let statusText: string | null = null;
+          if (list.length) {
+            try {
+              const r2 = await invoke("session_status", { sessionKey: String(list[0].key) });
+              const det2 = r2?.result?.details || {};
+              const qd = det2.queueDepth ?? det2?.queue?.depth;
+              if (Number.isFinite(Number(qd))) queueDepth = Number(qd);
+              if (typeof det2.statusText === "string") statusText = det2.statusText;
+            } catch {}
+          }
+
+          // sessions_history for last message type (best-effort)
+          let lastType: string | null = null;
+          let lastRole: string | null = null;
+          let historyTypes: string[] = [];
+          if (list.length) {
+            try {
+              const r3 = await invoke("sessions_history", { sessionKey: String(list[0].key), limit: 8 });
+              const msgs = r3?.result?.details?.messages || [];
+              const last = Array.isArray(msgs) && msgs.length ? msgs[0] : null;
+              lastRole = typeof last?.role === "string" ? last.role : null;
+              const c = last?.content;
+              if (Array.isArray(c)) {
+                for (const part of c) {
+                  if (part && typeof part === "object" && typeof part.type === "string") historyTypes.push(part.type);
+                }
+                lastType = historyTypes[0] || null;
+              }
+            } catch {}
+          }
+
+          let activityState: ActivityState = "idle";
+          let uiState: "think" | "wait" | "tool" | "reply" | "error" = "wait";
+
+          // Prefer hook-derived snapshot (more real-time, no polling lag).
+          const snapRow = snapDisk?.agents?.[agentId];
+          const snapFresh = !!(snapRow && typeof snapRow.lastEventMs === "number" && (t - snapRow.lastEventMs) <= staleMs);
+          if (snapFresh) {
+            activityState = snapRow.state as ActivityState;
+            uiState = mapActivityToUiState(activityState);
+          } else if (typeof queueDepth === "number" && queueDepth > 0) {
+            activityState = "thinking";
+            uiState = "think";
+          } else if (recent && lastType === "toolCall") {
+            activityState = "tool";
+            uiState = "tool";
+          } else if (recent && lastType === "text" && lastRole === "assistant") {
+            activityState = "reply";
+            uiState = "reply";
+          } else {
+            activityState = "idle";
+            uiState = "wait";
+          }
+
+          const sinceOut = snapFresh ? (snapRow?.sinceMs || null) : (maxUpdatedAt || null);
+          const lastOut = snapFresh ? (snapRow?.lastEventMs || null) : (maxUpdatedAt || null);
+          agentsPayload.push({
+            id: `resident@${agentId}`,
+            hostId: "local",
+            hostLabel: "OpenClaw",
+            name: displayName,
+            state: uiState,
+            meta: {
+              active: uiState !== "wait",
+              sinceMs: sinceOut,
+              maxUpdatedAt: maxUpdatedAt || null,
+              queueDepth,
+              statusText,
+            },
+            debug: {
+              decision: {
+                agentId,
+                displayName,
+                activityState,
+                sinceMs: sinceOut,
+                lastEventMs: lastOut,
+                cooldownMs,
+                staleMs,
+                toolMaxMs,
+                finalState: uiState,
+                details: {
+                  queueDepth,
+                  statusText,
+                  historyTypes,
+                  lastRole,
+                  lastType,
+                  snapFresh,
+                  snapState: snapRow?.state || null,
+                } as any,
+                recentEvents: (snapDisk?.events || eventBuf),
               },
-              debug: {
-                decision: {
-                  agentId: row.agentId,
-                  displayName,
-                  activityState: row.state,
-                  sinceMs: row.sinceMs,
-                  lastEventMs: row.lastEventMs,
-                  cooldownMs,
-                  staleMs,
-                  toolMaxMs,
-                  finalState: uiState,
-                  details: row.details ?? null,
-                  recentEvents: eventBuf,
-                },
-              },
-            };
+            },
           });
+        }
 
         sendJson(res, 200, {
           ok: true,
+          buildTag: BUILD_TAG,
           generatedAt: Math.floor(t / 1000),
           pollSeconds,
           gateways: [
@@ -1110,6 +1356,32 @@ export default {
           agents: agentsPayload,
           errors: [],
         });
+      },
+    });
+
+    // Debug: manually ping an agent state (for UI testing without running the real agent)
+    // GET /lobster-room/api/debug/ping?agentId=coding_agent&state=tool
+    api.registerHttpRoute({
+      path: "/lobster-room/api/debug/ping",
+      handler: async (req, res) => {
+        const url = readRequestUrl(req);
+        const agentId = String(url.searchParams.get("agentId") || "").trim() || "main";
+        const state = String(url.searchParams.get("state") || "tool").trim().toLowerCase();
+        const allowed: ActivityState[] = ["idle", "thinking", "tool", "reply", "error"];
+        const next: ActivityState = (allowed as string[]).includes(state) ? (state as ActivityState) : "tool";
+        try {
+          pushEvent("debug_ping", { agentId, data: { next } });
+          setState(agentId, next, { debug: true });
+          // Force a snapshot flush so the next /api/lobster-room poll can see it immediately.
+          try {
+            await mergeAndWriteSnapshot();
+          } catch {}
+          // Auto return to idle after a short delay.
+          setTimeout(() => {
+            try { setIdleWithCooldown(agentId, cooldownMs); } catch {}
+          }, 600);
+        } catch {}
+        sendJson(res, 200, { ok: true, buildTag: BUILD_TAG, agentId, state: next });
       },
     });
 

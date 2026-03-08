@@ -11,6 +11,20 @@ Gateway under `/lobster-room/`.
 
 ## Install / Update (one line)
 
+### Ensure the plugin is enabled
+
+In `~/.openclaw/openclaw.json`, enable the plugin:
+
+```json
+{
+  "plugins": {
+    "entries": {
+      "lobster-room": { "enabled": true }
+    }
+  }
+}
+```
+
 ```bash
 curl -fsSL https://raw.githubusercontent.com/zacmoltbot/lobster-room/main/plugin/lobster-room/install.sh | bash
 ```
@@ -27,6 +41,8 @@ If restart fails (common in hosted containers without systemd), restart the **Ga
 
 - `https://<openclaw-host>/lobster-room/`
 - `https://<openclaw-host>/lobster-room/api/lobster-room`
+
+If you see the OpenClaw Control UI instead of Lobster Room, the plugin is not loaded/enabled.
 
 ### Important: updates require a Gateway restart
 
@@ -55,19 +71,49 @@ are not wired in core, so `replying` is currently **synthetic**:
 
 (Next step is a core PR to wire outbound send hooks so `replying` becomes real.)
 
+## Settings (features)
+
+Lobster Room ships with a small Settings UI so you can tweak behavior without redeploying.
+
+### Agent names (agentId → display name)
+
+- Edit in Settings → **Agent names**
+- Stored server-side (not just localStorage)
+
+### Rooms (background + manual walkable map)
+
+- Settings → **Room**
+- Create/switch rooms
+- Upload a background image
+- Reset back to Default room
+
+### Manual map editor
+
+- Settings → **Room** → open the editor
+- Paint/erase the walkable area used for roaming
+- Includes a **Validate map** action (useful to spot disconnected islands)
+
+### HUD / debug
+
+- **Move Debug panel** (HUD + log) for screenshots and collaboration
+- Options like **Freeze roaming** (only move on zone change)
+- Optional overlays/debug toggles
+
+### Background opacity
+
+- Slider to adjust background visibility
+
 ## Debug
 
 ### Move Debug panel
 
 The Move Debug panel is **hidden by default**. Enable it in Settings when needed.
 
-### After uploading a new room background
+### Activity traces
 
-After a successful upload, Settings stays open and the UI prompts you to paint the manual walkable map for the new room.
+The backend exposes a small ring buffer of recent events per agent in:
 
-The API includes a ring buffer of recent hook events:
-
-- `agents[0].debug.decision.recentEvents[]`
+- `agents[].debug.decision.recentEvents[]`
 
 Each entry includes:
 
@@ -75,6 +121,10 @@ Each entry includes:
 - `kind` (hook name)
 - `agentId` (derived from `sessionKey` when available)
 - `data` (best-effort; e.g. `toolName`, and for `exec` we include the command)
+
+### After uploading a new room background
+
+After a successful upload, Settings stays open and the UI prompts you to paint the manual walkable map for the new room.
 
 ## License / Attribution
 
