@@ -1,11 +1,16 @@
 #!/usr/bin/env python3
-"""Lobster Room server.
+"""DEPRECATED Lobster Room standalone server.
 
-Minimal hosted-friendly server for the Lobster Room portal.
-- Serves static files (lobster-room.html) from this directory.
-- Aggregates multiple OpenClaw gateways via HTTP Tools Invoke API.
+This file is **NOT** used by the current Lobster Room deployment (which is served by the
+OpenClaw Gateway extension plugin under /lobster-room/).
 
-Security: gateway tokens come from env vars referenced by tokenEnv in gateway config.
+Keeping this around without context is confusing during reviews.
+
+If you really need the multi-gateway aggregator portal, move this file into a separate
+repo/package (e.g. lobster-room-portal) and document it there.
+
+(Edward老大 note): We should avoid maintaining two implementations (plugin vs server.py)
+in the same repo unless there's a clear migration plan.
 """
 
 import argparse
