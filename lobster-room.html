@@ -1526,6 +1526,64 @@
       return STATES.find(s=>s.key===key) || STATES[3];
     }
 
+    // --- UI state min-dwell / playback ---
+    // In practice, backend state can change faster than the 1s polling tick. To avoid states being
+    // "skipped" visually, we play back a short sequence with a minimum dwell time per non-idle state.
+    const STATE_MIN_DWELL_MS = 1000;
+    function normUiState(s){
+      const v = String(s||'').toLowerCase();
+      if(v==='thinking') return 'think';
+      if(v==='replying') return 'reply';
+      if(v==='building') return 'build';
+      return v;
+    }
+    function isIdleState(s){
+      return s==='wait' || s==='idle' || s==='';
+    }
+    function playbackUiState(wrap, rawState){
+      const now = Date.now();
+      const raw = normUiState(rawState);
+      if(!wrap._stQ) wrap._stQ = [];
+      if(!wrap._stCur){
+        wrap._stCur = raw;
+        wrap._stUntil = isIdleState(raw) ? 0 : (now + STATE_MIN_DWELL_MS);
+        return wrap._stCur;
+      }
+
+      // Advance queued states when dwell completes.
+      if(wrap._stQ.length && now >= (wrap._stUntil||0)){
+        const nxt = wrap._stQ.shift();
+        if(nxt!=null){
+          wrap._stCur = nxt;
+          wrap._stUntil = isIdleState(nxt) ? 0 : (now + STATE_MIN_DWELL_MS);
+        }
+      }
+
+      const cur = wrap._stCur;
+      if(raw && raw !== cur){
+        const last = wrap._stQ.length ? wrap._stQ[wrap._stQ.length-1] : cur;
+        // Avoid unbounded growth; keep only a small window.
+        if(raw !== last){
+          // If we already have pending states, do not bother enqueuing idle/wait.
+          if(!(isIdleState(raw) && wrap._stQ.length)){
+            wrap._stQ.push(raw);
+            if(wrap._stQ.length > 6) wrap._stQ.splice(0, wrap._stQ.length-6);
+          }
+        }
+      }
+
+      // If current is idle and we have queued non-idle states, switch immediately.
+      if(isIdleState(wrap._stCur) && wrap._stQ.length){
+        const nxt = wrap._stQ.shift();
+        if(nxt!=null){
+          wrap._stCur = nxt;
+          wrap._stUntil = isIdleState(nxt) ? 0 : (now + STATE_MIN_DWELL_MS);
+        }
+      }
+
+      return wrap._stCur;
+    }
+
     function renderLegend(){
       const el = document.getElementById('legend');
       el.innerHTML = '';
@@ -2083,14 +2141,17 @@
       const h = Math.max(1, rr.height);
 
       for(const a of placed){
-        const meta = stateMeta(a.state);
         const shortId = String(a.id||'').replace(/^resident@/,'');
         let wrap = MODEL.nodeById[a.id];
+        const dispState = wrap ? playbackUiState(wrap, a.state) : normUiState(a.state);
+        const meta = stateMeta(dispState);
         const zoneLabel = (ZONES[a._zone] && ZONES[a._zone].label) ? ZONES[a._zone].label : (a._zone || '');
 
         if(!wrap){
           wrap = document.createElement('div');
           wrap.className = 'lobster';
+          // state playback init
+          try{ wrap._stCur = normUiState(a.state); wrap._stQ = []; wrap._stUntil = isIdleState(wrap._stCur) ? 0 : (Date.now()+STATE_MIN_DWELL_MS); }catch{}
           wrap.style.opacity = '0';
           wrap.dataset.id = String(a.id||'');
           wrap.dataset.px = String(a._px);
