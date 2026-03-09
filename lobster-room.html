@@ -2217,8 +2217,6 @@
                 if(d.toolName==='sessions_spawn' && d.task) txt += ' · ' + String(d.task).slice(0, 60);
                 if(d.toolName==='message' && d.message) txt += ' · ' + String(d.message).slice(0, 60);
                 if(d.toolName==='web_fetch' && d.url) txt += ' · ' + String(d.url).slice(0, 60);
-              }else if(kind === 'tool_result_persist' && d && d.toolName){
-                txt = 'after: ' + d.toolName;
               }else if(stNorm==='tool'){
                 // avoid redundant detail; state bubble already shows tool
                 txt = '';
