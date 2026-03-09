@@ -95,8 +95,31 @@
       transition: left var(--moveDur) cubic-bezier(.22,1,.36,1), top var(--moveDur) cubic-bezier(.22,1,.36,1), opacity 220ms ease;
       will-change:left,top;
     }
-    .lobster .icon{font-size:28px;filter: drop-shadow(0 8px 16px rgba(0,0,0,.35));}
-    .lobster .name{font-size:11px;color:var(--textStrong);font-weight:700;max-width:160px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+    .lobster .icon{font-size:var(--lobsterSize, 28px);filter: drop-shadow(0 8px 16px rgba(0,0,0,.35)); transform-origin: 55% 65%;}
+
+    /* Lobster micro-animations (route A: animate the whole icon).
+       - idle: small slow tail-wiggle feel
+       - move: bigger faster wiggle while walking
+    */
+    .lobster.wiggle-idle .icon{animation: lobsterWiggleIdle 1.35s ease-in-out infinite;}
+    .lobster.wiggle-move .icon{animation: lobsterWiggleMove 0.28s ease-in-out infinite;}
+
+    @keyframes lobsterWiggleIdle{
+      0%{transform: rotate(-2deg) translateX(-0.5px);}
+      50%{transform: rotate(2deg) translateX(0.5px);}
+      100%{transform: rotate(-2deg) translateX(-0.5px);}
+    }
+    @keyframes lobsterWiggleMove{
+      0%{transform: rotate(-10deg) translateX(-1.5px);}
+      50%{transform: rotate(10deg) translateX(1.5px);}
+      100%{transform: rotate(-10deg) translateX(-1.5px);}
+    }
+
+    @media (prefers-reduced-motion: reduce){
+      .lobster.wiggle-idle .icon,.lobster.wiggle-move .icon{animation:none;}
+    }
+    .lobster .name{font-size:11px;color:var(--textStrong);font-weight:700;max-width:180px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+    .lobster .detail{margin-top:-2px;font-size:10px;line-height:1.2;color:rgba(255,255,255,.72);background:rgba(0,0,0,.24);border:1px solid rgba(255,255,255,.08);padding:3px 6px;border-radius:10px;max-width:260px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;display:none}
     .lobster .hud{margin-top:2px;font-size:10.5px;line-height:1.2;color:rgba(255,255,255,.80);background:rgba(0,0,0,.42);border:1px solid rgba(255,255,255,.10);padding:4px 6px;border-radius:10px;max-width:260px;white-space:pre-wrap;display:none}
 
     /* Move debug panel */
@@ -105,6 +128,7 @@
     .md-title{font-weight:800;letter-spacing:.2px}
     .md-body{padding:10px 12px}
     .md-row{display:flex;align-items:center;gap:10px;margin:6px 0;color:rgba(255,255,255,.86);font-size:13px}
+    #md-flags{color:rgba(255,255,255,.92);font-weight:700;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;display:block;max-width:100%}
     .md-hint{color:rgba(255,255,255,.55);font-size:12px}
     .md-btn{background:rgba(255,255,255,.06);border:1px solid rgba(255,255,255,.10);color:rgba(255,255,255,.90);padding:6px 10px;border-radius:10px;cursor:pointer}
     .md-btn:hover{background:rgba(255,255,255,.10)}
@@ -130,10 +154,10 @@
     #settings-backdrop{z-index:50}
     #labels-backdrop{z-index:60}
 
-    .modal{width:min(560px,calc(100vw - 28px));border:1px solid rgba(255,255,255,.10);background:rgba(20,20,28,.92);border-radius:16px;box-shadow:0 30px 70px rgba(0,0,0,.55);overflow:hidden}
-    .modal-h{display:flex;align-items:center;justify-content:space-between;padding:14px 16px;border-bottom:1px solid rgba(255,255,255,.08)}
+    .modal{width:min(560px,calc(100vw - 28px));max-height:calc(100vh - 28px);border:1px solid rgba(255,255,255,.10);background:rgba(20,20,28,.92);border-radius:16px;box-shadow:0 30px 70px rgba(0,0,0,.55);overflow:hidden;display:flex;flex-direction:column}
+    .modal-h{flex:0 0 auto;display:flex;align-items:center;justify-content:space-between;padding:14px 16px;border-bottom:1px solid rgba(255,255,255,.08)}
     .modal-h .t{font-weight:800;color:var(--textStrong)}
-    .modal-b{padding:14px 16px;display:flex;flex-direction:column;gap:12px}
+    .modal-b{flex:1 1 auto;padding:14px 16px;display:flex;flex-direction:column;gap:12px;overflow:auto}
 
     /* Room editor */
     .editor{border:1px solid rgba(255,255,255,.10);border-radius:14px;background:rgba(255,255,255,.03);padding:12px;display:flex;flex-direction:column;gap:10px}
@@ -263,6 +287,7 @@
         <label class="md-row"><input type="checkbox" id="md-freeze"> Freeze roaming (only move on zone change)</label>
         <div class="md-row">
           <button id="md-clear" class="md-btn" type="button">Clear log</button>
+          <button id="md-download" class="md-btn" type="button">Download log</button>
           <button id="md-validate" class="md-btn" type="button">Validate map</button>
           <button id="md-overlay" class="md-btn" type="button">Overlay: Off</button>
           <span class="md-hint" id="md-meta"></span>
@@ -317,9 +342,16 @@
 
         <div class="hint">Background opacity</div>
         <div class="row">
-          <input id="bg-opacity" type="range" min="0" max="1" step="0.01" value="1" class="grow" />
-          <div class="hint" id="bg-opacity-val">100%</div>
+          <input id="bg-opacity" type="range" min="0" max="1" step="0.01" value="0.8" class="grow" />
+          <div class="hint" id="bg-opacity-val">80%</div>
         </div>
+
+        <div class="hint">Lobster size</div>
+        <div class="row">
+          <input id="lobster-size" type="range" min="18" max="72" step="1" value="38" class="grow" />
+          <div class="hint" id="lobster-size-val">38px</div>
+        </div>
+
 
         <div class="row">
           <label class="hint" style="display:flex;gap:8px;align-items:center">
@@ -330,6 +362,12 @@
         <div class="row">
           <label class="hint" style="display:flex;gap:8px;align-items:center">
             <input id="toggle-mvdbg" type="checkbox" /> Show Move Debug panel
+          </label>
+        </div>
+
+        <div class="row">
+          <label class="hint" style="display:flex;gap:8px;align-items:center">
+            <input id="toggle-agent-detail" type="checkbox" /> Show agent detail
           </label>
         </div>
 
@@ -699,12 +737,43 @@
       const enabled = document.getElementById('md-enabled');
       const freeze = document.getElementById('md-freeze');
       const clear = document.getElementById('md-clear');
+      const download = document.getElementById('md-download');
       const toggle = document.getElementById('md-toggle');
       const validate = document.getElementById('md-validate');
       const overlay = document.getElementById('md-overlay');
       if(enabled) enabled.addEventListener('change', ()=>{ MVDBG.enabled=!!enabled.checked; mvSavePrefs(); mvRenderPanel(); mvRenderOverlay(); });
       if(freeze) freeze.addEventListener('change', ()=>{ MVDBG.freezeRoam=!!freeze.checked; mvSavePrefs(); mvRenderPanel(); });
       if(clear) clear.addEventListener('click', ()=>{ MVDBG.log=[]; mvRenderPanel(); });
+      if(download) download.addEventListener('click', ()=>{
+        try{
+          const now = new Date();
+          const pad = (n)=> String(n).padStart(2,'0');
+          const ts = `${now.getFullYear()}${pad(now.getMonth()+1)}${pad(now.getDate())}-${pad(now.getHours())}${pad(now.getMinutes())}${pad(now.getSeconds())}`;
+          const payload = {
+            kind: 'lobster-room-move-debug-log',
+            exportedAt: now.toISOString(),
+            uiVersion: (typeof UI_VERSION!=='undefined') ? UI_VERSION : null,
+            buildTag: (typeof MODEL!=='undefined' && MODEL.buildTag) ? MODEL.buildTag : null,
+            roomId: (typeof MODEL!=='undefined' && MODEL.activeRoomId) ? MODEL.activeRoomId : null,
+            max: MVDBG.max,
+            count: MVDBG.log.length,
+            log: MVDBG.log,
+            lines: MVDBG.log.map(mvFmt),
+          };
+          const blob = new Blob([JSON.stringify(payload, null, 2)], {type:'application/json'});
+          const url = URL.createObjectURL(blob);
+          const a = document.createElement('a');
+          a.href = url;
+          a.download = `lobster-room-move-debug-${ts}.json`;
+          document.body.appendChild(a);
+          a.click();
+          a.remove();
+          setTimeout(()=>{ try{ URL.revokeObjectURL(url); }catch{} }, 2000);
+        }catch(e){
+          console.warn('[lobster-room] download log failed', e);
+          try{ alert('Download failed: ' + (e && e.message ? e.message : String(e))); }catch{}
+        }
+      });
       if(toggle) toggle.addEventListener('click', ()=>{ MVDBG.panelOpen=!MVDBG.panelOpen; mvSavePrefs(); mvRenderPanel(); });
       if(validate) validate.addEventListener('click', ()=>{ mvValidateNow(); });
       if(overlay) overlay.addEventListener('click', ()=>{ MVDBG.overlayOn=!MVDBG.overlayOn; mvSavePrefs(); mvRenderPanel(); mvRenderOverlay(); });
@@ -1191,6 +1260,17 @@
     function renderManualZones(){
       const room=document.getElementById('room');
       Array.from(room.querySelectorAll('.r-tag')).forEach(n=>n.remove());
+      // Only render when zones debug is enabled.
+      if(!room.classList.contains('show-regions')){
+        try{
+          const cv0=document.getElementById('tile-overlay');
+          if(cv0){
+            const ctx0=cv0.getContext('2d');
+            if(ctx0) ctx0.clearRect(0,0,cv0.width||1,cv0.height||1);
+          }
+        }catch{}
+        return;
+      }
       const cv=document.getElementById('tile-overlay');
       if(!cv) return;
       const rect=room.getBoundingClientRect();
@@ -1243,6 +1323,22 @@
 
     function renderRegions(){
       const room=document.getElementById('room');
+
+      // Only render zone overlays/labels when zones debug is enabled.
+      // (These big WORK/TOOLS/LOUNGE/MEETING tags are useful for debugging, but they block the room view.)
+      if(!room.classList.contains('show-regions')){
+        try{ Array.from(room.querySelectorAll('.r-tag')).forEach(n=>n.remove()); }catch{}
+        try{ Array.from(room.querySelectorAll('.region')).forEach(n=>n.remove()); }catch{}
+        try{
+          const cv=document.getElementById('tile-overlay');
+          if(cv){
+            const ctx=cv.getContext('2d');
+            if(ctx) ctx.clearRect(0,0,cv.width||1,cv.height||1);
+          }
+        }catch{}
+        return;
+      }
+
       // Manual map takes precedence for debug display.
       if(MODEL.manualMap){
         renderManualZones();
@@ -1988,6 +2084,7 @@
 
       for(const a of placed){
         const meta = stateMeta(a.state);
+        const shortId = String(a.id||'').replace(/^resident@/,'');
         let wrap = MODEL.nodeById[a.id];
         const zoneLabel = (ZONES[a._zone] && ZONES[a._zone].label) ? ZONES[a._zone].label : (a._zone || '');
 
@@ -2004,9 +2101,13 @@
             <div class="bubble ${meta.cls}"><span class="b-dot"></span><span class="b-text">${meta.label}</span></div>
             <div class="icon">🦞</div>
             <div class="name" title="${a.id}"><span class="n-text">${a.name}</span> <span class="n-zone" style="color:var(--dim);font-weight:600">(${zoneLabel})</span></div>
+            <div class="detail"></div>
             <div class="hud"></div>
           `;
           room.appendChild(wrap);
+          // Animation state (default idle wiggle)
+          wrap.classList.add('wiggle-idle');
+          wrap.classList.remove('wiggle-move');
           // fade in
           requestAnimationFrame(()=>{ wrap.style.opacity = '1'; });
           MODEL.nodeById[a.id] = wrap;
@@ -2039,6 +2140,13 @@
 
         // Movement: if manualMap has corridor, route across corridor when zone changes.
         // Note: when a node is first created, wrap.dataset.zone is empty; treat that as a change.
+
+        // Wiggle animation mode: move-wiggle while walking, otherwise idle-wiggle.
+        try{
+          const moving = !!wrap._walking;
+          wrap.classList.toggle('wiggle-move', moving);
+          wrap.classList.toggle('wiggle-idle', !moving);
+        }catch{}
         const hadPrevZone = !!wrap.dataset.zone;
         const prevZone = wrap.dataset.zone || a._zone;
         // On first paint, treat it as "no zone change"; otherwise initial load will route via corridor and look jittery.
@@ -2055,10 +2163,109 @@
         // Always surface a single-line status in the Move Debug panel for quick screenshots.
         // (Do not depend on the tiny on-agent HUD being visible.)
         try{
-          if(MVDBG && MVDBG.enabled && String(a.id||'')==='main'){
+          if(MVDBG && MVDBG.enabled && shortId==='main'){
             const mv = wrap._mv || {};
             const f = document.getElementById('md-flags');
-            if(f) f.textContent = `main: mm=${mmOk?1:0} cellIdx=${hasCell?1:0} mode=${mv.mode||'—'} zone=${a._zone} walking=${wrap._walking?1:0}`;
+            const d = (MODEL && MODEL.detailById) ? MODEL.detailById : {};
+            const dMain = d && d.main ? d.main : null;
+            const dCode = d && d.coding_agent ? d.coding_agent : null;
+            if(f) f.textContent = [
+              `main: mm=${mmOk?1:0} cellIdx=${hasCell?1:0} mode=${mv.mode||'—'} zone=${a._zone} walking=${wrap._walking?1:0}`,
+              `detailToggle=${MODEL.showAgentDetail?1:0}`,
+              `detail(main): st=${dMain?dMain.stNorm:'—'} show=${dMain? (dMain.show?1:0):'—'} txt=${dMain?JSON.stringify(String(dMain.txt||'').slice(0,60)):'—'}`,
+              `detail(coding): st=${dCode?dCode.stNorm:'—'} show=${dCode? (dCode.show?1:0):'—'} txt=${dCode?JSON.stringify(String(dCode.txt||'').slice(0,60)):'—'}`,
+            ].join(' | ');
+          }
+        }catch{}
+
+        // Agent detail (what is it doing?)
+        try{
+          let detEl = wrap.querySelector('.detail');
+          // Backward-compat: if node was created before we added .detail, inject it.
+          if(!detEl){
+            const nameEl = wrap.querySelector('.name');
+            detEl = document.createElement('div');
+            detEl.className = 'detail';
+            if(nameEl && nameEl.parentNode){
+              nameEl.insertAdjacentElement('afterend', detEl);
+            }else{
+              wrap.appendChild(detEl);
+            }
+          }
+          const stRaw = String(a.state||'');
+          const stNorm = (stRaw==='think')?'thinking':(stRaw==='reply')?'replying':(stRaw==='build')?'building':stRaw;
+          const show = !!MODEL.showAgentDetail && stNorm !== 'wait' && stNorm !== 'idle';
+          let txt = '';
+
+          if(show){
+            // Prefer statusText from backend (session_status), if present.
+            const st = a && a.meta && typeof a.meta.statusText === 'string' ? a.meta.statusText : '';
+            if(st) txt = st;
+
+            // Otherwise, try to infer from most recent event.
+            if(!txt){
+              const evs = a && a.debug && a.debug.decision && Array.isArray(a.debug.decision.recentEvents) ? a.debug.decision.recentEvents : [];
+              const last = evs && evs.length ? evs[evs.length-1] : null;
+              const kind = last && last.kind ? String(last.kind) : '';
+              const d = last && last.data ? last.data : null;
+              if(kind === 'message_sending' && d && (d.contentPreview||d.content)){
+                const pv = String(d.contentPreview||d.content||'').trim();
+                txt = pv ? ('send: ' + pv.slice(0, 60)) : '';
+              }else if(kind === 'before_tool_call' && d && d.toolName){
+                txt = 'tool: ' + d.toolName;
+                if(d.toolName==='exec' && d.command) txt += ' · ' + String(d.command).slice(0, 60);
+                if(d.toolName==='sessions_spawn' && d.task) txt += ' · ' + String(d.task).slice(0, 60);
+                if(d.toolName==='message' && d.message) txt += ' · ' + String(d.message).slice(0, 60);
+                if(d.toolName==='web_fetch' && d.url) txt += ' · ' + String(d.url).slice(0, 60);
+              }else if(kind === 'tool_result_persist' && d && d.toolName){
+                txt = 'after: ' + d.toolName;
+              }else if(stNorm==='tool'){
+                // avoid redundant detail; state bubble already shows tool
+                txt = '';
+              }else if(stNorm==='thinking'){
+                // avoid redundant detail; state bubble already shows thinking
+                txt = '';
+              }else if(stNorm==='replying'){
+                // avoid redundant detail; state bubble already shows replying
+                txt = '';
+              }else if(stNorm==='building'){
+                // avoid redundant detail; state bubble already shows building
+                txt = '';
+              }else if(stNorm==='error'){
+                txt = 'error';
+              }
+            }
+          }
+
+          txt = (txt||'').replace(/\s+/g,' ').trim();
+
+          // Persist for debugging (Move Debug panel)
+          try{
+            if(!MODEL.detailById) MODEL.detailById = {};
+            MODEL.detailById[shortId] = {show:!!show, stRaw, stNorm, txt};
+          }catch{}
+
+          // Also emit a throttled debug line into Move Debug log (so we don't rely on spotting md-flags).
+          try{
+            if(MVDBG && MVDBG.enabled && shortId==='main'){
+              const now = Date.now();
+              if(!MODEL._lastDetailDbgMs || (now - MODEL._lastDetailDbgMs) > 1500){
+                MODEL._lastDetailDbgMs = now;
+                const d = MODEL.detailById || {};
+                const dm = d.main || null;
+                const dc = d.coding_agent || null;
+                mvLog('main','DETAIL_DBG',{
+                  toggle: !!MODEL.showAgentDetail,
+                  main: dm ? {st:dm.stNorm, show:dm.show, txt:String(dm.txt||'').slice(0,60)} : null,
+                  coding: dc ? {st:dc.stNorm, show:dc.show, txt:String(dc.txt||'').slice(0,60)} : null,
+                });
+              }
+            }
+          }catch{}
+
+          if(detEl){
+            detEl.textContent = txt;
+            detEl.style.display = (show && txt) ? 'block' : 'none';
           }
         }catch{}
 
@@ -2283,6 +2490,7 @@
             state: a.state || 'wait',
             x: a.x,
             y: a.y,
+            meta: a.meta || null,
             debug: a.debug,
           }));
           // Keep last-known-good snapshot so we can keep rendering on transient errors.
@@ -2392,8 +2600,11 @@
       const statusEl = document.getElementById('room-status');
       const bgOp = document.getElementById('bg-opacity');
       const bgOpVal = document.getElementById('bg-opacity-val');
+      const lobsterSize = document.getElementById('lobster-size');
+      const lobsterSizeVal = document.getElementById('lobster-size-val');
       const toggleRegions = document.getElementById('toggle-regions');
       const toggleMvdbg = document.getElementById('toggle-mvdbg');
+      const toggleAgentDetail = document.getElementById('toggle-agent-detail');
       const agentLabelsStatus = document.getElementById('agent-labels-status');
       const btnAgentLabelsOpen = document.getElementById('btn-agent-labels-open');
 
@@ -2492,23 +2703,43 @@
 
       function applyBgOpacity(){
         const room = document.getElementById('room');
-        const vRaw = (bgOp && bgOp.value) ? parseFloat(bgOp.value) : 1;
-        const v = isFinite(vRaw) ? Math.max(0.0, Math.min(1, vRaw)) : 1;
+        const vRaw = (bgOp && bgOp.value) ? parseFloat(bgOp.value) : 0.8;
+        const v = isFinite(vRaw) ? Math.max(0.0, Math.min(1, vRaw)) : 0.8;
         room.style.setProperty('--bgOpacity', String(v));
         if(bgOpVal) bgOpVal.textContent = Math.round(v*100) + '%';
         try{ localStorage.setItem('lobsterRoom.bgOpacity', String(v)); }catch{}
       }
 
       (function initBgOpacity(){
-        let v = 1;
+        let v = 0.8;
         try{ const s = localStorage.getItem('lobsterRoom.bgOpacity'); if(s) v = parseFloat(s); }catch{}
-        if(!isFinite(v)) v = 1;
+        if(!isFinite(v)) v = 0.8;
         v = Math.max(0.0, Math.min(1, v));
         if(bgOp) bgOp.value = String(v);
         applyBgOpacity();
         if(bgOp) bgOp.addEventListener('input', applyBgOpacity);
         if(bgOp) bgOp.addEventListener('change', applyBgOpacity);
       })();
+
+      function applyLobsterSize(){
+        const room = document.getElementById('room');
+        const vRaw = (lobsterSize && lobsterSize.value) ? parseFloat(lobsterSize.value) : 38;
+        const v = isFinite(vRaw) ? Math.max(18, Math.min(72, Math.round(vRaw))) : 38;
+        room.style.setProperty('--lobsterSize', v + 'px');
+        if(lobsterSizeVal) lobsterSizeVal.textContent = v + 'px';
+        try{ localStorage.setItem('lobsterRoom.lobsterSize', String(v)); }catch{}
+      }
+      (function initLobsterSize(){
+        let v = 38;
+        try{ const s = localStorage.getItem('lobsterRoom.lobsterSize'); if(s) v = parseFloat(s); }catch{}
+        if(!isFinite(v)) v = 38;
+        v = Math.max(18, Math.min(72, Math.round(v)));
+        if(lobsterSize) lobsterSize.value = String(v);
+        applyLobsterSize();
+        if(lobsterSize) lobsterSize.addEventListener('input', applyLobsterSize);
+        if(lobsterSize) lobsterSize.addEventListener('change', applyLobsterSize);
+      })();
+
 
       (function initRegionsDebug(){
         let on = false;
@@ -2546,6 +2777,23 @@
             mvSavePrefs();
             mvRenderPanel();
             mvRenderOverlay();
+          });
+        }
+      })();
+
+      // Agent detail toggle (default on)
+      (function initAgentDetailToggle(){
+        let on = true;
+        try{ const s = localStorage.getItem('lobsterRoom.showAgentDetail'); if(s!==null) on = (s==='1'); }catch{}
+        if(toggleAgentDetail) toggleAgentDetail.checked = !!on;
+        MODEL.showAgentDetail = !!on;
+        if(toggleAgentDetail){
+          toggleAgentDetail.addEventListener('change', ()=>{
+            const v = !!toggleAgentDetail.checked;
+            MODEL.showAgentDetail = v;
+            try{ localStorage.setItem('lobsterRoom.showAgentDetail', v?'1':'0'); }catch{}
+            // re-render to update current nodes
+            try{ renderAgents(); }catch{}
           });
         }
       })();

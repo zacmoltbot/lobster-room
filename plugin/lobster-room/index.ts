@@ -883,9 +883,31 @@ export default {
 
       // Capture high-value params for debugging (truncate aggressively).
       let toolData: any = { toolName, sessionKey: ctx?.sessionKey };
+      const p = event?.params || null;
+
       if (toolName === "exec") {
-        const cmd = (event?.params && (event.params.command || event.params.cmd || event.params.args)) || null;
+        const cmd = (p && (p.command || p.cmd || p.args)) || null;
         toolData.command = cmd;
+      }
+
+      // Show what spawned the subagent.
+      if (toolName === "sessions_spawn") {
+        toolData.spawnAgentId = p?.agentId;
+        toolData.label = p?.label;
+        const task = typeof p?.task === "string" ? p.task : "";
+        toolData.task = task ? task.slice(0, 160) : undefined;
+      }
+
+      // Show message preview when using the message tool.
+      if (toolName === "message") {
+        toolData.channel = p?.channel;
+        toolData.target = p?.to || p?.target;
+        const msg = typeof p?.message === "string" ? p.message : "";
+        toolData.message = msg ? msg.slice(0, 160) : undefined;
+      }
+
+      if (toolName === "web_fetch") {
+        toolData.url = p?.url;
       }
 
       pushEvent("before_tool_call", { agentId, data: toolData });
