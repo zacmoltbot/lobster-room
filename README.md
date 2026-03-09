@@ -6,6 +6,8 @@ in a bird’s-eye room view, with status bubbles (replying / thinking / tool / i
 This repo is **plugin-only**: Lobster Room is served directly by the OpenClaw
 Gateway under `/lobster-room/`.
 
+![Lobster Room main view](docs/screenshots/main-view.png)
+
 - Portal: `https://<openclaw-host>/lobster-room/`
 - API: `https://<openclaw-host>/lobster-room/api/lobster-room`
 
