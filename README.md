@@ -6,8 +6,6 @@ A cute, practical dashboard that visualizes your OpenClaw **agents & sessions** 
 
 ![Demo (animated)](docs/screenshots/demo.gif)
 
-![Main view](docs/screenshots/main-view.png)
-
 **Links**
 - Portal: `https://<openclaw-host>/lobster-room/`
 - API: `https://<openclaw-host>/lobster-room/api/lobster-room`
