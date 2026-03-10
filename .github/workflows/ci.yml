@@ -1,0 +1,22 @@
+name: CI
+
+on:
+  push:
+    branches: ["main"]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Basic sanity checks
+        run: |
+          test -f plugin/lobster-room/openclaw.plugin.json
+          test -f plugin/lobster-room/index.ts
+          test -f plugin/lobster-room/install.sh
+          bash -n plugin/lobster-room/install.sh
