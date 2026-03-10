@@ -6,6 +6,12 @@
   "configSchema": {
     "type": "object",
     "additionalProperties": false,
-    "properties": {}
+    "properties": {
+      "debugCaptureMessagePreview": {
+        "type": "boolean",
+        "default": false,
+        "description": "If true, capture a short preview of outbound message content in debug event traces. Default false to reduce data exposure."
+      }
+    }
   }
 }

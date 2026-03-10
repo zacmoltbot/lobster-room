@@ -933,10 +933,14 @@ export default {
     api.on("message_sending", (event, ctx) => {
       // Message hooks do not carry agentId in the event/ctx today.
       const agentId = "main";
-      pushEvent("message_sending", {
-        agentId,
-        data: { to: event?.to, contentPreview: String(event?.content || "").slice(0, 80), channelId: ctx?.channelId },
-      });
+
+      const capturePreview = !!api.config?.debugCaptureMessagePreview;
+      const data: any = { to: event?.to, channelId: ctx?.channelId };
+      if (capturePreview) {
+        data.contentPreview = String(event?.content || "").slice(0, 80);
+      }
+
+      pushEvent("message_sending", { agentId, data });
       setState(agentId, "reply", { to: event?.to, channelId: ctx?.channelId, conversationId: ctx?.conversationId });
     });
 

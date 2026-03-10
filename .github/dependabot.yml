@@ -1,0 +1,12 @@
+version: 2
+updates:
+  # Keep GitHub Actions up to date
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+  # If we add npm deps later, this will start working automatically
+  - package-ecosystem: "npm"
+    directory: "/"
+    schedule:
+      interval: "weekly"

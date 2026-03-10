@@ -11,9 +11,15 @@ Gateway under `/lobster-room/`.
 - Portal: `https://<openclaw-host>/lobster-room/`
 - API: `https://<openclaw-host>/lobster-room/api/lobster-room`
 
-## Install / Update (one line)
+## Install / Update
 
-### Ensure the plugin is enabled
+### 0) Security + exposure notes (please read)
+
+- This is an **OpenClaw Gateway plugin**. Anyone who can access your OpenClaw HTTP endpoint can potentially access this dashboard/API.
+- **Do not expose OpenClaw (and thus `/lobster-room/`) to the public internet** without an auth layer (VPN / reverse proxy auth / private network).
+- Prefer **pinned versions** (a release tag like `v0.1.0`) instead of installing from `main`.
+
+### 1) Ensure the plugin is enabled
 
 In `~/.openclaw/openclaw.json`, enable the plugin:
 
@@ -27,8 +33,16 @@ In `~/.openclaw/openclaw.json`, enable the plugin:
 }
 ```
 
+### 2) Install (recommended: pin a release tag)
+
 ```bash
-curl -fsSL https://raw.githubusercontent.com/zacmoltbot/lobster-room/main/plugin/lobster-room/install.sh | bash
+VERSION=v0.1.0 bash -c "$(curl -fsSL https://raw.githubusercontent.com/zacmoltbot/lobster-room/main/plugin/lobster-room/install.sh)"
+```
+
+### 3) Install (latest release)
+
+```bash
+bash -c "$(curl -fsSL https://raw.githubusercontent.com/zacmoltbot/lobster-room/main/plugin/lobster-room/install.sh)"
 ```
 
 The installer:
@@ -38,6 +52,18 @@ The installer:
 - Attempts `openclaw gateway restart` (best-effort)
 
 If restart fails (common in hosted containers without systemd), restart the **Gateway service/container** manually.
+
+### 4) Install via “OpenClaw prompt” (copy/paste)
+
+Give your OpenClaw agent the following instruction:
+
+> Install the `zacmoltbot/lobster-room` OpenClaw plugin **pinned to VERSION=v0.1.0** by running the official installer script from the repo.
+> 
+> Steps:
+> 1) Ensure `~/.openclaw/openclaw.json` enables plugin id `lobster-room`.
+> 2) Download and run: `VERSION=v0.1.0 bash -c "$(curl -fsSL https://raw.githubusercontent.com/zacmoltbot/lobster-room/main/plugin/lobster-room/install.sh)"`.
+> 3) Restart the OpenClaw Gateway (if the script cannot restart it, tell me what to restart).
+> 4) After install, verify `https://<openclaw-host>/lobster-room/` and report what version was installed.
 
 ## Verify
 
@@ -65,13 +91,11 @@ This project monitors OpenClaw **in-process** via plugin lifecycle hooks.
 
 ### Replying
 
-On OpenClaw `2026.2.2`, outbound message hooks (`message_sending/message_sent`)
-are not wired in core, so `replying` is currently **synthetic**:
+`replying` is driven by outbound message hooks (`message_sending` / `message_sent`) **when available**.
 
-- When `agent_end.success=true`, we briefly show `replying` so the UI matches
-  user-perceived behavior.
+Some OpenClaw builds/environments may not emit these hooks; in that case we fall back to a **synthetic** `replying` blip on successful `agent_end` so the UI matches user-perceived behavior.
 
-(Next step is a core PR to wire outbound send hooks so `replying` becomes real.)
+Privacy note: by default we **do not** store outbound message previews in debug traces. If you really need that for debugging, set plugin config `debugCaptureMessagePreview=true`.
 
 ## Settings (features)
 
