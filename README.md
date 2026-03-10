@@ -13,13 +13,29 @@ Gateway under `/lobster-room/`.
 
 ## Install / Update
 
-### 0) Security + exposure notes (please read)
+### Option A (recommended): Install via “OpenClaw prompt”
 
-- This is an **OpenClaw Gateway plugin**. Anyone who can access your OpenClaw HTTP endpoint can potentially access this dashboard/API.
-- **Do not expose OpenClaw (and thus `/lobster-room/`) to the public internet** without an auth layer (VPN / reverse proxy auth / private network).
-- Prefer **pinned versions** (a release tag like `v0.1.0`) instead of installing from `main`.
+Copy/paste this into your OpenClaw agent:
 
-### 1) Ensure the plugin is enabled
+> Please install (or update) the `zacmoltbot/lobster-room` OpenClaw Gateway plugin for me.
+>
+> Do the following and tell me what you changed:
+> 1) Install the plugin by running: `bash -c "$(curl -fsSL https://raw.githubusercontent.com/zacmoltbot/lobster-room/main/plugin/lobster-room/install.sh)"`.
+> 2) Ensure `~/.openclaw/openclaw.json` enables plugin id `lobster-room`.
+> 3) Restart the OpenClaw Gateway (if you cannot restart it, tell me exactly what I should restart).
+> 4) Verify `https://<openclaw-host>/lobster-room/`.
+>
+> Optional: if I ask for a pinned install, use `VERSION=vX.Y.Z` when running the installer.
+
+### Option B: Manual install (advanced)
+
+#### 1) Install (latest release)
+
+```bash
+bash -c "$(curl -fsSL https://raw.githubusercontent.com/zacmoltbot/lobster-room/main/plugin/lobster-room/install.sh)"
+```
+
+#### 2) Enable the plugin
 
 In `~/.openclaw/openclaw.json`, enable the plugin:
 
@@ -33,39 +49,17 @@ In `~/.openclaw/openclaw.json`, enable the plugin:
 }
 ```
 
-### 2) Install (recommended: latest release)
+#### 3) Restart OpenClaw Gateway
 
-```bash
-bash -c "$(curl -fsSL https://raw.githubusercontent.com/zacmoltbot/lobster-room/main/plugin/lobster-room/install.sh)"
-```
+This is an OpenClaw **plugin**. After installing/updating, you must restart/redeploy the OpenClaw Gateway so it reloads plugin assets.
 
-### 3) Install (pin a specific release tag)
+> Note on ordering: enabling and installing can be done in either order; what matters is that **both are done before the Gateway restart**.
 
-```bash
-VERSION=v0.1.0 bash -c "$(curl -fsSL https://raw.githubusercontent.com/zacmoltbot/lobster-room/main/plugin/lobster-room/install.sh)"
-```
+### Security + exposure notes
 
-The installer:
-- Installs into `~/.openclaw/extensions/lobster-room/`
-- Copies the portal HTML to `~/.openclaw/extensions/lobster-room/assets/lobster-room.html`
-- Seeds a **Default room** (background + manual walkable map) so the UI is usable immediately
-- Attempts `openclaw gateway restart` (best-effort)
-
-If restart fails (common in hosted containers without systemd), restart the **Gateway service/container** manually.
-
-### 4) Install via “OpenClaw prompt” (recommended)
-
-Give your OpenClaw agent the following instruction:
-
-> Install (or update) the `zacmoltbot/lobster-room` OpenClaw plugin using the official installer script.
->
-> Steps:
-> 1) Ensure `~/.openclaw/openclaw.json` enables plugin id `lobster-room`.
-> 2) Run: `bash -c "$(curl -fsSL https://raw.githubusercontent.com/zacmoltbot/lobster-room/main/plugin/lobster-room/install.sh)"`.
-> 3) Restart the OpenClaw Gateway (if the script cannot restart it, tell me what to restart).
-> 4) Verify `https://<openclaw-host>/lobster-room/` and report the installed version.
->
-> Optional: if I ask for a pinned install, use `VERSION=vX.Y.Z`.
+- This is an **OpenClaw Gateway plugin**. Anyone who can access your OpenClaw HTTP endpoint can potentially access this dashboard/API.
+- **Do not expose OpenClaw (and thus `/lobster-room/`) to the public internet** without an auth layer (VPN / reverse proxy auth / private network).
+- Prefer pinned versions (a release tag) instead of installing from `main`.
 
 ## Verify
 
@@ -77,6 +71,8 @@ If you see the OpenClaw Control UI instead of Lobster Room, the plugin is not lo
 ### Important: updates require a Gateway restart
 
 This is an OpenClaw **plugin**. After updating, you must restart/redeploy the OpenClaw Gateway so it reloads plugin assets. A browser refresh (even incognito) cannot pick up a new build unless the server is updated.
+
+(Install section already mentions this; repeating here for emphasis.)
 
 ### UI version stamp
 
