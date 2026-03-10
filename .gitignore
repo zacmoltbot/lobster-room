@@ -1,28 +1,11 @@
-# OS
-.DS_Store
-Thumbs.db
+# Node
+node_modules/
+package-lock.json
+package.json
 
-# Editor
-*.swp
-*.swo
-*~
+# Generated demo frames
+/docs/screenshots/demo-frames/
 
-# Logs
-*.log
-
-# Backup / scratch
-*.bak
-*.bak.*
-
-# Worktrees
-.worktrees/
-
-# Generated data (contains local system info)
-data.json
-
-# Local overrides (users should copy from examples/)
-# config.json is included as example, users can modify
-.DS_Store
-__pycache__/
-*.pyc
-server.log
+# Playwright artifacts
+/playwright-report/
+/test-results/

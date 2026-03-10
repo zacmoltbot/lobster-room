@@ -1,13 +1,12 @@
 # Lobster Room 🦞
 
-A “Lobster Room” dashboard that visualizes OpenClaw **resident agents** as lobsters
-in a bird’s-eye room view, with status bubbles (replying / thinking / tool / idle / error).
+A cute, practical dashboard that visualizes your OpenClaw **agents & sessions** as lobsters in a bird’s‑eye room view, with live status bubbles (replying / thinking / tool / idle / error).
 
-This repo is **plugin-only**: Lobster Room is served directly by the OpenClaw
-Gateway under `/lobster-room/`.
+> Served as an **OpenClaw Gateway plugin** at: `https://<openclaw-host>/lobster-room/`
 
-![Lobster Room main view](docs/screenshots/main-view.png)
+![Demo (animated)](docs/screenshots/demo.gif)
 
+**Links**
 - Portal: `https://<openclaw-host>/lobster-room/`
 - API: `https://<openclaw-host>/lobster-room/api/lobster-room`
 
