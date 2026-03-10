@@ -33,16 +33,16 @@ In `~/.openclaw/openclaw.json`, enable the plugin:
 }
 ```
 
-### 2) Install (recommended: pin a release tag)
-
-```bash
-VERSION=v0.1.0 bash -c "$(curl -fsSL https://raw.githubusercontent.com/zacmoltbot/lobster-room/main/plugin/lobster-room/install.sh)"
-```
-
-### 3) Install (latest release)
+### 2) Install (recommended: latest release)
 
 ```bash
 bash -c "$(curl -fsSL https://raw.githubusercontent.com/zacmoltbot/lobster-room/main/plugin/lobster-room/install.sh)"
+```
+
+### 3) Install (pin a specific release tag)
+
+```bash
+VERSION=v0.1.0 bash -c "$(curl -fsSL https://raw.githubusercontent.com/zacmoltbot/lobster-room/main/plugin/lobster-room/install.sh)"
 ```
 
 The installer:
@@ -53,17 +53,19 @@ The installer:
 
 If restart fails (common in hosted containers without systemd), restart the **Gateway service/container** manually.
 
-### 4) Install via “OpenClaw prompt” (copy/paste)
+### 4) Install via “OpenClaw prompt” (recommended)
 
 Give your OpenClaw agent the following instruction:
 
-> Install the `zacmoltbot/lobster-room` OpenClaw plugin **pinned to VERSION=v0.1.0** by running the official installer script from the repo.
-> 
+> Install (or update) the `zacmoltbot/lobster-room` OpenClaw plugin using the official installer script.
+>
 > Steps:
 > 1) Ensure `~/.openclaw/openclaw.json` enables plugin id `lobster-room`.
-> 2) Download and run: `VERSION=v0.1.0 bash -c "$(curl -fsSL https://raw.githubusercontent.com/zacmoltbot/lobster-room/main/plugin/lobster-room/install.sh)"`.
+> 2) Run: `bash -c "$(curl -fsSL https://raw.githubusercontent.com/zacmoltbot/lobster-room/main/plugin/lobster-room/install.sh)"`.
 > 3) Restart the OpenClaw Gateway (if the script cannot restart it, tell me what to restart).
-> 4) After install, verify `https://<openclaw-host>/lobster-room/` and report what version was installed.
+> 4) Verify `https://<openclaw-host>/lobster-room/` and report the installed version.
+>
+> Optional: if I ask for a pinned install, use `VERSION=vX.Y.Z`.
 
 ## Verify
 
