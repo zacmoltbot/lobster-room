@@ -769,14 +769,28 @@ export default {
 
     const redactSecretsInText = (s: string): string => {
       let out = String(s || "");
+
+      // URLs can leak tokens/hostnames; replace with a placeholder.
+      out = out.replace(/\bhttps?:\/\/[^\s)\]]+/gi, "[URL]");
+
       // Common header-ish secrets
       out = out.replace(/\b(authorization|cookie)\b\s*[:=]\s*([^\s'\"]+)/gi, "$1:[REDACTED]");
+
       // token/apiKey style key-value pairs
-      out = out.replace(/\b(token|api[-_]?key|apikey|access[_-]?token|id[_-]?token|refresh[_-]?token)\b\s*[:=]\s*([^\s'\"]+)/gi, "$1=[REDACTED]");
-      // URL query params
+      out = out.replace(
+        /\b(token|api[-_]?key|apikey|access[_-]?token|id[_-]?token|refresh[_-]?token)\b\s*[:=]\s*([^\s'\"]+)/gi,
+        "$1=[REDACTED]",
+      );
+
+      // URL query params (when URL stripping didn't catch)
       out = out.replace(/([?&])(token|api_key|apikey|apiKey|access_token|auth|authorization)=([^&#]+)/g, "$1$2=[REDACTED]");
+
       // Long hex strings (often keys/hashes)
       out = out.replace(/\b[a-f0-9]{32,}\b/gi, "[HEX_REDACTED]");
+
+      // Shell-ish patterns that often contain secrets
+      out = out.replace(/\b(BEARER|TOKEN)=([^\s]+)/gi, "$1=[REDACTED]");
+
       return out;
     };
 
@@ -821,6 +835,106 @@ export default {
     const pushFeed = (item: FeedItem) => {
       feedBuf.push(item);
       if (feedBuf.length > FEED_MAX) feedBuf.splice(0, feedBuf.length - FEED_MAX);
+    };
+
+    type FeedTaskStatus = "running" | "done" | "error";
+
+    type FeedTask = {
+      id: string;
+      sessionKey?: string;
+      agentId: string;
+      startTs: number;
+      endTs?: number;
+      status: FeedTaskStatus;
+      title: string;
+      summary: string;
+      // Optional raw events for debug UI.
+      items?: FeedItem[];
+    };
+
+    const taskTitleFromItems = (items: FeedItem[]): string => {
+      // Prefer sessions_spawn label/task if present.
+      for (const it of items) {
+        if (it.kind === "before_tool_call" && it.toolName === "sessions_spawn") {
+          const label = typeof (it.details as any)?.label === "string" ? String((it.details as any).label) : "";
+          const task = typeof (it.details as any)?.task === "string" ? String((it.details as any).task) : "";
+          const t = (label || "").trim() || (task || "").trim();
+          if (t) return redactSecretsInText(t).slice(0, 120);
+          return "Spawn sub-agent";
+        }
+      }
+
+      // Otherwise, use first tool name.
+      const firstTool = items.find((x) => x.kind === "before_tool_call" && x.toolName)?.toolName;
+      if (firstTool) return "Tool: " + firstTool;
+
+      return "Agent run";
+    };
+
+    const taskSummaryFromItems = (items: FeedItem[], status: FeedTaskStatus): string => {
+      const toolCalls = items.filter((x) => x.kind === "before_tool_call").length;
+      const msgSent = items.filter((x) => x.kind === "message_sent" && x.success !== false).length;
+      const msgFail = items.filter((x) => x.kind === "message_sent" && x.success === false).length;
+      const errors = items.map((x) => (x.error ? String(x.error) : "")).filter(Boolean);
+
+      const bits: string[] = [];
+      if (toolCalls) bits.push(String(toolCalls) + " tool call" + (toolCalls === 1 ? "" : "s"));
+      if (msgSent) bits.push(String(msgSent) + " message" + (msgSent === 1 ? "" : "s") + " sent");
+      if (msgFail) bits.push(String(msgFail) + " message" + (msgFail === 1 ? "" : "s") + " failed");
+
+      if (status === "running") return bits.length ? "In progress · " + bits.join(" · ") : "In progress";
+
+      if (status === "error") {
+        const e = errors[0] ? "Error: " + redactSecretsInText(errors[0]).slice(0, 160) : "Error";
+        return bits.length ? e + " · " + bits.join(" · ") : e;
+      }
+
+      return bits.length ? "Completed · " + bits.join(" · ") : "Completed";
+    };
+
+    const groupFeedIntoTasks = (items: FeedItem[], opts?: { includeRaw?: boolean }): FeedTask[] => {
+      const includeRaw = !!opts?.includeRaw;
+      const byKey = new Map<string, FeedItem[]>();
+      const noKey: FeedItem[] = [];
+
+      for (const it of items) {
+        const sk = typeof it.sessionKey === "string" && it.sessionKey.trim() ? it.sessionKey.trim() : "";
+        if (sk) byKey.set(sk, (byKey.get(sk) || []).concat([it]));
+        else noKey.push(it);
+      }
+
+      const tasks: FeedTask[] = [];
+
+      for (const [sk, arr] of byKey.entries()) {
+        const sorted = arr.slice().sort((a, b) => a.ts - b.ts);
+        const agentId = sorted.find((x) => x.agentId)?.agentId || "unknown";
+        const startTs = sorted[0]?.ts || nowMs();
+        const end = [...sorted].reverse().find((x) => x.kind === "agent_end");
+        const status: FeedTaskStatus = end ? (end.success === false || end.error ? "error" : "done") : "running";
+        const title = taskTitleFromItems(sorted);
+        const summary = taskSummaryFromItems(sorted, status);
+        tasks.push({ id: sk, sessionKey: sk, agentId, startTs, endTs: end?.ts, status, title, summary, items: includeRaw ? sorted : undefined });
+      }
+
+      if (noKey.length) {
+        const byAgent = new Map<string, FeedItem[]>();
+        for (const it of noKey) {
+          const a = it.agentId || "unknown";
+          byAgent.set(a, (byAgent.get(a) || []).concat([it]));
+        }
+        for (const [agentId, arr] of byAgent.entries()) {
+          const sorted = arr.slice().sort((a, b) => a.ts - b.ts);
+          const startTs = sorted[0]?.ts || nowMs();
+          const end = [...sorted].reverse().find((x) => x.kind === "agent_end");
+          const status: FeedTaskStatus = end ? (end.success === false || end.error ? "error" : "done") : "running";
+          const title = taskTitleFromItems(sorted);
+          const summary = taskSummaryFromItems(sorted, status);
+          const id = "adhoc:" + agentId + ":" + String(startTs);
+          tasks.push({ id, agentId, startTs, endTs: end?.ts, status, title, summary, items: includeRaw ? sorted : undefined });
+        }
+      }
+
+      return tasks.sort((a, b) => b.startTs - a.startTs);
     };
 
     const priority: Record<ActivityState, number> = {
@@ -1005,6 +1119,9 @@ export default {
         details: {
           command: toolName === "exec" ? coerceStr(toolData.command, 240) : undefined,
           url: toolName === "web_fetch" ? coerceStr(toolData.url, 240) : undefined,
+          label: toolName === "sessions_spawn" ? coerceStr(toolData.label, 120) : undefined,
+          task: toolName === "sessions_spawn" ? coerceStr(toolData.task, 180) : undefined,
+          spawnAgentId: toolName === "sessions_spawn" ? coerceStr(toolData.spawnAgentId, 80) : undefined,
         },
       });
       setState(agentId, "tool", { toolName, sessionKey: ctx?.sessionKey });
@@ -1013,6 +1130,27 @@ export default {
     api.on("after_tool_call", (event, ctx) => {
       const agentId = resolveAgentId(ctx);
       pushEvent("after_tool_call", { agentId, data: { toolName: event?.toolName, durationMs: event?.durationMs } });
+
+      // Best-effort: capture a safe preview of sessions_spawn final assistant output (if the runtime provides it).
+      // This helps surface sub-agent completions even when no message_sent hook is emitted.
+      let outputPreview: string | undefined = undefined;
+      if (event?.toolName === "sessions_spawn") {
+        const candidates = [
+          event?.result?.message,
+          event?.result?.content,
+          event?.result?.output,
+          event?.result?.final,
+          event?.result?.text,
+          event?.output,
+        ];
+        for (const c of candidates) {
+          if (typeof c === "string" && c.trim()) {
+            outputPreview = redactSecretsInText(c.trim()).slice(0, 220);
+            break;
+          }
+        }
+      }
+
       pushFeed({
         ts: nowMs(),
         kind: "after_tool_call",
@@ -1020,6 +1158,7 @@ export default {
         sessionKey: typeof ctx?.sessionKey === "string" ? ctx.sessionKey : undefined,
         toolName: typeof event?.toolName === "string" ? event.toolName : undefined,
         durationMs: typeof event?.durationMs === "number" ? event.durationMs : undefined,
+        details: outputPreview ? { outputPreview } : undefined,
       });
       setState(agentId, "thinking", { sessionKey: ctx?.sessionKey });
     });
@@ -1267,7 +1406,7 @@ export default {
                 {
                   role: "system",
                   content:
-                    "You summarize an internal event feed for debugging. Be concise, factual, and do not invent details. If errors occurred, call them out. Output plain text.",
+                    "Summarize an internal agent event feed in plain language for a human. Be concise and factual; do not invent details. Include: what happened, outcome, any errors, and suggested next actions. Output plain text.",
                 },
                 {
                   role: "user",
@@ -1367,15 +1506,34 @@ export default {
               const limit = Math.max(1, Math.min(500, Number(payload?.limit) || 120));
               const agentId = typeof payload?.agentId === "string" ? payload.agentId.trim() : "";
               const kind = typeof payload?.kind === "string" ? payload.kind.trim() : "";
+              const includeRaw = !!payload?.includeRaw;
 
               let items = feedBuf.slice();
               if (agentId) items = items.filter((x) => x.agentId === agentId);
               if (kind) items = items.filter((x) => x.kind === (kind as any));
-              items = items.slice(-limit).reverse();
+              items = items.slice(-limit);
+
+              const tasks = groupFeedIntoTasks(items, { includeRaw });
+
+              // Latest preview = most recent event.
+              const last = items.length ? items[items.length - 1] : null;
 
               sendJson(res, 200, {
                 ok: true,
-                items: items.map((it) => ({ ...it, preview: feedPreview(it) })),
+                buildTagFeed: "feed-v2",
+                latest: last ? { ...last, preview: feedPreview(last) } : null,
+                tasks: tasks.map((t) => ({
+                  id: t.id,
+                  sessionKey: t.sessionKey,
+                  agentId: t.agentId,
+                  startTs: t.startTs,
+                  endTs: t.endTs,
+                  status: t.status,
+                  title: t.title,
+                  summary: t.summary,
+                  items: t.items ? t.items.map((it) => ({ ...it, preview: feedPreview(it) })) : undefined,
+                })),
+                items: includeRaw ? items.slice().reverse().map((it) => ({ ...it, preview: feedPreview(it) })) : undefined,
               });
               return;
             }
@@ -1468,7 +1626,7 @@ export default {
                       {
                         role: "system",
                         content:
-                          "You summarize an internal event feed for debugging. Be concise, factual, and do not invent details. If errors occurred, call them out. Output plain text.",
+                          "Summarize an internal agent event feed in plain language for a human. Be concise and factual; do not invent details. Include: what happened, outcome, any errors, and suggested next actions. Output plain text.",
                       },
                       {
                         role: "user",
@@ -1542,122 +1700,6 @@ export default {
               }
               return;
             }
-
-            // Message Feed ops (multiplexed here because some deployments only reliably match /api/lobster-room)
-            if (op === "feedGet") {
-              const limit = Math.max(1, Math.min(500, Number(payload?.limit) || 100));
-              const agentId = typeof payload?.agentId === "string" ? payload.agentId.trim() : "";
-              const kind = typeof payload?.kind === "string" ? payload.kind.trim() : "";
-
-              let items = feedBuf.slice();
-              if (agentId) items = items.filter((x) => x.agentId === agentId);
-              if (kind) items = items.filter((x) => x.kind === (kind as any));
-              items = items.slice(-limit).reverse();
-
-              sendJson(res, 200, {
-                ok: true,
-                debug: { opReceived: op, buildTagFeed: "feed-v1" },
-                items: items.map((it) => ({
-                  ...it,
-                  preview: feedPreview(it),
-                })),
-              });
-              return;
-            }
-
-            if (op === "feedSummarize") {
-              const llmToken =
-                (typeof api.config?.llmToken === "string" && api.config.llmToken.trim())
-                  ? api.config.llmToken.trim()
-                  : (typeof api.config?.llmTokenEnv === "string" && api.config.llmTokenEnv.trim())
-                    ? (process.env[api.config.llmTokenEnv.trim()] || "").trim()
-                    : "";
-
-              if (!llmToken) {
-                sendJson(res, 200, { ok: false, error: "llm_not_configured", debug: { opReceived: op, buildTagFeed: "feed-v1" } });
-                return;
-              }
-
-              const sessionKey = typeof payload?.sessionKey === "string" ? payload.sessionKey.trim() : "";
-              const agentId = typeof payload?.agentId === "string" ? payload.agentId.trim() : "";
-              const maxItems = Math.max(10, Math.min(500, Number(payload?.maxItems) || 200));
-              const windowMs = Math.max(10_000, Math.min(24 * 60 * 60 * 1000, Number(payload?.timeWindowMs) || 60 * 60 * 1000));
-              const sinceMs = typeof payload?.sinceMs === "number" && Number.isFinite(payload.sinceMs)
-                ? payload.sinceMs
-                : (nowMs() - windowMs);
-
-              let items = feedBuf.slice();
-              if (sessionKey) items = items.filter((x) => x.sessionKey === sessionKey);
-              else {
-                if (agentId) items = items.filter((x) => x.agentId === agentId);
-                items = items.filter((x) => x.ts >= sinceMs);
-              }
-              items = items.slice(-maxItems);
-
-              const lines = items
-                .sort((a, b) => a.ts - b.ts)
-                .map((it) => {
-                  const when = new Date(it.ts).toISOString();
-                  const who = it.agentId ? it.agentId : "unknown-agent";
-                  const sess = it.sessionKey ? ` session=${it.sessionKey}` : "";
-                  return `${when} ${who} kind=${it.kind}${sess} :: ${feedPreview(it)}`;
-                });
-
-              if (!lines.length) {
-                sendJson(res, 200, { ok: true, debug: { opReceived: op, buildTagFeed: "feed-v1" }, summary: "(no items)" });
-                return;
-              }
-
-              const model = (typeof api.config?.llmModel === "string" && api.config.llmModel.trim())
-                ? api.config.llmModel.trim()
-                : "gpt-4o-mini";
-
-              try {
-                const r = await fetch("https://api.openai.com/v1/chat/completions", {
-                  method: "POST",
-                  headers: {
-                    authorization: `Bearer ${llmToken}`,
-                    "content-type": "application/json",
-                  },
-                  body: JSON.stringify({
-                    model,
-                    temperature: 0.2,
-                    messages: [
-                      {
-                        role: "system",
-                        content:
-                          "You summarize an internal event feed for debugging. Be concise, factual, and do not invent details. If errors occurred, call them out. Output plain text.",
-                      },
-                      {
-                        role: "user",
-                        content:
-                          `Summarize the following event timeline.\n\n${sessionKey ? `Session: ${sessionKey}\n` : agentId ? `Agent: ${agentId}\n` : ""}Items: ${lines.length}\n\n` +
-                          lines.join("\n"),
-                      },
-                    ],
-                  }),
-                });
-
-                if (!r.ok) {
-                  const txt = await r.text().catch(() => "");
-                  sendJson(res, 200, { ok: false, error: "llm_failed", status: r.status, detail: txt.slice(0, 400), debug: { opReceived: op, buildTagFeed: "feed-v1" } });
-                  return;
-                }
-
-                const data: any = await r.json().catch(() => null);
-                const summary = data?.choices?.[0]?.message?.content;
-                if (typeof summary !== "string" || !summary.trim()) {
-                  sendJson(res, 200, { ok: false, error: "llm_no_summary", debug: { opReceived: op, buildTagFeed: "feed-v1" } });
-                  return;
-                }
-
-                sendJson(res, 200, { ok: true, debug: { opReceived: op, buildTagFeed: "feed-v1" }, summary: summary.trim(), model });
-              } catch (err: any) {
-                sendJson(res, 200, { ok: false, error: "llm_unreachable", detail: String(err?.message || err), debug: { opReceived: op, buildTagFeed: "feed-v1" } });
-              }
-              return;
-            }
-
             // Debug support: echo opReceived for unknown POST+JSON payloads.
             if (op) {
               sendJson(res, 400, { ok: false, error: "unknown_op", debug: { opReceived: op } });
