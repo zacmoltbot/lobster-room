@@ -180,6 +180,16 @@ Instead of raw hook rows, it aggregates events into human-readable **Task cards*
 
 You can expand a task to view the underlying raw events for debugging.
 
+#### Demo: sub-agent task
+
+To validate multi-agent grouping, spawn a sub-agent from any run that has tool access to `sessions_spawn`.
+
+Example prompt to your assistant:
+
+- "Spawn a sub-agent to write a short plan for X, then report back."
+
+In the feed, you should see a parent task (the `sessions_spawn` tool call) and a separate task grouped under the spawned sub-agent `sessionKey`.
+
 API endpoints (multiplexed via POST JSON on `/lobster-room/api/lobster-room`):
 
 - `feedGet` (tasks + latest preview)

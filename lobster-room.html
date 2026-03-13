@@ -26,9 +26,9 @@
     /* Room + Feed dock layout */
     .room-row{display:flex;gap:12px;align-items:stretch}
     .room-col{flex:1 1 auto;min-width:0}
-    .feed-panel{position:relative;left:auto;bottom:auto;width:420px;max-width:520px;min-width:320px;height:720px;max-height:calc(100vh - 200px);
+    .feed-panel{position:relative;left:auto;bottom:auto;width:420px;max-width:520px;min-width:320px;min-height:720px;height:auto;max-height:calc(100vh - 200px);
       background:rgba(10,12,16,.78);border:1px solid rgba(255,255,255,.12);border-radius:14px;backdrop-filter: blur(10px);box-shadow:0 18px 60px rgba(0,0,0,.45);
-      overflow:hidden;z-index:41;display:none;flex:0 0 auto;resize:horizontal}
+      overflow:hidden;z-index:41;display:none;flex:0 0 auto;align-self:stretch;resize:horizontal}
     .feed-panel.show{display:flex;flex-direction:column}
     .feed-body{flex:1 1 auto;overflow:auto}
 
@@ -151,26 +151,31 @@
     .md-log{margin:8px 0 0 0;max-height:220px;overflow:auto;background:rgba(0,0,0,.35);border:1px solid rgba(255,255,255,.08);border-radius:10px;padding:8px 10px;font-size:11px;line-height:1.25;color:rgba(255,255,255,.78)}
 
     /* Message Feed panel */
-    .feed-panel{position:absolute;left:14px;bottom:14px;width:min(520px, 94vw);background:rgba(10,12,16,.78);border:1px solid rgba(255,255,255,.12);border-radius:14px;backdrop-filter: blur(10px);box-shadow:0 18px 60px rgba(0,0,0,.45);overflow:hidden;z-index:41;display:none}
-    .feed-panel.show{display:block}
+    /* NOTE: Desktop is docked to the right of the room (inside .room-row flex). Mobile becomes bottom sheet. */
+    .feed-panel{background:rgba(10,12,16,.78);border:1px solid rgba(255,255,255,.12);border-radius:14px;backdrop-filter: blur(10px);box-shadow:0 18px 60px rgba(0,0,0,.45);overflow:hidden;z-index:41;display:none;min-height:0}
+    .feed-panel.show{display:flex;flex-direction:column}
     .feed-head{display:flex;align-items:center;justify-content:space-between;padding:10px 12px;border-bottom:1px solid rgba(255,255,255,.10)}
     .feed-title{font-weight:800;letter-spacing:.2px}
-    .feed-body{padding:10px 12px;display:flex;flex-direction:column;gap:10px}
+    .feed-body{flex:1 1 auto;min-height:0;padding:10px 12px;display:flex;flex-direction:column;gap:10px;overflow:auto}
     .feed-filters{display:flex;gap:8px;flex-wrap:wrap;align-items:center}
     .feed-filters select{background:rgba(255,255,255,.04);border:1px solid rgba(255,255,255,.10);color:rgba(255,255,255,.85);border-radius:10px;padding:6px 8px;font-size:12px;outline:none}
-    .feed-list{max-height:240px;overflow:auto;border:1px solid rgba(255,255,255,.08);border-radius:10px;background:rgba(0,0,0,.25)}
+    .feed-list{flex:1 1 auto;min-height:120px;overflow:auto;border:1px solid rgba(255,255,255,.08);border-radius:10px;background:rgba(0,0,0,.25)}
     .feed-item{display:flex;gap:10px;align-items:flex-start;padding:8px 10px;border-bottom:1px solid rgba(255,255,255,.06);cursor:pointer}
     .feed-item:last-child{border-bottom:0}
     .feed-item:hover{background:rgba(255,255,255,.05)}
+    .feed-item.sel{background:rgba(255,255,255,.07)}
     .feed-time{flex:0 0 auto;width:64px;color:rgba(255,255,255,.55);font-size:11px}
     .feed-badge{flex:0 0 auto;font-size:10px;letter-spacing:.08em;text-transform:uppercase;border:1px solid rgba(255,255,255,.12);color:rgba(255,255,255,.78);padding:2px 7px;border-radius:999px;background:rgba(255,255,255,.04)}
     .feed-main{flex:1 1 auto;min-width:0}
     .feed-line{display:flex;gap:8px;align-items:baseline}
     .feed-agent{color:rgba(255,255,255,.86);font-weight:700;font-size:12px;max-width:110px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
     .feed-preview{color:rgba(255,255,255,.70);font-size:12px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-    .feed-detail{border:1px solid rgba(255,255,255,.08);border-radius:10px;background:rgba(0,0,0,.28);padding:8px 10px;font-size:11px;line-height:1.35;color:rgba(255,255,255,.80);white-space:pre-wrap}
+    .feed-detail{border:1px solid rgba(255,255,255,.08);border-radius:10px;background:rgba(0,0,0,.28);padding:8px 10px;font-size:11px;line-height:1.35;color:rgba(255,255,255,.80);white-space:pre-wrap;max-height:240px;overflow:auto}
     .feed-actions{display:flex;gap:8px;flex-wrap:wrap}
     .feed-actions .md-btn{padding:6px 10px}
+    .feed-summary{border:1px solid rgba(255,255,255,.08);border-radius:10px;background:rgba(0,0,0,.22);overflow:hidden}
+    .feed-summary > summary{cursor:pointer;user-select:none;padding:8px 10px;font-size:12px;color:rgba(255,255,255,.86)}
+    .feed-summary-body{padding:8px 10px;font-size:12px;line-height:1.35;color:rgba(255,255,255,.82);white-space:pre-wrap;min-height:38px}
 
     .bubble{display:flex;align-items:center;gap:6px;font-size:11px;color:var(--text);padding:6px 10px;border-radius:999px;border:1px solid var(--border);background:rgba(0,0,0,.22);backdrop-filter: blur(6px)}
     .b-dot{width:8px;height:8px;border-radius:50%}
@@ -329,6 +334,12 @@
             <button id="feed-summarize" class="md-btn" type="button">Summarize</button>
             <span class="md-hint" id="feed-status"></span>
           </div>
+
+          <details id="feed-summary" class="feed-summary" open>
+            <summary>Summary</summary>
+            <div id="feed-summary-body" class="feed-summary-body">(no summary yet)</div>
+          </details>
+
           <div id="feed-list" class="feed-list"></div>
           <div id="feed-detail" class="feed-detail" style="display:none"></div>
           <div class="feed-actions">
@@ -2707,6 +2718,8 @@
       selected: null, // selected task
       showRaw: false,
       pollMs: 2000,
+      summaryText: '',
+      summaryMeta: null,
     };
 
     function feedTime(ts){
@@ -2723,57 +2736,102 @@
       return String(st||'—');
     }
 
+    function feedMaskOpaqueId(s){
+      if(typeof s !== 'string') return s;
+      if(s === '[URL]') return s;
+
+      const t = s.trim();
+      if(!t) return s;
+
+      // Keep short human-readable identifiers.
+      if(t.length < 18) return s;
+
+      const isHex = /^[a-f0-9]+$/i.test(t) && t.length >= 24;
+      const isBase64ish = /^[A-Za-z0-9+/=_-]+$/.test(t) && t.length >= 24;
+      const isCall = /^call_[A-Za-z0-9_-]{8,}$/i.test(t);
+      const isFc = /^fc_[A-Za-z0-9_-]{8,}$/i.test(t);
+
+      if(isHex || isBase64ish || isCall || isFc){
+        const head = t.slice(0, 4);
+        const tail = t.slice(-4);
+        return `[ID:${head}…${tail}]`;
+      }
+
+      return s;
+    }
+
+    function feedScrubValue(v, k){
+      // Recursive scrub for raw event JSON. Preserves structure but masks opaque IDs.
+      const key = (typeof k === 'string') ? k : '';
+
+      if(typeof v === 'string'){
+        if(/toolCallId$/i.test(key)) return feedMaskOpaqueId(v);
+        return feedMaskOpaqueId(v);
+      }
+      if(Array.isArray(v)) return v.map((x)=> feedScrubValue(x, key));
+      if(v && typeof v === 'object'){
+        const out = {};
+        for(const kk of Object.keys(v)) out[kk] = feedScrubValue(v[kk], kk);
+        return out;
+      }
+      return v;
+    }
+
     function feedRender(){
       const listEl = document.getElementById('feed-list');
       const detailEl = document.getElementById('feed-detail');
       const statusEl = document.getElementById('feed-status');
       const expandBtn = document.getElementById('feed-expand');
+      const sumBody = document.getElementById('feed-summary-body');
       if(!listEl) return;
 
       const tasks = Array.isArray(FEED.tasks) ? FEED.tasks : [];
-      statusEl.textContent = tasks.length ? (String(tasks.length) + ' tasks') : '—';
+      if(statusEl) statusEl.textContent = tasks.length ? (String(tasks.length) + ' tasks') : '—';
+
+      if(sumBody){
+        const txt = (FEED.summaryText || '').trim();
+        sumBody.textContent = txt ? txt : '(no summary yet)';
+      }
 
       listEl.innerHTML = '';
       for(const t of tasks){
-        const card = document.createElement('div');
-        card.className = 'task-card' + (FEED.selected && FEED.selected.id===t.id ? ' sel' : '');
-        card.addEventListener('click', ()=>{ FEED.selected = t; FEED.showRaw=false; feedRender(); });
-
-        const top = document.createElement('div');
-        top.className = 'task-top';
+        const row = document.createElement('div');
+        row.className = 'feed-item' + (FEED.selected && FEED.selected.id===t.id ? ' sel' : '');
+        row.addEventListener('click', ()=>{ FEED.selected = t; FEED.showRaw=false; feedRender(); });
 
         const time = document.createElement('div');
-        time.className = 'task-time';
+        time.className = 'feed-time';
         time.textContent = feedTime(t.startTs);
 
         const badge = document.createElement('div');
-        badge.className = 'task-badge ' + (t.status||'');
+        badge.className = 'feed-badge';
         badge.textContent = feedStatusLabel(t.status);
 
         const main = document.createElement('div');
-        main.className = 'task-main';
+        main.className = 'feed-main';
 
-        const title = document.createElement('div');
-        title.className = 'task-title';
-        title.textContent = t.title || '(untitled)';
-
+        const line1 = document.createElement('div');
+        line1.className = 'feed-line';
         const agent = document.createElement('div');
-        agent.className = 'task-agent';
+        agent.className = 'feed-agent';
         agent.textContent = t.agentId || '—';
+        const title = document.createElement('div');
+        title.className = 'feed-preview';
+        title.textContent = t.title || '(untitled)';
+        line1.appendChild(agent);
+        line1.appendChild(title);
 
-        const sum = document.createElement('div');
-        sum.className = 'task-summary';
-        sum.textContent = t.summary || '';
+        const line2 = document.createElement('div');
+        line2.className = 'feed-preview';
+        line2.textContent = t.summary || '';
 
-        main.appendChild(title);
-        main.appendChild(agent);
-        main.appendChild(sum);
+        main.appendChild(line1);
+        if(t.summary) main.appendChild(line2);
 
-        top.appendChild(time);
-        top.appendChild(badge);
-        top.appendChild(main);
-        card.appendChild(top);
-        listEl.appendChild(card);
+        row.appendChild(time);
+        row.appendChild(badge);
+        row.appendChild(main);
+        listEl.appendChild(row);
       }
 
       if(FEED.selected){
@@ -2790,9 +2848,9 @@
         };
 
         if(FEED.showRaw && Array.isArray(FEED.selected.items)){
-          payload.items = FEED.selected.items;
+          payload.items = feedScrubValue(FEED.selected.items, 'items');
         }
-        detailEl.textContent = JSON.stringify(payload, null, 2);
+        detailEl.textContent = JSON.stringify(feedScrubValue(payload, 'payload'), null, 2);
 
         if(expandBtn){
           expandBtn.style.display = Array.isArray(FEED.selected.items) ? '' : 'none';
@@ -2856,22 +2914,27 @@
         ? {sessionKey: FEED.selected.sessionKey, maxItems: 300}
         : {sinceMs: Date.now() - Math.max(60_000, rangeMs), maxItems: 300};
 
+      FEED.summaryText = 'Summarizing…';
+      FEED.summaryMeta = { at: Date.now(), scope: FEED.selected && FEED.selected.sessionKey ? 'selection' : 'range' };
+      feedRender();
+
       btn.textContent = 'Summarizing…';
       btn.disabled = true;
       try{
         const r = await apiPostJson('./api/lobster-room', { op: 'feedSummarize', ...body });
         if(r && r.ok){
-          alert(r.summary);
+          FEED.summaryText = String(r.summary || '').trim() || '(empty summary)';
         }else if(r && r.error === 'llm_not_configured'){
-          alert('LLM summary not configured on this gateway.');
+          FEED.summaryText = 'LLM summary not configured on this gateway.';
         }else{
-          alert('Summary failed.');
+          FEED.summaryText = 'Summary failed.';
         }
       }catch{
-        alert('Summary failed.');
+        FEED.summaryText = 'Summary failed.';
       }finally{
         btn.textContent = 'Summarize';
         btn.disabled = false;
+        feedRender();
       }
     }
 
