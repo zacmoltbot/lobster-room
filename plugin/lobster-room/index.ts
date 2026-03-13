@@ -1687,14 +1687,15 @@ export default {
                 gatewayToken = await readGatewayTokenFromConfigFile();
               }
 
-              // Prefer current request origin/port (works when gateway isn't on 18789),
-              // but keep a loopback fallback for odd proxy setups.
+              // Prefer loopback to avoid any external proxy auth/header rewriting.
+              // Keep request-origin as a fallback for setups where the gateway isn't bound to 18789.
               const origin = readRequestUrl(req);
-              const invokeCandidates = [new URL("/tools/invoke", origin).toString(), "http://127.0.0.1:18789/tools/invoke"];
+              const invokeCandidates = ["http://127.0.0.1:18789/tools/invoke", new URL("/tools/invoke", origin).toString()];
 
               const invokeOnce = async (invokeUrl: string) => {
                 const headers: Record<string, string> = { "content-type": "application/json" };
-                if (gatewayToken) headers.authorization = `Bearer ${gatewayToken}`;
+                // /tools/invoke expects Authorization: Bearer <gateway token>
+                if (gatewayToken) headers["Authorization"] = `Bearer ${gatewayToken}`;
 
                 const resp = await fetch(invokeUrl, {
                   method: "POST",
@@ -1715,11 +1716,22 @@ export default {
                 }
 
                 if (!resp.ok || !data?.ok) {
+                  let detail = "";
+                  if (data && typeof data === "object") {
+                    if (typeof (data as any).detail === "string") detail = (data as any).detail;
+                    else if (typeof (data as any).message === "string") detail = (data as any).message;
+                    else if (typeof (data as any).error === "string") detail = (data as any).error;
+                    else {
+                      try { detail = JSON.stringify(data); } catch { detail = ""; }
+                    }
+                  }
+                  if (!detail) detail = txt || "";
+
                   return {
                     ok: false,
                     status: resp.status,
                     error: String(data?.error || (resp.ok ? "invoke_failed" : "invoke_http_error")),
-                    detail: (String(data?.detail || txt || "").trim() || "").slice(0, 400),
+                    detail: (String(detail).trim() || "").slice(0, 800),
                   };
                 }
 
