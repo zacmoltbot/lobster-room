@@ -317,6 +317,7 @@
         </svg>
       </div>
       </div>
+      </div>
 
       <!-- Message Feed (docked) -->
       <div id="feed-panel" class="feed-panel" aria-live="polite">
@@ -326,6 +327,10 @@
         </div>
         <div class="feed-body">
           <div class="feed-filters">
+            <select id="feed-view" title="Feed view">
+              <option value="timeline" selected>Timeline</option>
+              <option value="tasks">Tasks</option>
+            </select>
             <select id="feed-agent">
               <option value="">All agents</option>
             </select>
@@ -2717,9 +2722,14 @@
     // --- Message Feed ---
     const FEED = {
       show: false,
+      view: 'timeline', // 'timeline' (default) | 'tasks'
       tasks: [],
+      items: [], // latest polled items (sanitized server-side), newest-first from API
+      timeline: [], // accumulated, oldest-first
+      _seen: new Set(),
       latest: null,
-      selected: null, // selected task
+      selected: null, // selected row (task or item)
+      selectedType: '', // 'task' | 'item'
       showRaw: false,
       pollMs: 2000,
       summaryText: '',
@@ -2781,10 +2791,13 @@
 
         const isHex = /^[a-f0-9]+$/i.test(t) && t.length >= 24;
         const isBase64ish = /^[A-Za-z0-9+/=_-]+$/.test(t) && t.length >= 24;
-        const isCall = /^call_[A-Za-z0-9_-]{8,}$/i.test(t);
-        const isFc = /^fc_[A-Za-z0-9_-]{8,}$/i.test(t);
+        const isCall = /^call_[A-Za-z0-9_-]{6,}$/i.test(t);
+        const isFc = /^fc_[A-Za-z0-9_-]{6,}$/i.test(t);
 
-        if(isHex || isBase64ish || isCall || isFc){
+        // Fully redact OpenClaw call_/fc_ tokens.
+        if(isCall || isFc) return '[OC_ID_REDACTED]';
+
+        if(isHex || isBase64ish){
           const head = t.slice(0, 4);
           const tail = t.slice(-4);
           return `[ID:${head}…${tail}]`;
@@ -2827,6 +2840,47 @@
       return v;
     }
 
+    function feedItemKey(it){
+      // Stable-ish key for dedupe across polls; keep bounded by the server ring buffer.
+      const ts = (it && typeof it.ts === 'number') ? String(it.ts) : '0';
+      const k = String(it && (it.kind||'') || '');
+      const a = String(it && (it.agentId||'') || '');
+      const t = String(it && (it.toolName||'') || '');
+      const sk = String(it && (it.sessionKey||'') || '');
+      return [ts,k,a,t,sk].join('|');
+    }
+
+    function feedMergeTimeline(newItemsNewestFirst){
+      const incoming = Array.isArray(newItemsNewestFirst) ? newItemsNewestFirst.slice() : [];
+      // API returns newest-first. Render timeline oldest-first.
+      incoming.sort((a,b)=> (a.ts||0) - (b.ts||0));
+
+      for(const it of incoming){
+        const key = feedItemKey(it);
+        if(FEED._seen.has(key)) continue;
+        FEED._seen.add(key);
+        FEED.timeline.push(it);
+      }
+
+      // Keep memory bounded.
+      const MAX = 600;
+      if(FEED.timeline.length > MAX){
+        const drop = FEED.timeline.length - MAX;
+        const dropped = FEED.timeline.splice(0, drop);
+        // Rebuild seen set to match remaining.
+        FEED._seen = new Set(FEED.timeline.map(feedItemKey));
+        // If selection was dropped, clear.
+        if(FEED.selectedType === 'item' && FEED.selected){
+          const selKey = feedItemKey(FEED.selected);
+          if(!FEED._seen.has(selKey)){
+            FEED.selected = null;
+            FEED.selectedType = '';
+            FEED.showRaw = false;
+          }
+        }
+      }
+    }
+
     function feedRender(){
       const listEl = document.getElementById('feed-list');
       const detailEl = document.getElementById('feed-detail');
@@ -2836,8 +2890,12 @@
       if(!listEl) return;
 
       const tasks = Array.isArray(FEED.tasks) ? FEED.tasks : [];
+      const timeline = Array.isArray(FEED.timeline) ? FEED.timeline : [];
+
       if(statusEl){
-        const base = tasks.length ? (String(tasks.length) + ' tasks') : '—';
+        const base = (FEED.view === 'tasks')
+          ? (tasks.length ? (String(tasks.length) + ' tasks') : '—')
+          : (timeline.length ? (String(timeline.length) + ' events') : '—');
         const extra = (FEED.devSpawnStatus || '').trim();
         statusEl.textContent = extra ? (base + ' · ' + extra) : base;
       }
@@ -2847,72 +2905,146 @@
         sumBody.textContent = txt ? txt : '(no summary yet)';
       }
 
+      const listWasNearBottom = (()=>{
+        try{
+          const slack = 40;
+          return (listEl.scrollTop + listEl.clientHeight + slack) >= listEl.scrollHeight;
+        }catch{ return true; }
+      })();
+
       listEl.innerHTML = '';
-      for(const t of tasks){
-        const row = document.createElement('div');
-        row.className = 'feed-item' + (FEED.selected && FEED.selected.id===t.id ? ' sel' : '');
-        row.addEventListener('click', ()=>{ FEED.selected = t; FEED.showRaw=false; feedRender(); });
 
-        const time = document.createElement('div');
-        time.className = 'feed-time';
-        time.textContent = feedTime(t.startTs);
+      if(FEED.view === 'tasks'){
+        for(const t of tasks){
+          const row = document.createElement('div');
+          const isSel = (FEED.selectedType === 'task' && FEED.selected && FEED.selected.id === t.id);
+          row.className = 'feed-item' + (isSel ? ' sel' : '');
+          row.addEventListener('click', ()=>{ FEED.selected = t; FEED.selectedType = 'task'; FEED.showRaw=false; feedRender(); });
 
-        const badge = document.createElement('div');
-        badge.className = 'feed-badge';
-        badge.textContent = feedStatusLabel(t.status);
+          const time = document.createElement('div');
+          time.className = 'feed-time';
+          time.textContent = feedTime(t.startTs);
 
-        const main = document.createElement('div');
-        main.className = 'feed-main';
+          const badge = document.createElement('div');
+          badge.className = 'feed-badge';
+          badge.textContent = feedStatusLabel(t.status);
 
-        const line1 = document.createElement('div');
-        line1.className = 'feed-line';
-        const agent = document.createElement('div');
-        agent.className = 'feed-agent';
-        agent.textContent = t.agentId || '—';
-        const title = document.createElement('div');
-        title.className = 'feed-preview';
-        title.textContent = t.title || '(untitled)';
-        line1.appendChild(agent);
-        line1.appendChild(title);
+          const main = document.createElement('div');
+          main.className = 'feed-main';
 
-        const line2 = document.createElement('div');
-        line2.className = 'feed-preview';
-        line2.textContent = t.summary || '';
+          const line1 = document.createElement('div');
+          line1.className = 'feed-line';
+          const agent = document.createElement('div');
+          agent.className = 'feed-agent';
+          agent.textContent = t.agentId || '—';
+          const title = document.createElement('div');
+          title.className = 'feed-preview';
+          title.textContent = t.title || '(untitled)';
+          line1.appendChild(agent);
+          line1.appendChild(title);
 
-        main.appendChild(line1);
-        if(t.summary) main.appendChild(line2);
+          const line2 = document.createElement('div');
+          line2.className = 'feed-preview';
+          line2.textContent = t.summary || '';
 
-        row.appendChild(time);
-        row.appendChild(badge);
-        row.appendChild(main);
-        listEl.appendChild(row);
+          main.appendChild(line1);
+          if(t.summary) main.appendChild(line2);
+
+          row.appendChild(time);
+          row.appendChild(badge);
+          row.appendChild(main);
+          listEl.appendChild(row);
+        }
+      }else{
+        for(const it of timeline){
+          const row = document.createElement('div');
+          const isSel = (FEED.selectedType === 'item' && FEED.selected && feedItemKey(FEED.selected) === feedItemKey(it));
+          row.className = 'feed-item' + (isSel ? ' sel' : '');
+          row.addEventListener('click', ()=>{ FEED.selected = it; FEED.selectedType = 'item'; FEED.showRaw=false; feedRender(); });
+
+          const time = document.createElement('div');
+          time.className = 'feed-time';
+          time.textContent = feedTime(it.ts);
+
+          const badge = document.createElement('div');
+          badge.className = 'feed-badge';
+          const k = String(it.kind || '');
+          const tn = (it.toolName ? String(it.toolName) : '');
+          badge.textContent = tn ? (k + ':' + tn) : k;
+
+          const main = document.createElement('div');
+          main.className = 'feed-main';
+
+          const line1 = document.createElement('div');
+          line1.className = 'feed-line';
+          const agent = document.createElement('div');
+          agent.className = 'feed-agent';
+          agent.textContent = it.agentId || '—';
+          const preview = document.createElement('div');
+          preview.className = 'feed-preview';
+          preview.textContent = (it.preview || '') ? String(it.preview) : (k || '(event)');
+          line1.appendChild(agent);
+          line1.appendChild(preview);
+
+          main.appendChild(line1);
+
+          row.appendChild(time);
+          row.appendChild(badge);
+          row.appendChild(main);
+          listEl.appendChild(row);
+        }
       }
 
       if(FEED.selected){
         detailEl.style.display = 'block';
-        const payload = {
-          id: FEED.selected.id,
-          sessionKey: FEED.selected.sessionKey,
-          agentId: FEED.selected.agentId,
-          status: FEED.selected.status,
-          startTs: FEED.selected.startTs,
-          endTs: FEED.selected.endTs,
-          title: FEED.selected.title,
-          summary: FEED.selected.summary,
-        };
 
-        if(FEED.showRaw && Array.isArray(FEED.selected.items)){
-          payload.items = feedScrubValue(FEED.selected.items, 'items');
-        }
-        detailEl.textContent = JSON.stringify(feedScrubValue(payload, 'payload'), null, 2);
+        if(FEED.selectedType === 'task'){
+          const payload = {
+            id: FEED.selected.id,
+            sessionKey: FEED.selected.sessionKey,
+            agentId: FEED.selected.agentId,
+            status: FEED.selected.status,
+            startTs: FEED.selected.startTs,
+            endTs: FEED.selected.endTs,
+            title: FEED.selected.title,
+            summary: FEED.selected.summary,
+          };
+          if(FEED.showRaw && Array.isArray(FEED.selected.items)){
+            payload.items = feedScrubValue(FEED.selected.items, 'items');
+          }
+          detailEl.textContent = JSON.stringify(feedScrubValue(payload, 'payload'), null, 2);
 
-        if(expandBtn){
-          expandBtn.style.display = Array.isArray(FEED.selected.items) ? '' : 'none';
-          expandBtn.textContent = FEED.showRaw ? 'Hide raw events' : 'Show raw events';
+          if(expandBtn){
+            expandBtn.style.display = Array.isArray(FEED.selected.items) ? '' : 'none';
+            expandBtn.textContent = FEED.showRaw ? 'Hide raw events' : 'Show raw events';
+          }
+        }else{
+          const base = {
+            ts: FEED.selected.ts,
+            kind: FEED.selected.kind,
+            agentId: FEED.selected.agentId,
+            sessionKey: FEED.selected.sessionKey,
+            toolName: FEED.selected.toolName,
+            durationMs: FEED.selected.durationMs,
+            success: FEED.selected.success,
+            error: FEED.selected.error,
+            preview: FEED.selected.preview,
+          };
+          const payload = FEED.showRaw ? FEED.selected : base;
+          detailEl.textContent = JSON.stringify(feedScrubValue(payload, 'payload'), null, 2);
+
+          if(expandBtn){
+            expandBtn.style.display = '';
+            expandBtn.textContent = FEED.showRaw ? 'Hide raw event' : 'Show raw event';
+          }
         }
       }else{
         detailEl.style.display = 'none';
         if(expandBtn) expandBtn.style.display='none';
+      }
+
+      if(FEED.view === 'timeline' && listWasNearBottom){
+        try{ listEl.scrollTop = listEl.scrollHeight; }catch{}
       }
     }
 
@@ -2928,8 +3060,22 @@
           includeRaw: true,
         });
         if(data && data.ok){
+          // If agent filter changed, reset timeline accumulator to avoid mixing streams.
+          if(typeof FEED._agentFilter !== 'string') FEED._agentFilter = '';
+          if(FEED._agentFilter !== (agentId||'')){
+            FEED._agentFilter = (agentId||'');
+            FEED.timeline = [];
+            FEED._seen = new Set();
+            FEED.selected = null;
+            FEED.selectedType = '';
+            FEED.showRaw = false;
+          }
+
           FEED.latest = data.latest || null;
           FEED.tasks = Array.isArray(data.tasks) ? data.tasks : [];
+          FEED.items = Array.isArray(data.items) ? data.items : [];
+          // Default view is fine-grained timeline: continuously append new events.
+          feedMergeTimeline(FEED.items);
 
           // Populate agent list (stable-ish)
           const agents = [...new Set((FEED.tasks||[]).map(x=>x.agentId).filter(Boolean))].sort();
@@ -2947,8 +3093,15 @@
           }
 
           if(FEED.selected){
-            const m = (FEED.tasks||[]).find(x=>x.id===FEED.selected.id);
-            if(m) FEED.selected = m;
+            if(FEED.selectedType === 'task'){
+              const m = (FEED.tasks||[]).find(x=>x.id===FEED.selected.id);
+              if(m) FEED.selected = m;
+            }
+            if(FEED.selectedType === 'item'){
+              const k = feedItemKey(FEED.selected);
+              const m = (FEED.timeline||[]).find(x=> feedItemKey(x) === k);
+              if(m) FEED.selected = m;
+            }
           }
 
           feedRender();
@@ -2997,6 +3150,7 @@
       const btnOpen = document.getElementById('btn-feed');
       const btnToggle = document.getElementById('feed-toggle');
       const btnClear = document.getElementById('feed-clear');
+      const viewSel = document.getElementById('feed-view');
       const agentSel = document.getElementById('feed-agent');
       const expandBtn = document.getElementById('feed-expand');
       const summarizeBtn = document.getElementById('feed-summarize');
@@ -3023,7 +3177,18 @@
 
       if(btnOpen) btnOpen.addEventListener('click', ()=> setShow(!FEED.show));
       if(btnToggle) btnToggle.addEventListener('click', ()=> setShow(false));
-      if(btnClear) btnClear.addEventListener('click', ()=>{ FEED.selected = null; FEED.showRaw=false; feedRender(); });
+      if(btnClear) btnClear.addEventListener('click', ()=>{ FEED.selected = null; FEED.selectedType=''; FEED.showRaw=false; feedRender(); });
+      if(viewSel){
+        viewSel.value = FEED.view;
+        viewSel.addEventListener('change', ()=>{
+          const v = String(viewSel.value||'timeline');
+          FEED.view = (v==='tasks') ? 'tasks' : 'timeline';
+          FEED.selected = null;
+          FEED.selectedType = '';
+          FEED.showRaw = false;
+          feedRender();
+        });
+      }
       if(agentSel) agentSel.addEventListener('change', ()=> feedPollOnce());
       if(expandBtn) expandBtn.addEventListener('click', ()=>{ FEED.showRaw = !FEED.showRaw; feedRender(); });
       if(summarizeBtn) summarizeBtn.addEventListener('click', ()=> feedSummarizeSelectionOrRange());
