@@ -1165,31 +1165,8 @@ export default {
       },
     });
 
-    // HTTP: Message Feed API
-    api.registerHttpRoute({
-      path: "/lobster-room/api/feed",
-      handler: async (req, res) => {
-        const url = readRequestUrl(req);
-        const limitRaw = url.searchParams.get("limit");
-        const limit = Math.max(1, Math.min(500, Number(limitRaw) || 100));
-        const agentId = (url.searchParams.get("agentId") || "").trim();
-        const kind = (url.searchParams.get("kind") || "").trim();
-
-        let items = feedBuf.slice();
-        if (agentId) items = items.filter((x) => x.agentId === agentId);
-        if (kind) items = items.filter((x) => x.kind === (kind as any));
-        items = items.slice(-limit).reverse(); // most recent first
-
-        sendJson(res, 200, {
-          ok: true,
-          items: items.map((it) => ({
-            ...it,
-            // deterministic preview (no LLM)
-            preview: feedPreview(it),
-          })),
-        });
-      },
-    });
+    // NOTE: Message Feed API is multiplexed via /lobster-room/api/lobster-room (op=feedGet/feedSummarize)
+    // because some gateway/proxy setups only reliably route this single plugin API endpoint.
 
     api.registerHttpRoute({
       path: "/lobster-room/api/feed/summarize",
@@ -1384,6 +1361,144 @@ export default {
               payload = null;
             }
             const op = String(payload?.op || "").trim();
+
+            // --- Message Feed ops (multiplexed) ---
+            if (op === "feedGet") {
+              const limit = Math.max(1, Math.min(500, Number(payload?.limit) || 120));
+              const agentId = typeof payload?.agentId === "string" ? payload.agentId.trim() : "";
+              const kind = typeof payload?.kind === "string" ? payload.kind.trim() : "";
+
+              let items = feedBuf.slice();
+              if (agentId) items = items.filter((x) => x.agentId === agentId);
+              if (kind) items = items.filter((x) => x.kind === (kind as any));
+              items = items.slice(-limit).reverse();
+
+              sendJson(res, 200, {
+                ok: true,
+                items: items.map((it) => ({ ...it, preview: feedPreview(it) })),
+              });
+              return;
+            }
+
+            if (op === "feedSummarize") {
+              // NOTE: We re-use the same logic as /lobster-room/api/feed/summarize,
+              // but route reliability is better here.
+
+              // Resolve an auth token for calling the local gateway LLM endpoint.
+              // Experience-first fallback order:
+              // 1) api.config.llmToken (explicit override)
+              // 2) api.config.llmTokenEnv (explicit env)
+              // 3) process.env.OPENCLAW_GATEWAY_TOKEN / OPENCLAW_TOKEN (if present)
+              // 4) ~/.openclaw/openclaw.json gateway.auth.token (best-effort)
+              const readGatewayTokenFromConfigFile = async (): Promise<string> => {
+                try {
+                  const home = (process.env.HOME || "").trim() || "/home/node";
+                  const p = join(home, ".openclaw", "openclaw.json");
+                  const txt = await fs.readFile(p, "utf8");
+                  const obj: any = JSON.parse(txt);
+                  const tok = obj?.gateway?.auth?.token;
+                  return (typeof tok === "string" ? tok.trim() : "");
+                } catch {
+                  return "";
+                }
+              };
+
+              let llmToken =
+                (typeof api.config?.llmToken === "string" && api.config.llmToken.trim())
+                  ? api.config.llmToken.trim()
+                  : (typeof api.config?.llmTokenEnv === "string" && api.config.llmTokenEnv.trim())
+                    ? (process.env[api.config.llmTokenEnv.trim()] || "").trim()
+                    : (process.env.OPENCLAW_GATEWAY_TOKEN || process.env.OPENCLAW_TOKEN || "").trim();
+
+              if (!llmToken) {
+                llmToken = await readGatewayTokenFromConfigFile();
+              }
+
+              if (!llmToken) {
+                sendJson(res, 200, { ok: false, error: "llm_not_configured" });
+                return;
+              }
+
+              const sessionKey = typeof payload?.sessionKey === "string" ? payload.sessionKey.trim() : "";
+              const agentId = typeof payload?.agentId === "string" ? payload.agentId.trim() : "";
+              const maxItems = Math.max(10, Math.min(500, Number(payload?.maxItems) || 200));
+              const windowMs = Math.max(10_000, Math.min(24 * 60 * 60 * 1000, Number(payload?.timeWindowMs) || 60 * 60 * 1000));
+              const sinceMs = typeof payload?.sinceMs === "number" && Number.isFinite(payload.sinceMs)
+                ? payload.sinceMs
+                : (nowMs() - windowMs);
+
+              let items = feedBuf.slice();
+              if (sessionKey) items = items.filter((x) => x.sessionKey === sessionKey);
+              else {
+                if (agentId) items = items.filter((x) => x.agentId === agentId);
+                items = items.filter((x) => x.ts >= sinceMs);
+              }
+              items = items.slice(-maxItems);
+
+              const lines = items
+                .sort((a, b) => a.ts - b.ts)
+                .map((it) => {
+                  const iso = new Date(it.ts).toISOString();
+                  const agent = it.agentId ? `@${it.agentId}` : "";
+                  const extra: string[] = [];
+                  if (it.toolName) extra.push(`tool=${it.toolName}`);
+                  if (typeof it.durationMs === "number") extra.push(`durMs=${Math.round(it.durationMs)}`);
+                  if (typeof it.success === "boolean") extra.push(`ok=${it.success}`);
+                  if (it.error) extra.push(`err=${redactSecretsInText(it.error)}`);
+                  return `${iso} ${agent} [${it.kind}] ${feedPreview(it)}${extra.length ? ` (${extra.join(", ")})` : ""}`.trim();
+                });
+
+              const model = (typeof api.config?.llmModel === "string" && api.config.llmModel.trim()) ? api.config.llmModel.trim() : "gpt-4o-mini";
+
+              // Call local gateway OpenAI-compatible endpoint.
+              const origin = readRequestUrl(req);
+              const llmUrl = new URL("/v1/chat/completions", origin);
+
+              try {
+                const r = await fetch(llmUrl.toString(), {
+                  method: "POST",
+                  headers: {
+                    "content-type": "application/json",
+                    authorization: `Bearer ${llmToken}`,
+                  },
+                  body: JSON.stringify({
+                    model,
+                    temperature: 0.2,
+                    messages: [
+                      {
+                        role: "system",
+                        content:
+                          "You summarize an internal event feed for debugging. Be concise, factual, and do not invent details. If errors occurred, call them out. Output plain text.",
+                      },
+                      {
+                        role: "user",
+                        content:
+                          `Summarize the following event timeline.\n\n${sessionKey ? `Session: ${sessionKey}\n` : agentId ? `Agent: ${agentId}\n` : ""}Items: ${lines.length}\n\n` +
+                          lines.join("\n"),
+                      },
+                    ],
+                  }),
+                });
+
+                if (!r.ok) {
+                  const txt = await r.text().catch(() => "");
+                  sendJson(res, 200, { ok: false, error: "llm_failed", status: r.status, detail: txt.slice(0, 400) });
+                  return;
+                }
+
+                const data: any = await r.json().catch(() => null);
+                const summary = data?.choices?.[0]?.message?.content;
+                if (typeof summary !== "string" || !summary.trim()) {
+                  sendJson(res, 200, { ok: false, error: "llm_no_summary" });
+                  return;
+                }
+
+                sendJson(res, 200, { ok: true, summary: summary.trim(), model });
+              } catch (err: any) {
+                sendJson(res, 200, { ok: false, error: "llm_unreachable", detail: String(err?.message || err) });
+              }
+              return;
+            }
 
             if (op === "roomImageInfo") {
               const meta = await readRoomMeta();
