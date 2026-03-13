@@ -24,14 +24,15 @@
     .room{position:relative;border:1px solid var(--border);background:var(--surface);border-radius:18px;min-height:720px;overflow:hidden}
 
     /* Room + Feed dock layout */
-    .room-row{display:flex;gap:12px;align-items:stretch}
-    .room-col{flex:1 1 auto;min-width:0;display:flex}
+    .room-row{display:flex;gap:12px;align-items:stretch;width:100%}
+    .room-col{flex:1 1 0;min-width:0;display:flex}
     .room-col > .room{flex:1 1 auto}
 
     /* Feed is a true right-docked panel on desktop (sibling of .room-col inside .room-row). */
-    .feed-panel{position:relative;left:auto;right:auto;top:auto;bottom:auto;width:420px;max-width:520px;min-width:320px;
+    .feed-panel{position:relative;left:auto;right:auto;top:auto;bottom:auto;margin-left:auto;
+      width:420px;max-width:none;min-width:320px;
       min-height:720px;height:auto;max-height:calc(100vh - 200px);
-      background:rgba(10,12,16,.78);border:1px solid rgba(255,255,255,.12);border-radius:14px;backdrop-filter: blur(10px);box-shadow:0 18px 60px rgba(0,0,0,.45);
+      background:rgba(10,12,16,.78);border:1px solid rgba(255,255,255,.12);border-left-color:rgba(255,255,255,.20);border-radius:14px;backdrop-filter: blur(10px);box-shadow:0 18px 60px rgba(0,0,0,.45);
       overflow:hidden;z-index:41;display:none;flex:0 0 auto;align-self:stretch;resize:horizontal}
     .feed-panel.show{display:flex;flex-direction:column}
     .feed-body{flex:1 1 auto;overflow:auto}
@@ -2723,6 +2724,7 @@
       pollMs: 2000,
       summaryText: '',
       summaryMeta: null,
+      devSpawnStatus: '',
     };
 
     function feedTime(ts){
@@ -2753,28 +2755,56 @@
         .replace(/\b127\.0\.0\.1(?::\d+)?(?:\/[\w\-\.~%!$&'()*+,;=:@/]*)?/gi, '[URL]');
     }
 
+    function feedMaskSessionKey(s){
+      if(typeof s !== 'string') return s;
+      if(!s) return s;
+
+      // Mask session keys (QA flagged these). Example format: agent:<agentId>:discord:channel:...
+      // Keep only agentId + ellipsis.
+      return s.replace(/\bagent:([^:\s"'<>]+):[^\s"'<>]+/g, (_m, agentId)=>{
+        const a = String(agentId || '').trim();
+        return a ? `agent:${a}:…` : '[SESSION]';
+      });
+    }
+
     function feedMaskOpaqueId(s){
       if(typeof s !== 'string') return s;
       if(s === '[URL]') return s;
+      if(!s) return s;
 
-      const t = s.trim();
-      if(!t) return s;
+      const maskOne = (tok)=>{
+        const t = String(tok || '').trim();
+        if(!t) return tok;
 
-      // Keep short human-readable identifiers.
-      if(t.length < 18) return s;
+        // Keep short human-readable identifiers.
+        if(t.length < 18) return tok;
 
-      const isHex = /^[a-f0-9]+$/i.test(t) && t.length >= 24;
-      const isBase64ish = /^[A-Za-z0-9+/=_-]+$/.test(t) && t.length >= 24;
-      const isCall = /^call_[A-Za-z0-9_-]{8,}$/i.test(t);
-      const isFc = /^fc_[A-Za-z0-9_-]{8,}$/i.test(t);
+        const isHex = /^[a-f0-9]+$/i.test(t) && t.length >= 24;
+        const isBase64ish = /^[A-Za-z0-9+/=_-]+$/.test(t) && t.length >= 24;
+        const isCall = /^call_[A-Za-z0-9_-]{8,}$/i.test(t);
+        const isFc = /^fc_[A-Za-z0-9_-]{8,}$/i.test(t);
 
-      if(isHex || isBase64ish || isCall || isFc){
-        const head = t.slice(0, 4);
-        const tail = t.slice(-4);
-        return `[ID:${head}…${tail}]`;
-      }
+        if(isHex || isBase64ish || isCall || isFc){
+          const head = t.slice(0, 4);
+          const tail = t.slice(-4);
+          return `[ID:${head}…${tail}]`;
+        }
+        return tok;
+      };
 
-      return s;
+      // Replace tool call IDs even when embedded in a larger string.
+      // Examples:
+      // - "call_x|fc_y"
+      // - "toolCallId=call_..."
+      let out = s;
+      out = out.replace(/\b(call_[A-Za-z0-9_-]{8,})\b/gi, (m)=> maskOne(m));
+      out = out.replace(/\b(fc_[A-Za-z0-9_-]{8,})\b/gi, (m)=> maskOne(m));
+
+      // Also mask very long hex/base64-ish substrings when they appear as standalone tokens.
+      out = out.replace(/\b[a-f0-9]{24,}\b/gi, (m)=> maskOne(m));
+      out = out.replace(/\b[A-Za-z0-9+/=_-]{24,}\b/g, (m)=> maskOne(m));
+
+      return out;
     }
 
     function feedScrubValue(v, k){
@@ -2782,9 +2812,11 @@
       const key = (typeof k === 'string') ? k : '';
 
       if(typeof v === 'string'){
-        const masked = feedMaskUrls(v);
-        if(/toolCallId$/i.test(key)) return feedMaskOpaqueId(masked);
-        return feedMaskOpaqueId(masked);
+        // Order matters: URLs first, then session keys, then opaque IDs.
+        let masked = feedMaskUrls(v);
+        masked = feedMaskSessionKey(masked);
+        masked = feedMaskOpaqueId(masked);
+        return masked;
       }
       if(Array.isArray(v)) return v.map((x)=> feedScrubValue(x, key));
       if(v && typeof v === 'object'){
@@ -2804,7 +2836,11 @@
       if(!listEl) return;
 
       const tasks = Array.isArray(FEED.tasks) ? FEED.tasks : [];
-      if(statusEl) statusEl.textContent = tasks.length ? (String(tasks.length) + ' tasks') : '—';
+      if(statusEl){
+        const base = tasks.length ? (String(tasks.length) + ' tasks') : '—';
+        const extra = (FEED.devSpawnStatus || '').trim();
+        statusEl.textContent = extra ? (base + ' · ' + extra) : base;
+      }
 
       if(sumBody){
         const txt = (FEED.summaryText || '').trim();
@@ -2966,9 +3002,23 @@
       const summarizeBtn = document.getElementById('feed-summarize');
       const devSpawnBtn = document.getElementById('feed-dev-spawn');
 
+      // Dev-only helper for QA and layout sanity checks.
+      // Enabled only when the UI is loaded with ?dev=1.
+      const devEnabled = (()=>{
+        try{ return new URLSearchParams(location.search).get('dev') === '1'; }catch{ return false; }
+      })();
+
       function setShow(v){
         FEED.show = !!v;
         if(panel) panel.classList.toggle('show', FEED.show);
+
+        // Runtime layout sanity check for QA.
+        if(FEED.show && devEnabled && panel){
+          try{
+            const r = panel.getBoundingClientRect();
+            console.log('[feed-panel] rect', {x: Math.round(r.x), y: Math.round(r.y), w: Math.round(r.width), h: Math.round(r.height)}, 'viewport', {w: window.innerWidth, h: window.innerHeight});
+          }catch{}
+        }
       }
 
       if(btnOpen) btnOpen.addEventListener('click', ()=> setShow(!FEED.show));
@@ -2977,29 +3027,35 @@
       if(agentSel) agentSel.addEventListener('change', ()=> feedPollOnce());
       if(expandBtn) expandBtn.addEventListener('click', ()=>{ FEED.showRaw = !FEED.showRaw; feedRender(); });
       if(summarizeBtn) summarizeBtn.addEventListener('click', ()=> feedSummarizeSelectionOrRange());
-
-      // Dev-only helper for QA: spawn a non-main agent session so the multi-agent task card can be validated.
-      // Enabled only when the UI is loaded with ?dev=1.
-      const devEnabled = (()=>{
-        try{ return new URLSearchParams(location.search).get('dev') === '1'; }catch{ return false; }
-      })();
       if(devSpawnBtn) devSpawnBtn.style.display = devEnabled ? '' : 'none';
       if(devSpawnBtn && devEnabled){
         devSpawnBtn.addEventListener('click', async ()=>{
           devSpawnBtn.disabled = true;
           const old = devSpawnBtn.textContent;
           devSpawnBtn.textContent = 'Spawning…';
+          FEED.devSpawnStatus = '';
+          feedRender();
           try{
-            await apiPostJson('./api/lobster-room', {
+            const r = await apiPostJson('./api/lobster-room', {
               op: 'feedDevSpawn',
               spawnAgentId: 'coding_agent',
               label: 'QA: multi-agent validation',
               task: 'Quick QA test task: respond with a short message and then finish.',
             });
+
+            if(!r || !r.ok){
+              const err = (r && (r.error || r.status)) ? String(r.error || r.status) : 'spawn_failed';
+              const detail = (r && r.detail) ? String(r.detail) : '';
+              FEED.devSpawnStatus = ('dev spawn failed: ' + err + (detail ? (' · ' + detail.slice(0, 80)) : '')).slice(0, 140);
+              feedRender();
+              return;
+            }
+
             // Poll immediately so QA sees a second agent/task.
             await feedPollOnce();
-          }catch{
-            // ignore
+          }catch(e){
+            FEED.devSpawnStatus = ('dev spawn failed: ' + String(e && e.message ? e.message : e)).slice(0, 140);
+            feedRender();
           }finally{
             devSpawnBtn.textContent = old || 'Dev: spawn coding_agent';
             devSpawnBtn.disabled = false;

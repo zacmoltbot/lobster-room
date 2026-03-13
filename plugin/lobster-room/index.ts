@@ -1664,12 +1664,38 @@ export default {
               const label = typeof payload?.label === "string" ? payload.label.trim().slice(0, 120) : "QA: multi-agent validation";
               const task = typeof payload?.task === "string" ? payload.task.trim().slice(0, 400) : "Quick QA test task: respond with a short message and then finish.";
 
-              const gatewayToken: string | null = typeof api.config?.gateway?.auth?.token === "string" ? api.config.gateway.auth.token : null;
-              const invokeUrl = "http://127.0.0.1:18789/tools/invoke";
-              const headers: Record<string, string> = { "content-type": "application/json" };
-              if (gatewayToken) headers.authorization = `Bearer ${gatewayToken}`;
+              // Resolve a gateway token (best-effort). Some QA envs don't have api.config.gateway.auth.token wired.
+              const readGatewayTokenFromConfigFile = async (): Promise<string> => {
+                try {
+                  const home = (process.env.HOME || "").trim() || "/home/node";
+                  const p = join(home, ".openclaw", "openclaw.json");
+                  const txt = await fs.readFile(p, "utf8");
+                  const obj: any = JSON.parse(txt);
+                  const tok = obj?.gateway?.auth?.token;
+                  return (typeof tok === "string" ? tok.trim() : "");
+                } catch {
+                  return "";
+                }
+              };
 
-              try {
+              let gatewayToken =
+                (typeof api.config?.gateway?.auth?.token === "string" && api.config.gateway.auth.token.trim())
+                  ? api.config.gateway.auth.token.trim()
+                  : (process.env.OPENCLAW_GATEWAY_TOKEN || process.env.OPENCLAW_TOKEN || "").trim();
+
+              if (!gatewayToken) {
+                gatewayToken = await readGatewayTokenFromConfigFile();
+              }
+
+              // Prefer current request origin/port (works when gateway isn't on 18789),
+              // but keep a loopback fallback for odd proxy setups.
+              const origin = readRequestUrl(req);
+              const invokeCandidates = [new URL("/tools/invoke", origin).toString(), "http://127.0.0.1:18789/tools/invoke"];
+
+              const invokeOnce = async (invokeUrl: string) => {
+                const headers: Record<string, string> = { "content-type": "application/json" };
+                if (gatewayToken) headers.authorization = `Bearer ${gatewayToken}`;
+
                 const resp = await fetch(invokeUrl, {
                   method: "POST",
                   headers,
@@ -1679,12 +1705,48 @@ export default {
                     args: { spawnAgentId, agentId: spawnAgentId, label, task },
                   }),
                 });
-                const data: any = await resp.json().catch(() => null);
-                if (!resp.ok || !data?.ok) {
-                  sendJson(res, 200, { ok: false, error: "spawn_failed", status: resp.status, detail: String(data?.error || "invoke_failed") });
-                  return;
+
+                const txt = await resp.text().catch(() => "");
+                let data: any = null;
+                try {
+                  data = txt ? JSON.parse(txt) : null;
+                } catch {
+                  data = null;
                 }
-                sendJson(res, 200, { ok: true, result: data.result || null });
+
+                if (!resp.ok || !data?.ok) {
+                  return {
+                    ok: false,
+                    status: resp.status,
+                    error: String(data?.error || (resp.ok ? "invoke_failed" : "invoke_http_error")),
+                    detail: (String(data?.detail || txt || "").trim() || "").slice(0, 400),
+                  };
+                }
+
+                return { ok: true, result: data.result || null };
+              };
+
+              try {
+                let lastErr: any = null;
+                for (const invokeUrl of invokeCandidates) {
+                  try {
+                    const r = await invokeOnce(invokeUrl);
+                    if (r.ok) {
+                      sendJson(res, 200, { ok: true, result: r.result || null });
+                      return;
+                    }
+                    lastErr = { invokeUrl, ...r };
+                  } catch (err: any) {
+                    lastErr = { invokeUrl, ok: false, error: "spawn_unreachable", detail: String(err?.message || err) };
+                  }
+                }
+
+                sendJson(res, 200, {
+                  ok: false,
+                  error: "spawn_failed",
+                  detail: (lastErr && lastErr.detail) ? String(lastErr.detail) : "invoke_failed",
+                  status: (lastErr && typeof lastErr.status === "number") ? lastErr.status : undefined,
+                });
               } catch (err: any) {
                 sendJson(res, 200, { ok: false, error: "spawn_unreachable", detail: String(err?.message || err) });
               }
