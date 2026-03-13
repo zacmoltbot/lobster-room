@@ -2905,9 +2905,14 @@
         sumBody.textContent = txt ? txt : '(no summary yet)';
       }
 
-      const listWasNearBottom = (()=>{
+      const listWasNearEdge = (()=>{
         try{
           const slack = 40;
+          if(FEED.view === 'timeline'){
+            // Timeline is newest-first (top). Treat "near edge" as near TOP.
+            return listEl.scrollTop <= slack;
+          }
+          // Tasks view is small; keep default behavior.
           return (listEl.scrollTop + listEl.clientHeight + slack) >= listEl.scrollHeight;
         }catch{ return true; }
       })();
@@ -2956,7 +2961,8 @@
           listEl.appendChild(row);
         }
       }else{
-        for(const it of timeline){
+        // Timeline: newest first (top)
+        for(const it of timeline.slice().reverse()){
           const row = document.createElement('div');
           const isSel = (FEED.selectedType === 'item' && FEED.selected && feedItemKey(FEED.selected) === feedItemKey(it));
           row.className = 'feed-item' + (isSel ? ' sel' : '');
@@ -3043,8 +3049,9 @@
         if(expandBtn) expandBtn.style.display='none';
       }
 
-      if(FEED.view === 'timeline' && listWasNearBottom){
-        try{ listEl.scrollTop = listEl.scrollHeight; }catch{}
+      if(FEED.view === 'timeline' && listWasNearEdge){
+        // Newest-first timeline sticks to top when you are already at the top.
+        try{ listEl.scrollTop = 0; }catch{}
       }
     }
 
