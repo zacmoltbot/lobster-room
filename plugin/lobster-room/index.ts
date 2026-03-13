@@ -1536,10 +1536,131 @@ export default {
                   try { await fs.unlink(join(rootUserDir, meta.file)); } catch {}
                 }
                 try { await fs.unlink(roomMetaPath); } catch {}
-                sendJson(res, 200, { ok: true });
+                sendJson(res, 200, { ok: true, debug: { opReceived: op } });
               } catch (err: any) {
-                sendJson(res, 500, { ok: false, error: String(err?.message || err) });
+                sendJson(res, 500, { ok: false, error: String(err?.message || err), debug: { opReceived: op } });
               }
+              return;
+            }
+
+            // Message Feed ops (multiplexed here because some deployments only reliably match /api/lobster-room)
+            if (op === "feedGet") {
+              const limit = Math.max(1, Math.min(500, Number(payload?.limit) || 100));
+              const agentId = typeof payload?.agentId === "string" ? payload.agentId.trim() : "";
+              const kind = typeof payload?.kind === "string" ? payload.kind.trim() : "";
+
+              let items = feedBuf.slice();
+              if (agentId) items = items.filter((x) => x.agentId === agentId);
+              if (kind) items = items.filter((x) => x.kind === (kind as any));
+              items = items.slice(-limit).reverse();
+
+              sendJson(res, 200, {
+                ok: true,
+                debug: { opReceived: op, buildTagFeed: "feed-v1" },
+                items: items.map((it) => ({
+                  ...it,
+                  preview: feedPreview(it),
+                })),
+              });
+              return;
+            }
+
+            if (op === "feedSummarize") {
+              const llmToken =
+                (typeof api.config?.llmToken === "string" && api.config.llmToken.trim())
+                  ? api.config.llmToken.trim()
+                  : (typeof api.config?.llmTokenEnv === "string" && api.config.llmTokenEnv.trim())
+                    ? (process.env[api.config.llmTokenEnv.trim()] || "").trim()
+                    : "";
+
+              if (!llmToken) {
+                sendJson(res, 200, { ok: false, error: "llm_not_configured", debug: { opReceived: op, buildTagFeed: "feed-v1" } });
+                return;
+              }
+
+              const sessionKey = typeof payload?.sessionKey === "string" ? payload.sessionKey.trim() : "";
+              const agentId = typeof payload?.agentId === "string" ? payload.agentId.trim() : "";
+              const maxItems = Math.max(10, Math.min(500, Number(payload?.maxItems) || 200));
+              const windowMs = Math.max(10_000, Math.min(24 * 60 * 60 * 1000, Number(payload?.timeWindowMs) || 60 * 60 * 1000));
+              const sinceMs = typeof payload?.sinceMs === "number" && Number.isFinite(payload.sinceMs)
+                ? payload.sinceMs
+                : (nowMs() - windowMs);
+
+              let items = feedBuf.slice();
+              if (sessionKey) items = items.filter((x) => x.sessionKey === sessionKey);
+              else {
+                if (agentId) items = items.filter((x) => x.agentId === agentId);
+                items = items.filter((x) => x.ts >= sinceMs);
+              }
+              items = items.slice(-maxItems);
+
+              const lines = items
+                .sort((a, b) => a.ts - b.ts)
+                .map((it) => {
+                  const when = new Date(it.ts).toISOString();
+                  const who = it.agentId ? it.agentId : "unknown-agent";
+                  const sess = it.sessionKey ? ` session=${it.sessionKey}` : "";
+                  return `${when} ${who} kind=${it.kind}${sess} :: ${feedPreview(it)}`;
+                });
+
+              if (!lines.length) {
+                sendJson(res, 200, { ok: true, debug: { opReceived: op, buildTagFeed: "feed-v1" }, summary: "(no items)" });
+                return;
+              }
+
+              const model = (typeof api.config?.llmModel === "string" && api.config.llmModel.trim())
+                ? api.config.llmModel.trim()
+                : "gpt-4o-mini";
+
+              try {
+                const r = await fetch("https://api.openai.com/v1/chat/completions", {
+                  method: "POST",
+                  headers: {
+                    authorization: `Bearer ${llmToken}`,
+                    "content-type": "application/json",
+                  },
+                  body: JSON.stringify({
+                    model,
+                    temperature: 0.2,
+                    messages: [
+                      {
+                        role: "system",
+                        content:
+                          "You summarize an internal event feed for debugging. Be concise, factual, and do not invent details. If errors occurred, call them out. Output plain text.",
+                      },
+                      {
+                        role: "user",
+                        content:
+                          `Summarize the following event timeline.\n\n${sessionKey ? `Session: ${sessionKey}\n` : agentId ? `Agent: ${agentId}\n` : ""}Items: ${lines.length}\n\n` +
+                          lines.join("\n"),
+                      },
+                    ],
+                  }),
+                });
+
+                if (!r.ok) {
+                  const txt = await r.text().catch(() => "");
+                  sendJson(res, 200, { ok: false, error: "llm_failed", status: r.status, detail: txt.slice(0, 400), debug: { opReceived: op, buildTagFeed: "feed-v1" } });
+                  return;
+                }
+
+                const data: any = await r.json().catch(() => null);
+                const summary = data?.choices?.[0]?.message?.content;
+                if (typeof summary !== "string" || !summary.trim()) {
+                  sendJson(res, 200, { ok: false, error: "llm_no_summary", debug: { opReceived: op, buildTagFeed: "feed-v1" } });
+                  return;
+                }
+
+                sendJson(res, 200, { ok: true, debug: { opReceived: op, buildTagFeed: "feed-v1" }, summary: summary.trim(), model });
+              } catch (err: any) {
+                sendJson(res, 200, { ok: false, error: "llm_unreachable", detail: String(err?.message || err), debug: { opReceived: op, buildTagFeed: "feed-v1" } });
+              }
+              return;
+            }
+
+            // Debug support: echo opReceived for unknown POST+JSON payloads.
+            if (op) {
+              sendJson(res, 400, { ok: false, error: "unknown_op", debug: { opReceived: op } });
               return;
             }
           }

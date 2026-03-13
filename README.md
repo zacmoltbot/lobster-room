@@ -67,6 +67,20 @@ This is an OpenClaw **plugin**. After installing/updating, you must restart/rede
 
 If you see the OpenClaw Control UI instead of Lobster Room, the plugin is not loaded/enabled.
 
+### API smoke tests
+
+This deployment multiplexes control operations via **POST JSON** on `/lobster-room/api/lobster-room` (some proxies/gateways only reliably match this exact route).
+
+Feed (latest items):
+
+```bash
+curl -sS -X POST 'https://<openclaw-host>/lobster-room/api/lobster-room' \
+  -H 'content-type: application/json' \
+  -d '{"op":"feedGet","limit":5}'
+```
+
+If you omit the `content-type: application/json` header, the request may be treated as a regular status poll and you’ll get the standard room state payload instead of the op response.
+
 ### Important: updates require a Gateway restart
 
 This is an OpenClaw **plugin**. After updating, you must restart/redeploy the OpenClaw Gateway so it reloads plugin assets. A browser refresh (even incognito) cannot pick up a new build unless the server is updated.

@@ -2808,7 +2808,13 @@
       if(kind) qs.set('kind', kind);
 
       try{
-        const data = await apiPostJson('./api/lobster-room', { op: 'feedGet', limit: Number(qs.get('limit') || 120), agentId: qs.get('agentId') || '', kind: qs.get('kind') || '' });
+        // NOTE: In some deployments only /api/lobster-room reliably matches, so we multiplex via POST.
+        const data = await apiPostJson('./api/lobster-room', {
+          op: 'feedGet',
+          limit: Number(qs.get('limit') || 120),
+          agentId: qs.get('agentId') || '',
+          kind: qs.get('kind') || '',
+        });
         if(data && data.ok){
           FEED.items = Array.isArray(data.items) ? data.items : [];
           // Populate agent list (stable-ish)
