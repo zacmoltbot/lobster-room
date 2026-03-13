@@ -1199,12 +1199,35 @@ export default {
           return;
         }
 
-        const llmToken =
+        // Resolve an auth token for calling the local gateway LLM endpoint.
+        // Experience-first fallback order:
+        // 1) api.config.llmToken (explicit override)
+        // 2) api.config.llmTokenEnv (explicit env)
+        // 3) process.env.OPENCLAW_GATEWAY_TOKEN / OPENCLAW_TOKEN (if present)
+        // 4) ~/.openclaw/openclaw.json gateway.auth.token (best-effort)
+        const readGatewayTokenFromConfigFile = async (): Promise<string> => {
+          try {
+            const home = (process.env.HOME || "").trim() || "/home/node";
+            const p = join(home, ".openclaw", "openclaw.json");
+            const txt = await fs.readFile(p, "utf8");
+            const obj: any = JSON.parse(txt);
+            const tok = obj?.gateway?.auth?.token;
+            return (typeof tok === "string" ? tok.trim() : "");
+          } catch {
+            return "";
+          }
+        };
+
+        let llmToken =
           (typeof api.config?.llmToken === "string" && api.config.llmToken.trim())
             ? api.config.llmToken.trim()
             : (typeof api.config?.llmTokenEnv === "string" && api.config.llmTokenEnv.trim())
               ? (process.env[api.config.llmTokenEnv.trim()] || "").trim()
-              : "";
+              : (process.env.OPENCLAW_GATEWAY_TOKEN || process.env.OPENCLAW_TOKEN || "").trim();
+
+        if (!llmToken) {
+          llmToken = await readGatewayTokenFromConfigFile();
+        }
 
         if (!llmToken) {
           sendJson(res, 200, { ok: false, error: "llm_not_configured" });

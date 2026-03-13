@@ -152,7 +152,7 @@ The UI includes a **Message Feed** panel (📰 Feed) that shows a scrollable lis
 API endpoints:
 
 - `GET /lobster-room/api/feed?limit=120&agentId=...&kind=...`
-- `POST /lobster-room/api/feed/summarize` (optional; requires LLM config)
+- `POST /lobster-room/api/feed/summarize` (optional; works out-of-the-box on most OpenClaw installs; falls back to plugin LLM config if needed)
 
 ### After uploading a new room background
 
