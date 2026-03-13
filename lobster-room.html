@@ -134,6 +134,28 @@
     .md-btn:hover{background:rgba(255,255,255,.10)}
     .md-log{margin:8px 0 0 0;max-height:220px;overflow:auto;background:rgba(0,0,0,.35);border:1px solid rgba(255,255,255,.08);border-radius:10px;padding:8px 10px;font-size:11px;line-height:1.25;color:rgba(255,255,255,.78)}
 
+    /* Message Feed panel */
+    .feed-panel{position:absolute;left:14px;bottom:14px;width:min(520px, 94vw);background:rgba(10,12,16,.78);border:1px solid rgba(255,255,255,.12);border-radius:14px;backdrop-filter: blur(10px);box-shadow:0 18px 60px rgba(0,0,0,.45);overflow:hidden;z-index:41;display:none}
+    .feed-panel.show{display:block}
+    .feed-head{display:flex;align-items:center;justify-content:space-between;padding:10px 12px;border-bottom:1px solid rgba(255,255,255,.10)}
+    .feed-title{font-weight:800;letter-spacing:.2px}
+    .feed-body{padding:10px 12px;display:flex;flex-direction:column;gap:10px}
+    .feed-filters{display:flex;gap:8px;flex-wrap:wrap;align-items:center}
+    .feed-filters select{background:rgba(255,255,255,.04);border:1px solid rgba(255,255,255,.10);color:rgba(255,255,255,.85);border-radius:10px;padding:6px 8px;font-size:12px;outline:none}
+    .feed-list{max-height:240px;overflow:auto;border:1px solid rgba(255,255,255,.08);border-radius:10px;background:rgba(0,0,0,.25)}
+    .feed-item{display:flex;gap:10px;align-items:flex-start;padding:8px 10px;border-bottom:1px solid rgba(255,255,255,.06);cursor:pointer}
+    .feed-item:last-child{border-bottom:0}
+    .feed-item:hover{background:rgba(255,255,255,.05)}
+    .feed-time{flex:0 0 auto;width:64px;color:rgba(255,255,255,.55);font-size:11px}
+    .feed-badge{flex:0 0 auto;font-size:10px;letter-spacing:.08em;text-transform:uppercase;border:1px solid rgba(255,255,255,.12);color:rgba(255,255,255,.78);padding:2px 7px;border-radius:999px;background:rgba(255,255,255,.04)}
+    .feed-main{flex:1 1 auto;min-width:0}
+    .feed-line{display:flex;gap:8px;align-items:baseline}
+    .feed-agent{color:rgba(255,255,255,.86);font-weight:700;font-size:12px;max-width:110px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+    .feed-preview{color:rgba(255,255,255,.70);font-size:12px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+    .feed-detail{border:1px solid rgba(255,255,255,.08);border-radius:10px;background:rgba(0,0,0,.28);padding:8px 10px;font-size:11px;line-height:1.35;color:rgba(255,255,255,.80);white-space:pre-wrap}
+    .feed-actions{display:flex;gap:8px;flex-wrap:wrap}
+    .feed-actions .md-btn{padding:6px 10px}
+
     .bubble{display:flex;align-items:center;gap:6px;font-size:11px;color:var(--text);padding:6px 10px;border-radius:999px;border:1px solid var(--border);background:rgba(0,0,0,.22);backdrop-filter: blur(6px)}
     .b-dot{width:8px;height:8px;border-radius:50%}
 
@@ -188,6 +210,7 @@
         </div>
       </div>
       <div class="header-right">
+        <button class="btn" id="btn-feed">📰 Feed</button>
         <button class="btn" id="btn-settings">⚙ Settings</button>
       </div>
     </div>
@@ -294,6 +317,37 @@
         </div>
         <div class="md-row"><span class="md-hint" id="md-flags"></span></div>
         <pre id="md-log" class="md-log"></pre>
+      </div>
+    </div>
+
+    <!-- Message Feed (collapsible, bottom-left) -->
+    <div id="feed-panel" class="feed-panel" aria-live="polite">
+      <div class="feed-head">
+        <div class="feed-title">Message Feed</div>
+        <button id="feed-toggle" class="md-btn" type="button">Hide</button>
+      </div>
+      <div class="feed-body">
+        <div class="feed-filters">
+          <select id="feed-agent">
+            <option value="">All agents</option>
+          </select>
+          <select id="feed-kind">
+            <option value="">All types</option>
+            <option value="before_agent_start">agent_start</option>
+            <option value="before_tool_call">tool_call</option>
+            <option value="after_tool_call">tool_done</option>
+            <option value="message_sending">msg_sending</option>
+            <option value="message_sent">msg_sent</option>
+            <option value="agent_end">agent_end</option>
+          </select>
+          <span class="md-hint" id="feed-status"></span>
+        </div>
+        <div id="feed-list" class="feed-list"></div>
+        <div id="feed-detail" class="feed-detail" style="display:none"></div>
+        <div class="feed-actions">
+          <button id="feed-summarize" class="md-btn" type="button" style="display:none">Summarize this session</button>
+          <button id="feed-clear" class="md-btn" type="button">Clear selection</button>
+        </div>
       </div>
     </div>
   </div>
@@ -2630,7 +2684,211 @@
       }
     }
 
+    // --- Message Feed ---
+    const FEED = {
+      show: false,
+      items: [],
+      selected: null,
+      pollMs: 2000,
+      timer: null,
+    };
+
+    function feedTime(ts){
+      try{
+        const d = new Date(ts);
+        return d.toLocaleTimeString([], {hour:'2-digit', minute:'2-digit', second:'2-digit'});
+      }catch{return '—'}
+    }
+
+    function feedKindLabel(kind){
+      const map = {
+        before_agent_start:'agent',
+        before_tool_call:'tool',
+        after_tool_call:'tool',
+        tool_result_persist:'tool',
+        message_sending:'msg',
+        message_sent:'msg',
+        agent_end:'agent',
+      };
+      return map[kind] || kind;
+    }
+
+    function feedRender(){
+      const listEl = document.getElementById('feed-list');
+      const detailEl = document.getElementById('feed-detail');
+      const summarizeBtn = document.getElementById('feed-summarize');
+      const statusEl = document.getElementById('feed-status');
+      if(!listEl) return;
+
+      listEl.innerHTML = '';
+      const items = FEED.items || [];
+      statusEl.textContent = items.length ? `${items.length} items` : '—';
+
+      for(const it of items){
+        const row = document.createElement('div');
+        row.className = 'feed-item';
+        row.addEventListener('click', ()=>{ FEED.selected = it; feedRender(); });
+
+        const t = document.createElement('div');
+        t.className = 'feed-time';
+        t.textContent = feedTime(it.ts);
+
+        const badge = document.createElement('div');
+        badge.className = 'feed-badge';
+        badge.textContent = feedKindLabel(it.kind);
+
+        const main = document.createElement('div');
+        main.className = 'feed-main';
+
+        const line = document.createElement('div');
+        line.className = 'feed-line';
+
+        const agent = document.createElement('div');
+        agent.className = 'feed-agent';
+        agent.textContent = (it.agentId || '—');
+
+        const preview = document.createElement('div');
+        preview.className = 'feed-preview';
+        preview.textContent = it.preview || it.kind;
+
+        line.appendChild(agent);
+        line.appendChild(preview);
+        main.appendChild(line);
+
+        row.appendChild(t);
+        row.appendChild(badge);
+        row.appendChild(main);
+
+        if(FEED.selected && FEED.selected.ts === it.ts && FEED.selected.kind === it.kind && FEED.selected.preview === it.preview){
+          row.style.background = 'rgba(255,255,255,.06)';
+        }
+
+        listEl.appendChild(row);
+      }
+
+      if(FEED.selected){
+        const it = FEED.selected;
+        detailEl.style.display = 'block';
+        const payload = {
+          ts: it.ts,
+          kind: it.kind,
+          agentId: it.agentId,
+          sessionKey: it.sessionKey,
+          channelId: it.channelId,
+          to: it.to,
+          toolName: it.toolName,
+          durationMs: it.durationMs,
+          success: it.success,
+          error: it.error,
+          details: it.details,
+          preview: it.preview,
+        };
+        detailEl.textContent = JSON.stringify(payload, null, 2);
+
+        // Enable summarize when we have a sessionKey (preferred) or at least an agentId.
+        if(it.sessionKey || it.agentId){
+          summarizeBtn.style.display = '';
+        }else{
+          summarizeBtn.style.display = 'none';
+        }
+      }else{
+        detailEl.style.display = 'none';
+        summarizeBtn.style.display = 'none';
+      }
+    }
+
+    async function feedPollOnce(){
+      const agentSel = document.getElementById('feed-agent');
+      const kindSel = document.getElementById('feed-kind');
+      const agentId = agentSel ? agentSel.value : '';
+      const kind = kindSel ? kindSel.value : '';
+      const qs = new URLSearchParams();
+      qs.set('limit', '120');
+      if(agentId) qs.set('agentId', agentId);
+      if(kind) qs.set('kind', kind);
+
+      try{
+        const data = await apiGetJson(`./api/feed?${qs.toString()}`);
+        if(data && data.ok){
+          FEED.items = Array.isArray(data.items) ? data.items : [];
+          // Populate agent list (stable-ish)
+          const agents = [...new Set((FEED.items||[]).map(x=>x.agentId).filter(Boolean))].sort();
+          if(agentSel){
+            const cur = agentSel.value;
+            const opts = [''].concat(agents);
+            agentSel.innerHTML = '';
+            for(const a of opts){
+              const o = document.createElement('option');
+              o.value = a;
+              o.textContent = a ? a : 'All agents';
+              agentSel.appendChild(o);
+            }
+            agentSel.value = cur;
+          }
+          feedRender();
+        }
+      }catch{
+        // ignore
+      }
+    }
+
+    function feedInit(){
+      const panel = document.getElementById('feed-panel');
+      const btnOpen = document.getElementById('btn-feed');
+      const btnToggle = document.getElementById('feed-toggle');
+      const btnClear = document.getElementById('feed-clear');
+      const kindSel = document.getElementById('feed-kind');
+      const agentSel = document.getElementById('feed-agent');
+      const summarizeBtn = document.getElementById('feed-summarize');
+
+      function setShow(v){
+        FEED.show = !!v;
+        if(panel) panel.classList.toggle('show', FEED.show);
+      }
+
+      if(btnOpen) btnOpen.addEventListener('click', ()=> setShow(!FEED.show));
+      if(btnToggle) btnToggle.addEventListener('click', ()=> setShow(false));
+      if(btnClear) btnClear.addEventListener('click', ()=>{ FEED.selected = null; feedRender(); });
+      if(kindSel) kindSel.addEventListener('change', ()=> feedPollOnce());
+      if(agentSel) agentSel.addEventListener('change', ()=> feedPollOnce());
+
+      if(summarizeBtn){
+        summarizeBtn.addEventListener('click', async ()=>{
+          const it = FEED.selected;
+          if(!it) return;
+          const body = it.sessionKey
+            ? {sessionKey: it.sessionKey, maxItems: 200}
+            : {agentId: it.agentId, timeWindowMs: 60*60*1000, maxItems: 200};
+          summarizeBtn.textContent = 'Summarizing…';
+          summarizeBtn.disabled = true;
+          try{
+            const r = await apiPostJson('./api/feed/summarize', body);
+            if(r && r.ok){
+              alert(r.summary);
+            }else if(r && r.error === 'llm_not_configured'){
+              alert('LLM summary not configured on this gateway.');
+            }else{
+              alert('Summary failed.');
+            }
+          }catch{
+            alert('Summary failed.');
+          }finally{
+            summarizeBtn.textContent = 'Summarize this session';
+            summarizeBtn.disabled = false;
+          }
+        });
+      }
+
+      // start hidden
+      setShow(false);
+      // polling only when visible (cheap)
+      setInterval(()=>{
+        if(FEED.show) feedPollOnce();
+      }, FEED.pollMs);
+    }
+
     function init(){
+      feedInit();
       renderLegend();
       bindZoneHover();
       mvInitUI();

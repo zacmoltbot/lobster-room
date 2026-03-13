@@ -145,6 +145,15 @@ Each entry includes:
 - `agentId` (derived from `sessionKey` when available)
 - `data` (best-effort; e.g. `toolName`, and for `exec` we include the command)
 
+### Message Feed (new)
+
+The UI includes a **Message Feed** panel (📰 Feed) that shows a scrollable list of recent runtime events (agent start/end, tool calls, outbound message send events).
+
+API endpoints:
+
+- `GET /lobster-room/api/feed?limit=120&agentId=...&kind=...`
+- `POST /lobster-room/api/feed/summarize` (optional; requires LLM config)
+
 ### After uploading a new room background
 
 After a successful upload, Settings stays open and the UI prompts you to paint the manual walkable map for the new room.

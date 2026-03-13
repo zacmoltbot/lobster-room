@@ -739,6 +739,90 @@ export default {
       writeSnapshotSoon();
     };
 
+    // --- Message Feed (recent events; ring buffer) ---
+    type FeedKind =
+      | "before_agent_start"
+      | "before_tool_call"
+      | "after_tool_call"
+      | "tool_result_persist"
+      | "message_sending"
+      | "message_sent"
+      | "agent_end";
+
+    type FeedItem = {
+      ts: number;
+      kind: FeedKind;
+      agentId?: string;
+      sessionKey?: string;
+      channelId?: string;
+      to?: string;
+      toolName?: string;
+      durationMs?: number;
+      success?: boolean;
+      error?: string;
+      // Optional extra fields; keep small and sanitized.
+      details?: Record<string, unknown>;
+    };
+
+    const FEED_MAX = Math.max(500, Number(api.config?.feedMaxItems) || 0, 600);
+    const feedBuf: FeedItem[] = [];
+
+    const redactSecretsInText = (s: string): string => {
+      let out = String(s || "");
+      // Common header-ish secrets
+      out = out.replace(/\b(authorization|cookie)\b\s*[:=]\s*([^\s'\"]+)/gi, "$1:[REDACTED]");
+      // token/apiKey style key-value pairs
+      out = out.replace(/\b(token|api[-_]?key|apikey|access[_-]?token|id[_-]?token|refresh[_-]?token)\b\s*[:=]\s*([^\s'\"]+)/gi, "$1=[REDACTED]");
+      // URL query params
+      out = out.replace(/([?&])(token|api_key|apikey|apiKey|access_token|auth|authorization)=([^&#]+)/g, "$1$2=[REDACTED]");
+      // Long hex strings (often keys/hashes)
+      out = out.replace(/\b[a-f0-9]{32,}\b/gi, "[HEX_REDACTED]");
+      return out;
+    };
+
+    const coerceStr = (v: any, maxLen = 400): string | undefined => {
+      if (typeof v !== "string") return undefined;
+      const t = v.length > maxLen ? v.slice(0, maxLen) + "…" : v;
+      return redactSecretsInText(t);
+    };
+
+    const feedPreview = (it: FeedItem): string => {
+      const agent = it.agentId ? `@${it.agentId}` : "";
+      if (it.kind === "before_agent_start") return `${agent} started`;
+      if (it.kind === "before_tool_call") {
+        const tn = it.toolName || "tool";
+        const cmd = coerceStr((it.details as any)?.command, 180);
+        const url = coerceStr((it.details as any)?.url, 180);
+        const extra = cmd ? ` — ${cmd}` : url ? ` — ${url}` : "";
+        return `${agent} ${tn}${extra}`.trim();
+      }
+      if (it.kind === "after_tool_call") {
+        const tn = it.toolName || "tool";
+        const d = typeof it.durationMs === "number" ? ` (${Math.round(it.durationMs)}ms)` : "";
+        return `${agent} ${tn} done${d}`.trim();
+      }
+      if (it.kind === "tool_result_persist") return `${agent} tool result persisted`;
+      if (it.kind === "message_sending") {
+        const to = it.to ? redactSecretsInText(it.to) : "(unknown)";
+        return `sending message → ${to}`;
+      }
+      if (it.kind === "message_sent") {
+        const to = it.to ? redactSecretsInText(it.to) : "(unknown)";
+        const ok = it.success === false ? "failed" : "sent";
+        return `message ${ok} → ${to}`;
+      }
+      if (it.kind === "agent_end") {
+        if (it.success === false) return `${agent} ended (error)`;
+        return `${agent} ended`;
+      }
+      return it.kind;
+    };
+
+    const pushFeed = (item: FeedItem) => {
+      feedBuf.push(item);
+      if (feedBuf.length > FEED_MAX) feedBuf.splice(0, feedBuf.length - FEED_MAX);
+    };
+
     const priority: Record<ActivityState, number> = {
       idle: 0,
       thinking: 1,
@@ -873,6 +957,7 @@ export default {
       const agentId = resolveAgentId(ctx);
       api.logger.info("[lobster-room] hook before_agent_start", { buildTag: BUILD_TAG, agentId, sessionKey: ctx?.sessionKey });
       pushEvent("before_agent_start", { agentId, data: { sessionKey: ctx?.sessionKey, messageProvider: ctx?.messageProvider } });
+      pushFeed({ ts: nowMs(), kind: "before_agent_start", agentId, sessionKey: typeof ctx?.sessionKey === "string" ? ctx.sessionKey : undefined });
       setState(agentId, "thinking", { sessionKey: ctx?.sessionKey, messageProvider: ctx?.messageProvider });
     });
 
@@ -911,12 +996,31 @@ export default {
       }
 
       pushEvent("before_tool_call", { agentId, data: toolData });
+      pushFeed({
+        ts: nowMs(),
+        kind: "before_tool_call",
+        agentId,
+        sessionKey: typeof ctx?.sessionKey === "string" ? ctx.sessionKey : undefined,
+        toolName: typeof toolName === "string" ? toolName : undefined,
+        details: {
+          command: toolName === "exec" ? coerceStr(toolData.command, 240) : undefined,
+          url: toolName === "web_fetch" ? coerceStr(toolData.url, 240) : undefined,
+        },
+      });
       setState(agentId, "tool", { toolName, sessionKey: ctx?.sessionKey });
     });
 
     api.on("after_tool_call", (event, ctx) => {
       const agentId = resolveAgentId(ctx);
       pushEvent("after_tool_call", { agentId, data: { toolName: event?.toolName, durationMs: event?.durationMs } });
+      pushFeed({
+        ts: nowMs(),
+        kind: "after_tool_call",
+        agentId,
+        sessionKey: typeof ctx?.sessionKey === "string" ? ctx.sessionKey : undefined,
+        toolName: typeof event?.toolName === "string" ? event.toolName : undefined,
+        durationMs: typeof event?.durationMs === "number" ? event.durationMs : undefined,
+      });
       setState(agentId, "thinking", { sessionKey: ctx?.sessionKey });
     });
 
@@ -926,6 +1030,17 @@ export default {
       pushEvent("tool_result_persist", {
         agentId,
         data: { toolName: event?.toolName, toolCallId: event?.toolCallId, isSynthetic: event?.isSynthetic },
+      });
+      pushFeed({
+        ts: nowMs(),
+        kind: "tool_result_persist",
+        agentId,
+        sessionKey: typeof ctx?.sessionKey === "string" ? ctx.sessionKey : undefined,
+        toolName: typeof event?.toolName === "string" ? event.toolName : undefined,
+        details: {
+          toolCallId: typeof event?.toolCallId === "string" ? event.toolCallId : undefined,
+          isSynthetic: !!event?.isSynthetic,
+        },
       });
       setState(agentId, "thinking", { sessionKey: ctx?.sessionKey, persisted: true });
     });
@@ -941,12 +1056,28 @@ export default {
       }
 
       pushEvent("message_sending", { agentId, data });
+      pushFeed({
+        ts: nowMs(),
+        kind: "message_sending",
+        agentId,
+        channelId: typeof ctx?.channelId === "string" ? ctx.channelId : undefined,
+        to: typeof event?.to === "string" ? redactSecretsInText(event.to) : undefined,
+      });
       setState(agentId, "reply", { to: event?.to, channelId: ctx?.channelId, conversationId: ctx?.conversationId });
     });
 
     api.on("message_sent", (event, ctx) => {
       const agentId = "main";
       pushEvent("message_sent", { agentId, data: { to: event?.to, success: event?.success, channelId: ctx?.channelId } });
+      pushFeed({
+        ts: nowMs(),
+        kind: "message_sent",
+        agentId,
+        channelId: typeof ctx?.channelId === "string" ? ctx.channelId : undefined,
+        to: typeof event?.to === "string" ? redactSecretsInText(event.to) : undefined,
+        success: typeof event?.success === "boolean" ? event.success : undefined,
+        error: typeof event?.error === "string" ? redactSecretsInText(event.error) : undefined,
+      });
       if (event?.success === false) {
         setState(agentId, "error", { error: event?.error || "message_sent failed", to: event?.to, channelId: ctx?.channelId });
       }
@@ -956,6 +1087,14 @@ export default {
     api.on("agent_end", (event, ctx) => {
       const agentId = resolveAgentId(ctx);
       pushEvent("agent_end", { agentId, data: { success: event?.success, error: event?.error, sessionKey: ctx?.sessionKey } });
+      pushFeed({
+        ts: nowMs(),
+        kind: "agent_end",
+        agentId,
+        sessionKey: typeof ctx?.sessionKey === "string" ? ctx.sessionKey : undefined,
+        success: typeof event?.success === "boolean" ? event.success : undefined,
+        error: typeof event?.error === "string" ? redactSecretsInText(event.error) : undefined,
+      });
 
       if (event?.success === false) {
         setState(agentId, "error", { error: event?.error || "agent_end: unsuccessful" });
@@ -1022,6 +1161,140 @@ export default {
             ok: false,
             error: { type: "asset_read_failed", message: String(err?.message || err) },
           });
+        }
+      },
+    });
+
+    // HTTP: Message Feed API
+    api.registerHttpRoute({
+      path: "/lobster-room/api/feed",
+      handler: async (req, res) => {
+        const url = readRequestUrl(req);
+        const limitRaw = url.searchParams.get("limit");
+        const limit = Math.max(1, Math.min(500, Number(limitRaw) || 100));
+        const agentId = (url.searchParams.get("agentId") || "").trim();
+        const kind = (url.searchParams.get("kind") || "").trim();
+
+        let items = feedBuf.slice();
+        if (agentId) items = items.filter((x) => x.agentId === agentId);
+        if (kind) items = items.filter((x) => x.kind === (kind as any));
+        items = items.slice(-limit).reverse(); // most recent first
+
+        sendJson(res, 200, {
+          ok: true,
+          items: items.map((it) => ({
+            ...it,
+            // deterministic preview (no LLM)
+            preview: feedPreview(it),
+          })),
+        });
+      },
+    });
+
+    api.registerHttpRoute({
+      path: "/lobster-room/api/feed/summarize",
+      handler: async (req, res) => {
+        if ((req.method || "GET").toUpperCase() !== "POST") {
+          sendJson(res, 405, { ok: false, error: "method_not_allowed" });
+          return;
+        }
+
+        const llmToken =
+          (typeof api.config?.llmToken === "string" && api.config.llmToken.trim())
+            ? api.config.llmToken.trim()
+            : (typeof api.config?.llmTokenEnv === "string" && api.config.llmTokenEnv.trim())
+              ? (process.env[api.config.llmTokenEnv.trim()] || "").trim()
+              : "";
+
+        if (!llmToken) {
+          sendJson(res, 200, { ok: false, error: "llm_not_configured" });
+          return;
+        }
+
+        let payload: any = null;
+        try {
+          payload = JSON.parse((await readBody(req, 512 * 1024)).toString("utf8"));
+        } catch {
+          payload = null;
+        }
+
+        const sessionKey = typeof payload?.sessionKey === "string" ? payload.sessionKey.trim() : "";
+        const agentId = typeof payload?.agentId === "string" ? payload.agentId.trim() : "";
+        const maxItems = Math.max(10, Math.min(500, Number(payload?.maxItems) || 200));
+        const windowMs = Math.max(10_000, Math.min(24 * 60 * 60 * 1000, Number(payload?.timeWindowMs) || 60 * 60 * 1000));
+        const sinceMs = typeof payload?.sinceMs === "number" && Number.isFinite(payload.sinceMs)
+          ? payload.sinceMs
+          : (nowMs() - windowMs);
+
+        let items = feedBuf.slice();
+        if (sessionKey) items = items.filter((x) => x.sessionKey === sessionKey);
+        else {
+          if (agentId) items = items.filter((x) => x.agentId === agentId);
+          items = items.filter((x) => x.ts >= sinceMs);
+        }
+        items = items.slice(-maxItems);
+
+        const lines = items
+          .sort((a, b) => a.ts - b.ts)
+          .map((it) => {
+            const iso = new Date(it.ts).toISOString();
+            const agent = it.agentId ? `@${it.agentId}` : "";
+            const extra: string[] = [];
+            if (it.toolName) extra.push(`tool=${it.toolName}`);
+            if (typeof it.durationMs === "number") extra.push(`durMs=${Math.round(it.durationMs)}`);
+            if (typeof it.success === "boolean") extra.push(`ok=${it.success}`);
+            if (it.error) extra.push(`err=${redactSecretsInText(it.error)}`);
+            return `${iso} ${agent} [${it.kind}] ${feedPreview(it)}${extra.length ? ` (${extra.join(", ")})` : ""}`.trim();
+          });
+
+        const model = (typeof api.config?.llmModel === "string" && api.config.llmModel.trim()) ? api.config.llmModel.trim() : "gpt-4o-mini";
+
+        // Call local gateway OpenAI-compatible endpoint.
+        const origin = readRequestUrl(req);
+        const llmUrl = new URL("/v1/chat/completions", origin);
+
+        try {
+          const r = await fetch(llmUrl.toString(), {
+            method: "POST",
+            headers: {
+              "content-type": "application/json",
+              authorization: `Bearer ${llmToken}`,
+            },
+            body: JSON.stringify({
+              model,
+              temperature: 0.2,
+              messages: [
+                {
+                  role: "system",
+                  content:
+                    "You summarize an internal event feed for debugging. Be concise, factual, and do not invent details. If errors occurred, call them out. Output plain text.",
+                },
+                {
+                  role: "user",
+                  content:
+                    `Summarize the following event timeline.\n\n${sessionKey ? `Session: ${sessionKey}\n` : agentId ? `Agent: ${agentId}\n` : ""}Items: ${lines.length}\n\n` +
+                    lines.join("\n"),
+                },
+              ],
+            }),
+          });
+
+          if (!r.ok) {
+            const txt = await r.text().catch(() => "");
+            sendJson(res, 200, { ok: false, error: "llm_failed", status: r.status, detail: txt.slice(0, 400) });
+            return;
+          }
+
+          const data: any = await r.json().catch(() => null);
+          const summary = data?.choices?.[0]?.message?.content;
+          if (typeof summary !== "string" || !summary.trim()) {
+            sendJson(res, 200, { ok: false, error: "llm_no_summary" });
+            return;
+          }
+
+          sendJson(res, 200, { ok: true, summary: summary.trim(), model });
+        } catch (err: any) {
+          sendJson(res, 200, { ok: false, error: "llm_unreachable", detail: String(err?.message || err) });
         }
       },
     });
