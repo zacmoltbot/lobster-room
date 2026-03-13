@@ -1658,6 +1658,39 @@ export default {
               return;
             }
 
+            if (op === "feedDevSpawn") {
+              // Dev-only helper: spawn a non-main agent session so QA can validate multi-agent feed grouping.
+              const spawnAgentId = typeof payload?.spawnAgentId === "string" ? payload.spawnAgentId.trim() : "coding_agent";
+              const label = typeof payload?.label === "string" ? payload.label.trim().slice(0, 120) : "QA: multi-agent validation";
+              const task = typeof payload?.task === "string" ? payload.task.trim().slice(0, 400) : "Quick QA test task: respond with a short message and then finish.";
+
+              const gatewayToken: string | null = typeof api.config?.gateway?.auth?.token === "string" ? api.config.gateway.auth.token : null;
+              const invokeUrl = "http://127.0.0.1:18789/tools/invoke";
+              const headers: Record<string, string> = { "content-type": "application/json" };
+              if (gatewayToken) headers.authorization = `Bearer ${gatewayToken}`;
+
+              try {
+                const resp = await fetch(invokeUrl, {
+                  method: "POST",
+                  headers,
+                  body: JSON.stringify({
+                    tool: "sessions_spawn",
+                    // Be liberal in what we send: different runtimes have used different arg names.
+                    args: { spawnAgentId, agentId: spawnAgentId, label, task },
+                  }),
+                });
+                const data: any = await resp.json().catch(() => null);
+                if (!resp.ok || !data?.ok) {
+                  sendJson(res, 200, { ok: false, error: "spawn_failed", status: resp.status, detail: String(data?.error || "invoke_failed") });
+                  return;
+                }
+                sendJson(res, 200, { ok: true, result: data.result || null });
+              } catch (err: any) {
+                sendJson(res, 200, { ok: false, error: "spawn_unreachable", detail: String(err?.message || err) });
+              }
+              return;
+            }
+
             if (op === "roomImageInfo") {
               const meta = await readRoomMeta();
               sendJson(res, 200, { ok: true, exists: !!meta?.file, file: meta?.file || null, updatedAt: meta?.updatedAt || null });

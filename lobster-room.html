@@ -25,8 +25,12 @@
 
     /* Room + Feed dock layout */
     .room-row{display:flex;gap:12px;align-items:stretch}
-    .room-col{flex:1 1 auto;min-width:0}
-    .feed-panel{position:relative;left:auto;bottom:auto;width:420px;max-width:520px;min-width:320px;min-height:720px;height:auto;max-height:calc(100vh - 200px);
+    .room-col{flex:1 1 auto;min-width:0;display:flex}
+    .room-col > .room{flex:1 1 auto}
+
+    /* Feed is a true right-docked panel on desktop (sibling of .room-col inside .room-row). */
+    .feed-panel{position:relative;left:auto;right:auto;top:auto;bottom:auto;width:420px;max-width:520px;min-width:320px;
+      min-height:720px;height:auto;max-height:calc(100vh - 200px);
       background:rgba(10,12,16,.78);border:1px solid rgba(255,255,255,.12);border-radius:14px;backdrop-filter: blur(10px);box-shadow:0 18px 60px rgba(0,0,0,.45);
       overflow:hidden;z-index:41;display:none;flex:0 0 auto;align-self:stretch;resize:horizontal}
     .feed-panel.show{display:flex;flex-direction:column}
@@ -152,8 +156,6 @@
 
     /* Message Feed panel */
     /* NOTE: Desktop is docked to the right of the room (inside .room-row flex). Mobile becomes bottom sheet. */
-    .feed-panel{background:rgba(10,12,16,.78);border:1px solid rgba(255,255,255,.12);border-radius:14px;backdrop-filter: blur(10px);box-shadow:0 18px 60px rgba(0,0,0,.45);overflow:hidden;z-index:41;display:none;min-height:0}
-    .feed-panel.show{display:flex;flex-direction:column}
     .feed-head{display:flex;align-items:center;justify-content:space-between;padding:10px 12px;border-bottom:1px solid rgba(255,255,255,.10)}
     .feed-title{font-weight:800;letter-spacing:.2px}
     .feed-body{flex:1 1 auto;min-height:0;padding:10px 12px;display:flex;flex-direction:column;gap:10px;overflow:auto}
@@ -345,6 +347,7 @@
           <div class="feed-actions">
             <button id="feed-expand" class="md-btn" type="button" style="display:none">Show raw events</button>
             <button id="feed-clear" class="md-btn" type="button">Clear selection</button>
+            <button id="feed-dev-spawn" class="md-btn" type="button" style="display:none">Dev: spawn coding_agent</button>
           </div>
         </div>
       </div>
@@ -2736,6 +2739,20 @@
       return String(st||'—');
     }
 
+    function feedMaskUrls(s){
+      if(typeof s !== 'string') return s;
+      if(s === '[URL]') return s;
+
+      // Replace URL-ish substrings with a stable placeholder.
+      // - Explicit schemes: http(s)://...
+      // - Localhost: localhost:3000/path (with or without scheme)
+      // - Loopback IP: 127.0.0.1:3000/path (with or without scheme)
+      return s
+        .replace(/https?:\/\/[^\s"'<>]+/gi, '[URL]')
+        .replace(/\blocalhost(?::\d+)?(?:\/[\w\-\.~%!$&'()*+,;=:@/]*)?/gi, '[URL]')
+        .replace(/\b127\.0\.0\.1(?::\d+)?(?:\/[\w\-\.~%!$&'()*+,;=:@/]*)?/gi, '[URL]');
+    }
+
     function feedMaskOpaqueId(s){
       if(typeof s !== 'string') return s;
       if(s === '[URL]') return s;
@@ -2765,8 +2782,9 @@
       const key = (typeof k === 'string') ? k : '';
 
       if(typeof v === 'string'){
-        if(/toolCallId$/i.test(key)) return feedMaskOpaqueId(v);
-        return feedMaskOpaqueId(v);
+        const masked = feedMaskUrls(v);
+        if(/toolCallId$/i.test(key)) return feedMaskOpaqueId(masked);
+        return feedMaskOpaqueId(masked);
       }
       if(Array.isArray(v)) return v.map((x)=> feedScrubValue(x, key));
       if(v && typeof v === 'object'){
@@ -2946,6 +2964,7 @@
       const agentSel = document.getElementById('feed-agent');
       const expandBtn = document.getElementById('feed-expand');
       const summarizeBtn = document.getElementById('feed-summarize');
+      const devSpawnBtn = document.getElementById('feed-dev-spawn');
 
       function setShow(v){
         FEED.show = !!v;
@@ -2958,6 +2977,35 @@
       if(agentSel) agentSel.addEventListener('change', ()=> feedPollOnce());
       if(expandBtn) expandBtn.addEventListener('click', ()=>{ FEED.showRaw = !FEED.showRaw; feedRender(); });
       if(summarizeBtn) summarizeBtn.addEventListener('click', ()=> feedSummarizeSelectionOrRange());
+
+      // Dev-only helper for QA: spawn a non-main agent session so the multi-agent task card can be validated.
+      // Enabled only when the UI is loaded with ?dev=1.
+      const devEnabled = (()=>{
+        try{ return new URLSearchParams(location.search).get('dev') === '1'; }catch{ return false; }
+      })();
+      if(devSpawnBtn) devSpawnBtn.style.display = devEnabled ? '' : 'none';
+      if(devSpawnBtn && devEnabled){
+        devSpawnBtn.addEventListener('click', async ()=>{
+          devSpawnBtn.disabled = true;
+          const old = devSpawnBtn.textContent;
+          devSpawnBtn.textContent = 'Spawning…';
+          try{
+            await apiPostJson('./api/lobster-room', {
+              op: 'feedDevSpawn',
+              spawnAgentId: 'coding_agent',
+              label: 'QA: multi-agent validation',
+              task: 'Quick QA test task: respond with a short message and then finish.',
+            });
+            // Poll immediately so QA sees a second agent/task.
+            await feedPollOnce();
+          }catch{
+            // ignore
+          }finally{
+            devSpawnBtn.textContent = old || 'Dev: spawn coding_agent';
+            devSpawnBtn.disabled = false;
+          }
+        });
+      }
 
       setShow(false);
       setInterval(()=>{ if(FEED.show) feedPollOnce(); }, FEED.pollMs);
