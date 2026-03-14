@@ -124,7 +124,7 @@ function contentTypeByExt(ext: string): string | null {
   return null;
 }
 
-const BUILD_TAG = "2026-03-08-debug-hooks-1";
+const BUILD_TAG = "feed-v3-20260314.5";
 
 export default {
   id: "lobster-room",
@@ -962,6 +962,9 @@ export default {
       rowType: "timeline";
       kind?: FeedKind | "error" | "sessions_spawn";
 
+      // Feed presentation layer. Default UI shows `human` rows; engineers can toggle `advanced`.
+      level?: "human" | "advanced";
+
       // v3 UX: human-friendly, single-line text.
       // Keep legacy `action` for backwards compatibility with older frontends.
       what: string;
@@ -969,8 +972,22 @@ export default {
       action?: string;
     };
 
-    const rowSentence = (it: FeedItem): { kind: FeedRowV3["kind"]; what: string } => {
-      // IMPORTANT: keep this human-friendly and content-free.
+    const maskUrlLite = (s: string): string => {
+      // Keep feed content-free: strip literal URLs / localhost.
+      // (We do not want clickable URLs in the default feed.)
+      return s
+        .replace(/https?:\/\/[^\s"'<>]+/gi, "[URL]")
+        .replace(/\blocalhost(?:\:\d+)?(?:\/[\w-.~%!$&'()*+,;=:@\/]*)?/gi, "[URL]")
+        .replace(/\b127\.0\.0\.1(?:\:\d+)?(?:\/[\w-.~%!$&'()*+,;=:@\/]*)?/gi, "[URL]");
+    };
+
+    const redactLine = (s: string, max = 120): string => {
+      const x = redactSecretsInText(String(s || "")).replace(/\s+/g, " ").trim();
+      return maskUrlLite(x).slice(0, max);
+    };
+
+    const rowSentenceAdvanced = (it: FeedItem): { kind: FeedRowV3["kind"]; what: string } => {
+      // Advanced timeline = close to raw hooks, but still scrubbed.
       const tn = (it.toolName || "tool").trim();
 
       if (it.kind === "before_agent_start") return { kind: it.kind, what: "started" };
@@ -985,7 +1002,7 @@ export default {
           const label = typeof (it.details as any)?.label === "string" ? String((it.details as any).label) : "";
           const task = typeof (it.details as any)?.task === "string" ? String((it.details as any).task) : "";
           const desc = (label || task).trim();
-          const tail = desc ? ` — ${redactSecretsInText(desc).slice(0, 120)}` : "";
+          const tail = desc ? ` — ${redactLine(desc, 120)}` : "";
           return { kind: "sessions_spawn", what: `spawned sub-agent${child ? ` @${child}` : ""}${tail}`.trim() };
         }
         return { kind: it.kind, what: `${tn} started` };
@@ -1007,39 +1024,149 @@ export default {
       }
 
       if (it.success === false || it.error) {
-        const e = it.error ? redactSecretsInText(it.error).slice(0, 120) : "";
+        const e = it.error ? redactLine(it.error, 120) : "";
         return { kind: "error", what: e ? `error: ${e}` : "error" };
       }
 
       return { kind: it.kind, what: it.kind };
     };
 
+    const safeCmdSummary = (cmd: unknown): string => {
+      if (Array.isArray(cmd)) {
+        const t = cmd.find((x) => typeof x === "string" && x.trim());
+        return t ? String(t).trim().split(/\s+/)[0] : "command";
+      }
+      if (typeof cmd === "string") {
+        const s = cmd.trim();
+        if (!s) return "command";
+        return s.split(/\s+/)[0];
+      }
+      return "command";
+    };
+
+    const toolHumanSummary = (it: FeedItem): string => {
+      const tn = (it.toolName || "tool").trim();
+      const d: any = it.details || {};
+
+      if (tn === "browser") {
+        const act = typeof d.action === "string" ? d.action : (typeof d.op === "string" ? d.op : "action");
+        const url = typeof d.targetUrl === "string" ? d.targetUrl : (typeof d.url === "string" ? d.url : "");
+        const ref = typeof d.ref === "string" ? d.ref : "";
+        const selector = typeof d.selector === "string" ? d.selector : "";
+        const target = url ? redactLine(url, 80) : (ref ? `ref ${redactLine(ref, 60)}` : (selector ? `selector ${redactLine(selector, 60)}` : ""));
+        return target ? `browser: ${act} ${target}` : `browser: ${act}`;
+      }
+
+      if (tn === "exec") {
+        const first = safeCmdSummary(d.command);
+        return `running ${redactLine(first, 40)}`;
+      }
+
+      if (tn === "read") {
+        const p = (typeof d.path === "string" ? d.path : (typeof d.file_path === "string" ? d.file_path : ""));
+        return p ? `reading file ${redactLine(p, 80)}` : "reading a file";
+      }
+      if (tn === "write") {
+        const p = (typeof d.path === "string" ? d.path : (typeof d.file_path === "string" ? d.file_path : ""));
+        return p ? `writing file ${redactLine(p, 80)}` : "writing a file";
+      }
+      if (tn === "edit") {
+        const p = (typeof d.path === "string" ? d.path : (typeof d.file_path === "string" ? d.file_path : ""));
+        return p ? `editing file ${redactLine(p, 80)}` : "editing a file";
+      }
+
+      if (tn === "sessions_spawn") {
+        const child = typeof d.spawnAgentId === "string" ? String(d.spawnAgentId) : "";
+        const label = typeof d.label === "string" ? String(d.label) : "";
+        const task = typeof d.task === "string" ? String(d.task) : "";
+        const desc = redactLine((label || task).trim(), 120);
+        const tail = desc ? ` — ${desc}` : "";
+        return `spawning sub-agent${child ? ` @${child}` : ""}${tail}`.trim();
+      }
+
+      return tn;
+    };
+
+    const rowSentenceHuman = (it: FeedItem): { kind: FeedRowV3["kind"]; what: string } | null => {
+      const tn = (it.toolName || "tool").trim();
+
+      if (it.kind === "before_agent_start") return { kind: it.kind, what: "started" };
+      if (it.kind === "agent_end") {
+        if (it.success === false || it.error) return { kind: "error", what: "ended (error)" };
+        return { kind: it.kind, what: "ended" };
+      }
+
+      if (it.kind === "message_sending") return { kind: it.kind, what: "sending a message" };
+      if (it.kind === "message_sent") {
+        if (it.success === false) return { kind: "error", what: "message failed to send" };
+        return { kind: it.kind, what: "sent a message" };
+      }
+
+      // Hide low-signal bookkeeping in default view.
+      if (it.kind === "tool_result_persist") return null;
+
+      const humanTools = new Set(["browser", "exec", "read", "write", "edit", "sessions_spawn"]);
+      if ((it.kind === "before_tool_call" || it.kind === "after_tool_call") && humanTools.has(tn)) {
+        const summary = toolHumanSummary(it);
+        if (it.kind === "before_tool_call") return { kind: it.kind, what: `${summary}…` };
+        // after_tool_call
+        if (it.success === false || it.error) return { kind: "error", what: `${summary} (failed)` };
+        return { kind: it.kind, what: `${summary} (done)` };
+      }
+
+      // Fallback: omit other raw events in default feed.
+      return null;
+    };
+
     const buildFeedV3Rows = (items: FeedItem[]): FeedRowV3[] => {
       const tasks = groupFeedIntoTasks(items, { includeRaw: true });
       const out: FeedRowV3[] = [];
 
+      // Default feed should be readable: de-dup short bursts of identical low-signal rows.
+      const humanDedupeWindowMs = 1500;
+      const lastHumanSigByAgent = new Map<string, { sig: string; ts: number }>();
+
+      const pushRow = (it: FeedItem, what: string, kind: FeedRowV3["kind"], level: FeedRowV3["level"], agentId: string, sessionKey?: string, taskId?: string) => {
+        const base = `${sessionKey || taskId || "task"}:row:${it.ts}:${String(kind || it.kind)}:${it.toolName || ""}`;
+        // Make IDs unique across levels so UI doesn't treat them as the same row.
+        const id = `${base}:${level || ""}`;
+        out.push({
+          id,
+          ts: it.ts,
+          agentId,
+          sessionKey,
+          rowType: "timeline",
+          kind,
+          level,
+          what,
+          plain: what,
+          action: what,
+        });
+      };
+
       for (const task of tasks) {
-        const agentId = task.agentId || "unknown";
+        const fallbackAgentId = task.agentId || "unknown";
         const sessionKey = task.sessionKey;
         const raw = Array.isArray(task.items) ? task.items.slice().sort((a, b) => a.ts - b.ts) : [];
         if (!raw.length) continue;
 
         for (const it of raw) {
-          const s = rowSentence(it);
-          const who = it.agentId || agentId;
-          const id = `${sessionKey || task.id}:row:${it.ts}:${String(s.kind || it.kind)}:${it.toolName || ""}`;
-          const what = s.what;
-          out.push({
-            id,
-            ts: it.ts,
-            agentId: who,
-            sessionKey,
-            rowType: "timeline",
-            kind: s.kind,
-            what,
-            plain: what,
-            action: what,
-          });
+          const who = it.agentId || fallbackAgentId;
+
+          // Human rows (default)
+          const h = rowSentenceHuman(it);
+          if (h) {
+            const sig = `${who}|${String(h.kind)}|${h.what}`;
+            const prev = lastHumanSigByAgent.get(who);
+            if (!(prev && prev.sig === sig && Math.abs(it.ts - prev.ts) < humanDedupeWindowMs)) {
+              lastHumanSigByAgent.set(who, { sig, ts: it.ts });
+              pushRow(it, h.what, h.kind, "human", who, sessionKey, task.id);
+            }
+          }
+
+          // Advanced rows (engineers)
+          const a = rowSentenceAdvanced(it);
+          pushRow(it, a.what, a.kind, "advanced", who, sessionKey, task.id);
         }
       }
 
@@ -1197,6 +1324,23 @@ export default {
       if (toolName === "exec") {
         const cmd = (p && (p.command || p.cmd || p.args)) || null;
         toolData.command = cmd;
+      }
+
+      if (toolName === "browser") {
+        // params: {action, targetUrl, targetId, request:{...}}
+        toolData.action = typeof p?.action === "string" ? p.action : undefined;
+        toolData.targetUrl = typeof p?.targetUrl === "string" ? p.targetUrl : undefined;
+        toolData.targetId = typeof p?.targetId === "string" ? p.targetId : undefined;
+        toolData.ref = typeof p?.ref === "string" ? p.ref : undefined;
+        toolData.selector = typeof p?.selector === "string" ? p.selector : undefined;
+        toolData.op = typeof p?.request?.kind === "string" ? p.request.kind : undefined;
+        // Some calls put URL inside request fields.
+        toolData.url = typeof p?.request?.url === "string" ? p.request.url : undefined;
+      }
+
+      if (toolName === "read" || toolName === "write" || toolName === "edit") {
+        toolData.path = typeof p?.path === "string" ? p.path : undefined;
+        toolData.file_path = typeof p?.file_path === "string" ? p.file_path : undefined;
       }
 
       // Show what spawned the subagent.
@@ -1858,176 +2002,6 @@ export default {
               } catch (err: any) {
                 sendJson(res, 200, { ok: false, error: "llm_unreachable", detail: String(err?.message || err) });
               }
-              return;
-            }
-
-            if (op === "feedDevSpawn") {
-              // Dev-only helper: spawn a non-main agent session so QA can validate multi-agent feed grouping.
-              const spawnAgentId = typeof payload?.spawnAgentId === "string" ? payload.spawnAgentId.trim() : "coding_agent";
-              const label = typeof payload?.label === "string" ? payload.label.trim().slice(0, 120) : "QA: multi-agent validation";
-              const task = typeof payload?.task === "string" ? payload.task.trim().slice(0, 400) : "Quick QA test task: respond with a short message and then finish.";
-
-              // Resolve a gateway token (best-effort). Some QA envs don't have api.config.gateway.auth.token wired.
-              const readGatewayTokenFromConfigFile = async (): Promise<string> => {
-                try {
-                  const home = (process.env.HOME || "").trim() || "/home/node";
-                  const p = join(home, ".openclaw", "openclaw.json");
-                  const txt = await fs.readFile(p, "utf8");
-                  const obj: any = JSON.parse(txt);
-                  const tok = obj?.gateway?.auth?.token;
-                  return (typeof tok === "string" ? tok.trim() : "");
-                } catch {
-                  return "";
-                }
-              };
-
-              let gatewayToken =
-                (typeof api.config?.gateway?.auth?.token === "string" && api.config.gateway.auth.token.trim())
-                  ? api.config.gateway.auth.token.trim()
-                  : (process.env.OPENCLAW_GATEWAY_TOKEN || process.env.OPENCLAW_TOKEN || "").trim();
-
-              if (!gatewayToken) {
-                gatewayToken = await readGatewayTokenFromConfigFile();
-              }
-
-              // Prefer loopback to avoid any external proxy auth/header rewriting.
-              // Keep request-origin as a fallback for setups where the gateway isn't bound to 18789.
-              const origin = readRequestUrl(req);
-              const invokeCandidates = ["http://127.0.0.1:18789/tools/invoke", new URL("/tools/invoke", origin).toString()];
-
-              const invokeOnce = async (invokeUrl: string) => {
-                const headers: Record<string, string> = { "content-type": "application/json" };
-                // /tools/invoke expects Authorization: Bearer <gateway token>
-                if (gatewayToken) headers["Authorization"] = `Bearer ${gatewayToken}`;
-
-                const resp = await fetch(invokeUrl, {
-                  method: "POST",
-                  headers,
-                  body: JSON.stringify({
-                    tool: "sessions_spawn",
-                    // Be liberal in what we send: different runtimes have used different arg names.
-                    args: { spawnAgentId, agentId: spawnAgentId, label, task },
-                  }),
-                });
-
-                const txt = await resp.text().catch(() => "");
-                let data: any = null;
-                try {
-                  data = txt ? JSON.parse(txt) : null;
-                } catch {
-                  data = null;
-                }
-
-                if (!resp.ok || !data?.ok) {
-                  let detail = "";
-                  if (data && typeof data === "object") {
-                    if (typeof (data as any).detail === "string") detail = (data as any).detail;
-                    else if (typeof (data as any).message === "string") detail = (data as any).message;
-                    else if (typeof (data as any).error === "string") detail = (data as any).error;
-                    else {
-                      try { detail = JSON.stringify(data); } catch { detail = ""; }
-                    }
-                  }
-                  if (!detail) detail = txt || "";
-
-                  return {
-                    ok: false,
-                    status: resp.status,
-                    error: String(data?.error || (resp.ok ? "invoke_failed" : "invoke_http_error")),
-                    detail: (String(detail).trim() || "").slice(0, 800),
-                  };
-                }
-
-                return { ok: true, result: data.result || null };
-              };
-
-              try {
-                let lastErr: any = null;
-                for (const invokeUrl of invokeCandidates) {
-                  try {
-                    const r = await invokeOnce(invokeUrl);
-                    if (r.ok) {
-                      sendJson(res, 200, { ok: true, result: r.result || null });
-                      return;
-                    }
-                    lastErr = { invokeUrl, ...r };
-                  } catch (err: any) {
-                    lastErr = { invokeUrl, ok: false, error: "spawn_unreachable", detail: String(err?.message || err) };
-                  }
-                }
-
-                sendJson(res, 200, {
-                  ok: false,
-                  error: "spawn_failed",
-                  detail: (lastErr && lastErr.detail) ? String(lastErr.detail) : "invoke_failed",
-                  status: (lastErr && typeof lastErr.status === "number") ? lastErr.status : undefined,
-                });
-              } catch (err: any) {
-                sendJson(res, 200, { ok: false, error: "spawn_unreachable", detail: String(err?.message || err) });
-              }
-              return;
-            }
-
-            if (op === "feedDevInject") {
-              // Dev-only helper: inject a synthetic feed session so the v3 UI looks obviously different.
-              // This mutates the in-memory feed buffer only (no disk writes).
-              const agentId = (typeof payload?.agentId === "string" ? payload.agentId.trim() : "main") || "main";
-              const now = nowMs();
-              const sessionKey = `agent:${agentId}:devdemo:${String(now)}`;
-
-              const mk = (deltaMs: number, it: Partial<FeedItem>): FeedItem => {
-                const ts = now + deltaMs;
-                return {
-                  ts,
-                  kind: (it.kind as any) || "before_tool_call",
-                  agentId,
-                  sessionKey,
-                  toolName: it.toolName,
-                  durationMs: it.durationMs,
-                  success: it.success,
-                  error: it.error,
-                  details: it.details,
-                } as FeedItem;
-              };
-
-              const demo: FeedItem[] = [
-                mk(-32_000, { kind: "before_agent_start" }),
-
-                // Segment 1 (folded ops): 12 total, 8 done.
-                mk(-31_000, { kind: "before_tool_call", toolName: "browser" }),
-                mk(-30_900, { kind: "after_tool_call", toolName: "browser", success: true, durationMs: 2200 }),
-                mk(-30_500, { kind: "before_tool_call", toolName: "browser" }),
-                mk(-30_200, { kind: "after_tool_call", toolName: "browser", success: true, durationMs: 1800 }),
-                mk(-29_900, { kind: "before_tool_call", toolName: "browser" }),
-                mk(-29_700, { kind: "after_tool_call", toolName: "browser", success: true, durationMs: 900 }),
-                mk(-29_300, { kind: "before_tool_call", toolName: "exec" }),
-                mk(-28_900, { kind: "after_tool_call", toolName: "exec", success: true, durationMs: 1200 }),
-                mk(-28_600, { kind: "before_tool_call", toolName: "exec" }),
-                mk(-28_100, { kind: "after_tool_call", toolName: "exec", success: true, durationMs: 800 }),
-                mk(-27_700, { kind: "before_tool_call", toolName: "read" }),
-                mk(-27_000, { kind: "after_tool_call", toolName: "read", success: true, durationMs: 240 }),
-                mk(-26_500, { kind: "before_tool_call", toolName: "browser" }),
-                mk(-26_300, { kind: "after_tool_call", toolName: "browser", success: true, durationMs: 500 }),
-
-                // 4 remaining ops without after_tool_call to show "in progress".
-                mk(-25_900, { kind: "before_tool_call", toolName: "browser" }),
-                mk(-25_700, { kind: "before_tool_call", toolName: "browser" }),
-                mk(-25_500, { kind: "before_tool_call", toolName: "exec" }),
-                mk(-25_300, { kind: "before_tool_call", toolName: "browser" }),
-
-                mk(-20_000, { kind: "message_sent", success: true, details: { channel: "discord" } }),
-
-                // Segment 2: one failing op + agent end.
-                mk(-12_000, { kind: "before_tool_call", toolName: "exec" }),
-                mk(-11_200, { kind: "after_tool_call", toolName: "exec", success: false, error: "Command failed (exit 1)" }),
-                mk(-9_000, { kind: "agent_end", success: false, error: "demo failure" }),
-              ];
-
-              // Append and trim to max buffer.
-              feedBuf.push(...demo);
-              if (feedBuf.length > FEED_MAX) feedBuf.splice(0, feedBuf.length - FEED_MAX);
-
-              sendJson(res, 200, { ok: true, sessionKey, injected: demo.length });
               return;
             }
 

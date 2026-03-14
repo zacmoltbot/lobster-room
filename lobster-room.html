@@ -333,15 +333,17 @@
               <option value="">All agents</option>
             </select>
 
-            <!-- raw toggle removed -->
+            <label class="md-row" style="gap:6px;align-items:center">
+              <input type="checkbox" id="feed-advanced">
+              <span>Advanced</span>
+            </label>
 
             <span class="md-hint" id="feed-status"></span>
           </div>
 
+          <div id="feed-now" class="feed-detail" style="display:none"></div>
+
           <div id="feed-list" class="feed-list"></div>
-          <div class="feed-actions">
-            <button id="feed-dev-spawn" class="md-btn" type="button" style="display:none">Dev: spawn coding_agent</button>
-          </div>
         </div>
       </div>
     </div>
@@ -539,6 +541,6 @@
       });
     })();
   </script>
-  <script src="./assets/lobster-room.app.js?v=feed-v3-20260314.5" defer></script>
+  <script src="./assets/lobster-room.app.js?v=feed-v3-20260314.6" defer></script>
 </body>
 </html>

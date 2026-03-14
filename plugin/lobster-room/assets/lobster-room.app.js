@@ -2238,6 +2238,7 @@
       showRawDetail: false,
 
       // UI toggles
+      showAdvanced: false, // engineers toggle (persisted)
       showRawList: false, // "Show raw (scrubbed)"
 
       pollMs: 2000,
@@ -2359,14 +2360,45 @@
       const expandBtn = document.getElementById('feed-expand');
       const sumBody = document.getElementById('feed-summary-body');
       const sumSegBtn = document.getElementById('feed-sum-seg');
+      const nowEl = document.getElementById('feed-now');
       if(!listEl) return;
 
-      const rows = Array.isArray(FEED.rows) ? FEED.rows : [];
+      const allRows = Array.isArray(FEED.rows) ? FEED.rows : [];
+      const rows = allRows.filter(r=>{
+        const lvl = String(r && r.level || '');
+        if(FEED.showAdvanced) return (lvl === 'advanced' || !lvl);
+        return lvl === 'human';
+      });
 
       if(statusEl){
         const base = rows.length ? (String(rows.length) + ' rows') : '—';
         const extra = [(FEED.pollStatus||'').trim(), (FEED.devSpawnStatus||'').trim()].filter(Boolean).join(' · ');
         statusEl.textContent = extra ? (base + ' · ' + extra) : base;
+      }
+
+      // "Now" section (per-agent activity snapshot)
+      if(nowEl){
+        const lines = [];
+        const agents = Array.isArray(MODEL.agents) ? MODEL.agents : [];
+        for(const a of agents){
+          const id = String(a && a.id || '').trim();
+          if(!id) continue;
+          const st = (a && a.debug && a.debug.decision) ? String(a.debug.decision.activityState||'idle') : 'idle';
+          // Optional detail: current tool name
+          const tn = (a && a.debug && a.debug.decision && a.debug.decision.details && a.debug.decision.details.toolName)
+            ? String(a.debug.decision.details.toolName)
+            : '';
+          const tail = tn ? (' · ' + tn) : '';
+          lines.push('@' + id + ': ' + st + tail);
+        }
+        lines.sort();
+        if(lines.length){
+          nowEl.style.display = '';
+          nowEl.textContent = 'Now\n' + lines.join('\n');
+        }else{
+          nowEl.style.display = 'none';
+          nowEl.textContent = '';
+        }
       }
 
       if(sumBody){
@@ -2553,120 +2585,19 @@
       const btnClear = document.getElementById('feed-clear');
       const agentSel = document.getElementById('feed-agent');
       const expandBtn = document.getElementById('feed-expand');
-      const devInjectBtn = document.getElementById('feed-dev-inject');
-      const devSpawnBtn = document.getElementById('feed-dev-spawn');
+      const adv = document.getElementById('feed-advanced');
 
-      const btn60 = document.getElementById('feed-sum-60m');
-      const btnSince = document.getElementById('feed-sum-since');
-      const btnSeg = document.getElementById('feed-sum-seg');
-
-      const devEnabled = (()=>{
-        try{ return new URLSearchParams(location.search).get('dev') === '1'; }catch{ return false; }
-      })();
-
-      function loadLastViewed(){
-        try{
-          const v = Number(localStorage.getItem('lobsterRoom.feed.lastViewedMs') || '0');
-          return (isFinite(v) && v>0) ? v : null;
-        }catch{ return null; }
-      }
-      function saveLastViewed(ms){
-        try{ localStorage.setItem('lobsterRoom.feed.lastViewedMs', String(ms||Date.now())); }catch{}
-      }
-
-      function setShow(v){
-        FEED.show = !!v;
-        if(panel) panel.classList.toggle('show', FEED.show);
-
-        if(FEED.show){
-          FEED.lastViewedMs = loadLastViewed();
-          feedPollOnce();
-        }else{
-          saveLastViewed(Date.now());
-        }
-
-        if(FEED.show && devEnabled && panel){
-          try{
-            const r = panel.getBoundingClientRect();
-            console.log('[feed-panel] rect', {x: Math.round(r.x), y: Math.round(r.y), w: Math.round(r.width), h: Math.round(r.height)}, 'viewport', {w: window.innerWidth, h: window.innerHeight});
-          }catch{}
-        }
-      }
-
-      // raw list toggle removed (always human-readable rows)
-      FEED.showRawList = false;
-
-      if(btnOpen) btnOpen.addEventListener('click', ()=> setShow(!FEED.show));
-      if(btnToggle) btnToggle.addEventListener('click', ()=> setShow(false));
-      if(btnClear) btnClear.addEventListener('click', ()=>{ FEED.selected = null; FEED.selectedType=''; FEED.showRawDetail=false; feedRender(); });
-      if(agentSel) agentSel.addEventListener('change', ()=> feedPollOnce());
-      if(expandBtn) expandBtn.addEventListener('click', ()=>{ FEED.showRawDetail = !FEED.showRawDetail; feedRender(); });
-
-      if(btn60) btn60.addEventListener('click', ()=> feedSummarize('60m'));
-      if(btnSince) btnSince.addEventListener('click', ()=> feedSummarize('since'));
-      if(btnSeg) btnSeg.addEventListener('click', ()=> feedSummarize('seg'));
-
-      if(devInjectBtn) devInjectBtn.style.display = devEnabled ? '' : 'none';
-      if(devInjectBtn && devEnabled){
-        devInjectBtn.addEventListener('click', async ()=>{
-          devInjectBtn.disabled = true;
-          const old = devInjectBtn.textContent;
-          devInjectBtn.textContent = 'Injecting…';
-          FEED.devSpawnStatus = '';
+      // Persisted toggle
+      try{
+        const v = localStorage.getItem('lobster.feed.advanced');
+        FEED.showAdvanced = (v === '1' || v === 'true');
+      }catch{}
+      if(adv){
+        adv.checked = !!FEED.showAdvanced;
+        adv.addEventListener('change', ()=>{
+          FEED.showAdvanced = !!adv.checked;
+          try{ localStorage.setItem('lobster.feed.advanced', FEED.showAdvanced ? '1' : '0'); }catch{}
           feedRender();
-          try{
-            const r = await apiPostJson('./api/lobster-room', { op: 'feedDevInject', agentId: 'main' });
-            if(!r || !r.ok){
-              const err = (r && (r.error || r.status)) ? String(r.error || r.status) : 'inject_failed';
-              const detail = (r && r.detail) ? String(r.detail) : '';
-              FEED.devSpawnStatus = ('dev inject failed: ' + err + (detail ? (' · ' + detail.slice(0, 80)) : '')).slice(0, 140);
-              feedRender();
-              return;
-            }
-            FEED.devSpawnStatus = ('demo injected: ' + String(r.injected||'') + ' events').slice(0, 140);
-            await feedPollOnce();
-          }catch(e){
-            FEED.devSpawnStatus = ('dev inject failed: ' + String(e && e.message ? e.message : e)).slice(0, 140);
-            feedRender();
-          }finally{
-            devInjectBtn.textContent = old || 'Dev: inject demo feed';
-            devInjectBtn.disabled = false;
-          }
-        });
-      }
-
-      if(devSpawnBtn) devSpawnBtn.style.display = devEnabled ? '' : 'none';
-      if(devSpawnBtn && devEnabled){
-        devSpawnBtn.addEventListener('click', async ()=>{
-          devSpawnBtn.disabled = true;
-          const old = devSpawnBtn.textContent;
-          devSpawnBtn.textContent = 'Spawning…';
-          FEED.devSpawnStatus = '';
-          feedRender();
-          try{
-            const r = await apiPostJson('./api/lobster-room', {
-              op: 'feedDevSpawn',
-              spawnAgentId: 'coding_agent',
-              label: 'QA: multi-agent validation',
-              task: 'Quick QA test task: respond with a short message and then finish.',
-            });
-
-            if(!r || !r.ok){
-              const err = (r && (r.error || r.status)) ? String(r.error || r.status) : 'spawn_failed';
-              const detail = (r && r.detail) ? String(r.detail) : '';
-              FEED.devSpawnStatus = ('dev spawn failed: ' + err + (detail ? (' · ' + detail.slice(0, 80)) : '')).slice(0, 140);
-              feedRender();
-              return;
-            }
-
-            await feedPollOnce();
-          }catch(e){
-            FEED.devSpawnStatus = ('dev spawn failed: ' + String(e && e.message ? e.message : e)).slice(0, 140);
-            feedRender();
-          }finally{
-            devSpawnBtn.textContent = old || 'Dev: spawn coding_agent';
-            devSpawnBtn.disabled = false;
-          }
         });
       }
 
