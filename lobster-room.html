@@ -173,6 +173,8 @@
     .feed-line{display:flex;gap:8px;align-items:baseline}
     .feed-agent{color:rgba(255,255,255,.86);font-weight:700;font-size:12px;max-width:110px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
     .feed-preview{color:rgba(255,255,255,.70);font-size:12px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+    .feed-item.fold .feed-preview{color:rgba(255,255,255,.66)}
+    .feed-item.err .feed-preview{color:rgba(255,145,145,.92)}
     .feed-detail{border:1px solid rgba(255,255,255,.08);border-radius:10px;background:rgba(0,0,0,.28);padding:8px 10px;font-size:11px;line-height:1.35;color:rgba(255,255,255,.80);white-space:pre-wrap;max-height:240px;overflow:auto}
     .feed-actions{display:flex;gap:8px;flex-wrap:wrap}
     .feed-actions .md-btn{padding:6px 10px}
@@ -550,6 +552,6 @@
       });
     })();
   </script>
-  <script src="./assets/lobster-room.app.js?v=feed-v3-20260314" defer></script>
+  <script src="./assets/lobster-room.app.js?v=feed-v3-20260314.1" defer></script>
 </body>
 </html>

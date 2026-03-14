@@ -1,5 +1,5 @@
     // UI build stamp (bump this when you deploy so we can confirm which frontend is running).
-    const UI_VERSION = 'feed-v3-20260314';
+    const UI_VERSION = 'feed-v3-20260314.1';
 
     const STATES = [
       {key:'reply', cls:'b-reply', label:'💬 replying'},
@@ -2412,14 +2412,21 @@
           listEl.appendChild(row);
         }
       }else{
+        const fmtWhat = (r)=>{
+          if(!r || typeof r !== 'object') return '(event)';
+          let txt = String(r.what || r.plain || r.action || '').trim();
+          if(!txt) txt = '(event)';
+          if(r.rowType === 'fold') txt = 'tools · ' + txt;
+          return txt;
+        };
+
         for(const r of rows){
           const row = document.createElement('div');
           const isSel = (FEED.selectedType === 'row' && FEED.selected && feedRowKey(FEED.selected) === feedRowKey(r));
-          row.className = 'feed-item' + (isSel ? ' sel' : '');
+          const kind = String(r && (r.kind||'') || '');
+          const isErr = (kind === 'error') || (r && r.segment && r.segment.status === 'error');
+          row.className = 'feed-item feed-row-v3' + (isSel ? ' sel' : '') + (r.rowType==='fold' ? ' fold' : '') + (isErr ? ' err' : '');
           row.addEventListener('click', ()=>{ FEED.selected = r; FEED.selectedType = 'row'; FEED.showRawDetail=false; feedRender(); });
-
-          // v3 row UX: single-line, human-readable. Avoid kind badges.
-          row.className += ' feed-row-v3' + ((r.rowType==='fold') ? ' fold' : '');
 
           const main = document.createElement('div');
           main.className = 'feed-main';
@@ -2433,12 +2440,11 @@
 
           const agent = document.createElement('span');
           agent.className = 'feed-v3-agent';
-          agent.textContent = r.agentId || '—';
+          agent.textContent = r.agentId ? ('@' + r.agentId) : '—';
 
           const what = document.createElement('span');
           what.className = 'feed-v3-what';
-          const txt = String(r.what || r.plain || r.action || '').trim();
-          what.textContent = txt || '(event)';
+          what.textContent = fmtWhat(r);
 
           line1.appendChild(time);
           line1.appendChild(agent);
