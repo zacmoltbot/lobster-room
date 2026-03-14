@@ -2418,31 +2418,33 @@
           row.className = 'feed-item' + (isSel ? ' sel' : '');
           row.addEventListener('click', ()=>{ FEED.selected = r; FEED.selectedType = 'row'; FEED.showRawDetail=false; feedRender(); });
 
-          const time = document.createElement('div');
-          time.className = 'feed-time';
-          time.textContent = feedTime(r.ts);
-
-          const badge = document.createElement('div');
-          badge.className = 'feed-badge';
-          badge.textContent = (r.rowType === 'fold') ? 'ops' : (String(r.kind || 'event') || 'event');
+          // v3 row UX: single-line, human-readable. Avoid kind badges.
+          row.className += ' feed-row-v3' + ((r.rowType==='fold') ? ' fold' : '');
 
           const main = document.createElement('div');
           main.className = 'feed-main';
 
           const line1 = document.createElement('div');
-          line1.className = 'feed-line';
-          const agent = document.createElement('div');
-          agent.className = 'feed-agent';
+          line1.className = 'feed-v3-line';
+
+          const time = document.createElement('span');
+          time.className = 'feed-v3-time';
+          time.textContent = feedTime(r.ts);
+
+          const agent = document.createElement('span');
+          agent.className = 'feed-v3-agent';
           agent.textContent = r.agentId || '—';
-          const preview = document.createElement('div');
-          preview.className = 'feed-preview';
-          preview.textContent = String(r.action || '').trim() || '(event)';
+
+          const what = document.createElement('span');
+          what.className = 'feed-v3-what';
+          const txt = String(r.what || r.plain || r.action || '').trim();
+          what.textContent = txt || '(event)';
+
+          line1.appendChild(time);
           line1.appendChild(agent);
-          line1.appendChild(preview);
+          line1.appendChild(what);
           main.appendChild(line1);
 
-          row.appendChild(time);
-          row.appendChild(badge);
           row.appendChild(main);
           listEl.appendChild(row);
         }
@@ -2465,6 +2467,8 @@
             kind: FEED.selected.kind,
             agentId: FEED.selected.agentId,
             sessionKey: FEED.selected.sessionKey,
+            what: FEED.selected.what,
+            plain: FEED.selected.plain,
             action: FEED.selected.action,
             segment: FEED.selected.segment || null,
           };
@@ -2653,6 +2657,7 @@
       const btnClear = document.getElementById('feed-clear');
       const agentSel = document.getElementById('feed-agent');
       const expandBtn = document.getElementById('feed-expand');
+      const devInjectBtn = document.getElementById('feed-dev-inject');
       const devSpawnBtn = document.getElementById('feed-dev-spawn');
 
       const btn60 = document.getElementById('feed-sum-60m');
@@ -2715,6 +2720,35 @@
       if(btn60) btn60.addEventListener('click', ()=> feedSummarize('60m'));
       if(btnSince) btnSince.addEventListener('click', ()=> feedSummarize('since'));
       if(btnSeg) btnSeg.addEventListener('click', ()=> feedSummarize('seg'));
+
+      if(devInjectBtn) devInjectBtn.style.display = devEnabled ? '' : 'none';
+      if(devInjectBtn && devEnabled){
+        devInjectBtn.addEventListener('click', async ()=>{
+          devInjectBtn.disabled = true;
+          const old = devInjectBtn.textContent;
+          devInjectBtn.textContent = 'Injecting…';
+          FEED.devSpawnStatus = '';
+          feedRender();
+          try{
+            const r = await apiPostJson('./api/lobster-room', { op: 'feedDevInject', agentId: 'main' });
+            if(!r || !r.ok){
+              const err = (r && (r.error || r.status)) ? String(r.error || r.status) : 'inject_failed';
+              const detail = (r && r.detail) ? String(r.detail) : '';
+              FEED.devSpawnStatus = ('dev inject failed: ' + err + (detail ? (' · ' + detail.slice(0, 80)) : '')).slice(0, 140);
+              feedRender();
+              return;
+            }
+            FEED.devSpawnStatus = ('demo injected: ' + String(r.injected||'') + ' events').slice(0, 140);
+            await feedPollOnce();
+          }catch(e){
+            FEED.devSpawnStatus = ('dev inject failed: ' + String(e && e.message ? e.message : e)).slice(0, 140);
+            feedRender();
+          }finally{
+            devInjectBtn.textContent = old || 'Dev: inject demo feed';
+            devInjectBtn.disabled = false;
+          }
+        });
+      }
 
       if(devSpawnBtn) devSpawnBtn.style.display = devEnabled ? '' : 'none';
       if(devSpawnBtn && devEnabled){

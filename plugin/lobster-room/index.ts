@@ -960,7 +960,13 @@ export default {
       sessionKey?: string;
       rowType: "important" | "fold";
       kind?: FeedKind | "error" | "sessions_spawn";
-      action: string;
+
+      // v3 UX: human-friendly, single-line text.
+      // Keep legacy `action` for backwards compatibility with older frontends.
+      what: string;
+      plain?: string;
+      action?: string;
+
       segment?: {
         startTs: number;
         endTs: number;
@@ -1069,6 +1075,7 @@ export default {
           const startTs = segItems[0]?.ts || task.startTs;
           const endTs = segItems[segItems.length - 1]?.ts || startTs;
           const id = `${sessionKey || task.id}:seg:${startTs}:${endTs}`;
+          const what = foldSentence({ startTs, endTs, status: task.status, doneOps, totalOps, byTool });
           out.push({
             id,
             ts: endTs,
@@ -1076,7 +1083,9 @@ export default {
             sessionKey,
             rowType: "fold",
             kind: "before_tool_call",
-            action: foldSentence({ startTs, endTs, status: task.status, doneOps, totalOps, byTool }),
+            what,
+            plain: what,
+            action: what,
             segment: { startTs, endTs, status: task.status, doneOps, totalOps, byTool },
           });
         };
@@ -1088,6 +1097,7 @@ export default {
 
             const info = importantActionSentence(it);
             const id = `${sessionKey || task.id}:imp:${it.ts}:${info.kind}:${it.toolName || ""}`;
+            const what = info.action;
             out.push({
               id,
               ts: it.ts,
@@ -1095,7 +1105,9 @@ export default {
               sessionKey,
               rowType: "important",
               kind: info.kind,
-              action: info.action,
+              what,
+              plain: what,
+              action: what,
             });
           } else {
             buf.push(it);
@@ -2027,6 +2039,69 @@ export default {
               } catch (err: any) {
                 sendJson(res, 200, { ok: false, error: "spawn_unreachable", detail: String(err?.message || err) });
               }
+              return;
+            }
+
+            if (op === "feedDevInject") {
+              // Dev-only helper: inject a synthetic feed session so the v3 UI looks obviously different.
+              // This mutates the in-memory feed buffer only (no disk writes).
+              const agentId = (typeof payload?.agentId === "string" ? payload.agentId.trim() : "main") || "main";
+              const now = nowMs();
+              const sessionKey = `agent:${agentId}:devdemo:${String(now)}`;
+
+              const mk = (deltaMs: number, it: Partial<FeedItem>): FeedItem => {
+                const ts = now + deltaMs;
+                return {
+                  ts,
+                  kind: (it.kind as any) || "before_tool_call",
+                  agentId,
+                  sessionKey,
+                  toolName: it.toolName,
+                  durationMs: it.durationMs,
+                  success: it.success,
+                  error: it.error,
+                  details: it.details,
+                } as FeedItem;
+              };
+
+              const demo: FeedItem[] = [
+                mk(-32_000, { kind: "before_agent_start" }),
+
+                // Segment 1 (folded ops): 12 total, 8 done.
+                mk(-31_000, { kind: "before_tool_call", toolName: "browser" }),
+                mk(-30_900, { kind: "after_tool_call", toolName: "browser", success: true, durationMs: 2200 }),
+                mk(-30_500, { kind: "before_tool_call", toolName: "browser" }),
+                mk(-30_200, { kind: "after_tool_call", toolName: "browser", success: true, durationMs: 1800 }),
+                mk(-29_900, { kind: "before_tool_call", toolName: "browser" }),
+                mk(-29_700, { kind: "after_tool_call", toolName: "browser", success: true, durationMs: 900 }),
+                mk(-29_300, { kind: "before_tool_call", toolName: "exec" }),
+                mk(-28_900, { kind: "after_tool_call", toolName: "exec", success: true, durationMs: 1200 }),
+                mk(-28_600, { kind: "before_tool_call", toolName: "exec" }),
+                mk(-28_100, { kind: "after_tool_call", toolName: "exec", success: true, durationMs: 800 }),
+                mk(-27_700, { kind: "before_tool_call", toolName: "read" }),
+                mk(-27_000, { kind: "after_tool_call", toolName: "read", success: true, durationMs: 240 }),
+                mk(-26_500, { kind: "before_tool_call", toolName: "browser" }),
+                mk(-26_300, { kind: "after_tool_call", toolName: "browser", success: true, durationMs: 500 }),
+
+                // 4 remaining ops without after_tool_call to show "in progress".
+                mk(-25_900, { kind: "before_tool_call", toolName: "browser" }),
+                mk(-25_700, { kind: "before_tool_call", toolName: "browser" }),
+                mk(-25_500, { kind: "before_tool_call", toolName: "exec" }),
+                mk(-25_300, { kind: "before_tool_call", toolName: "browser" }),
+
+                mk(-20_000, { kind: "message_sent", success: true, details: { channel: "discord" } }),
+
+                // Segment 2: one failing op + agent end.
+                mk(-12_000, { kind: "before_tool_call", toolName: "exec" }),
+                mk(-11_200, { kind: "after_tool_call", toolName: "exec", success: false, error: "Command failed (exit 1)" }),
+                mk(-9_000, { kind: "agent_end", success: false, error: "demo failure" }),
+              ];
+
+              // Append and trim to max buffer.
+              feedBuf.push(...demo);
+              if (feedBuf.length > FEED_MAX) feedBuf.splice(0, feedBuf.length - FEED_MAX);
+
+              sendJson(res, 200, { ok: true, sessionKey, injected: demo.length });
               return;
             }
 

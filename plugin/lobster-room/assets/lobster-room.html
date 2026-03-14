@@ -173,6 +173,15 @@
     .feed-line{display:flex;gap:8px;align-items:baseline}
     .feed-agent{color:rgba(255,255,255,.86);font-weight:700;font-size:12px;max-width:110px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
     .feed-preview{color:rgba(255,255,255,.70);font-size:12px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+
+    /* Feed v3 row UX (single-line: time · agent · what) */
+    .feed-item.feed-row-v3{align-items:center}
+    .feed-v3-line{display:flex;gap:10px;align-items:baseline;white-space:nowrap;overflow:hidden}
+    .feed-v3-time{flex:0 0 auto;width:74px;color:rgba(255,255,255,.55);font-size:11px}
+    .feed-v3-agent{flex:0 0 auto;max-width:120px;color:rgba(255,255,255,.86);font-weight:800;font-size:12px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+    .feed-v3-what{flex:1 1 auto;color:rgba(255,255,255,.74);font-size:12px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+    .feed-item.feed-row-v3.fold .feed-v3-what{color:rgba(255,255,255,.70);font-style:italic}
+
     .feed-detail{border:1px solid rgba(255,255,255,.08);border-radius:10px;background:rgba(0,0,0,.28);padding:8px 10px;font-size:11px;line-height:1.35;color:rgba(255,255,255,.80);white-space:pre-wrap;max-height:240px;overflow:auto}
     .feed-actions{display:flex;gap:8px;flex-wrap:wrap}
     .feed-actions .md-btn{padding:6px 10px}
@@ -351,6 +360,7 @@
           <div class="feed-actions">
             <button id="feed-expand" class="md-btn" type="button" style="display:none">Show raw events</button>
             <button id="feed-clear" class="md-btn" type="button">Clear selection</button>
+            <button id="feed-dev-inject" class="md-btn" type="button" style="display:none">Dev: inject demo feed</button>
             <button id="feed-dev-spawn" class="md-btn" type="button" style="display:none">Dev: spawn coding_agent</button>
           </div>
         </div>
