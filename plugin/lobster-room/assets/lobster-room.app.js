@@ -1,5 +1,5 @@
     // UI build stamp (bump this when you deploy so we can confirm which frontend is running).
-    const UI_VERSION = 'feed-v3-20260314.3';
+    const UI_VERSION = 'feed-v3-20260314.4';
 
     const STATES = [
       {key:'reply', cls:'b-reply', label:'💬 replying'},
@@ -2562,14 +2562,14 @@
           }
 
           FEED._lastOkMs = Date.now();
-          const dt = Date.now() - t0;
-          FEED.pollStatus = 'live · ' + String(Math.round(dt)) + 'ms';
+          // Keep UI stable: show only "live" (latency is noisy and looks like a timer).
+          FEED.pollStatus = 'live';
           feedRender();
         }
       }catch(e){
         const msg = String(e && e.name ? e.name : '') === 'AbortError' ? 'timeout' : 'disconnected';
         const age = FEED._lastOkMs ? (Date.now() - FEED._lastOkMs) : 0;
-        const ageTxt = FEED._lastOkMs ? (' · last ok ' + String(Math.round(age/1000)) + 's ago') : '';
+        const ageTxt = FEED._lastOkMs ? (' (last ok ' + String(Math.round(age/1000)) + 's ago)') : '';
         FEED.pollStatus = msg + ageTxt;
         feedRender();
       }finally{
@@ -2790,6 +2790,7 @@
       const toggleMvdbg = document.getElementById('toggle-mvdbg');
       const toggleAgentDetail = document.getElementById('toggle-agent-detail');
       const agentLabelsStatus = document.getElementById('agent-labels-status');
+      const agentLabelsTa = document.getElementById('agent-labels-ta');
       const btnAgentLabelsOpen = document.getElementById('btn-agent-labels-open');
 
       // Labels modal
