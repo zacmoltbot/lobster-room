@@ -1,4 +1,4 @@
-// UI build stamp (bump this when you deploy so we can confirm which frontend is running).
+    // UI build stamp (bump this when you deploy so we can confirm which frontend is running).
     const UI_VERSION = 'feed-v3-20260314';
 
     const STATES = [
@@ -24,6 +24,11 @@
       manualReady: false,
       nodeById: null,
     };
+
+    // Expose a tiny bit of state for debugging and smoke-tests.
+    // (Top-level `const MODEL` does not become window.MODEL in browsers.)
+    try { window.MODEL = MODEL; } catch {}
+    try { window.UI_VERSION = UI_VERSION; } catch {}
 
     async function apiGetJson(path){
       const r = await fetch(path, {cache:'no-store'});
@@ -2256,16 +2261,17 @@
       if(s === '[URL]') return s;
 
       return s
-        .replace(/https?://[^s"'<>]+/gi, '[URL]')
-        .replace(/localhost(?::d+)?(?:/[w-.~%!$&'()*+,;=:@/]*)?/gi, '[URL]')
-        .replace(/127.0.0.1(?::d+)?(?:/[w-.~%!$&'()*+,;=:@/]*)?/gi, '[URL]');
+        // Avoid literal "://" so this file stays robust against accidental inline-script corruption.
+        .replace(/https?:\/\/[^\s"'<>]+/gi, '[URL]')
+        .replace(/\blocalhost(?:\:\d+)?(?:\/[\w-.~%!$&'()*+,;=:@\/]*)?/gi, '[URL]')
+        .replace(/\b127\.0\.0\.1(?:\:\d+)?(?:\/[\w-.~%!$&'()*+,;=:@\/]*)?/gi, '[URL]');
     }
 
     function feedMaskSessionKey(s){
       if(typeof s !== 'string') return s;
       if(!s) return s;
 
-      return s.replace(/agent:([^:s"'<>]+):[^s"'<>]+/g, (_m, agentId)=>{
+      return s.replace(/\bagent:([^:\s"'<>]+):[^\s"'<>]+/g, (_m, agentId)=>{
         const a = String(agentId || '').trim();
         return a ? ('agent:' + a + ':…') : '[SESSION]';
       });
@@ -2296,10 +2302,10 @@
       };
 
       let out = s;
-      out = out.replace(/(call_[A-Za-z0-9_-]{8,})/gi, (m)=> maskOne(m));
-      out = out.replace(/(fc_[A-Za-z0-9_-]{8,})/gi, (m)=> maskOne(m));
-      out = out.replace(/[a-f0-9]{24,}/gi, (m)=> maskOne(m));
-      out = out.replace(/[A-Za-z0-9+/=_-]{24,}/g, (m)=> maskOne(m));
+      out = out.replace(/\b(call_[A-Za-z0-9_-]{8,})\b/gi, (m)=> maskOne(m));
+      out = out.replace(/\b(fc_[A-Za-z0-9_-]{8,})\b/gi, (m)=> maskOne(m));
+      out = out.replace(/\b[a-f0-9]{24,}\b/gi, (m)=> maskOne(m));
+      out = out.replace(/\b[A-Za-z0-9+/=_-]{24,}\b/g, (m)=> maskOne(m));
       return out;
     }
 
@@ -2804,7 +2810,7 @@
       const editorStatus = document.getElementById('editor-status');
 
       const openSettings = ()=>{
-        backdrop.classList.add('show');
+        if(backdrop && backdrop.classList) backdrop.classList.add('show');
         refreshRoomsList();
         // Load agent label mapping
         (async ()=>{
@@ -2826,11 +2832,11 @@
           if(bg && !bg.complete) bg.onload = ()=>{ try{ renderEditor(); }catch{} };
         }, 0);
       };
-      const closeSettings = ()=> backdrop.classList.remove('show');
+      const closeSettings = ()=>{ if(backdrop && backdrop.classList) backdrop.classList.remove('show'); };
 
-      btnSettings.addEventListener('click', openSettings);
-      btnClose.addEventListener('click', closeSettings);
-      backdrop.addEventListener('click', (e)=>{ if(e.target===backdrop) closeSettings(); });
+      if(btnSettings) btnSettings.addEventListener('click', openSettings);
+      if(btnClose) btnClose.addEventListener('click', closeSettings);
+      if(backdrop) backdrop.addEventListener('click', (e)=>{ if(e && e.target===backdrop) closeSettings(); });
 
       async function refreshRoomBg(){
         applyBgOpacity();
@@ -2839,6 +2845,7 @@
           const j = r.ok ? await r.json() : null;
           const room = document.getElementById('room');
           const img = document.getElementById('room-bg');
+          if(!room || !img) return;
           room.classList.add('has-bg');
           img.onload = () => {
             ensureLayout(false);
@@ -2882,6 +2889,7 @@
 
       function applyBgOpacity(){
         const room = document.getElementById('room');
+        if(!room || !room.style) return;
         const vRaw = (bgOp && bgOp.value) ? parseFloat(bgOp.value) : 0.8;
         const v = isFinite(vRaw) ? Math.max(0.0, Math.min(1, vRaw)) : 0.8;
         room.style.setProperty('--bgOpacity', String(v));
@@ -2924,14 +2932,19 @@
         let on = false;
         try{ on = localStorage.getItem('lobsterRoom.showRegions') === '1'; }catch{}
         if(toggleRegions) toggleRegions.checked = on;
-        document.getElementById('room').classList.toggle('show-regions', on);
+        try{
+          const room0 = document.getElementById('room');
+          if(room0 && room0.classList) room0.classList.toggle('show-regions', on);
+        }catch{}
         if(toggleRegions){
           toggleRegions.addEventListener('change', ()=>{
             const v = !!toggleRegions.checked;
             const room = document.getElementById('room');
-            room.classList.toggle('show-regions', v);
-            // When showing zones debug, also show tile overlay (which we now use to render saved/manual zones shapes).
-            room.classList.toggle('show-tiles', v);
+            if(room && room.classList){
+              room.classList.toggle('show-regions', v);
+              // When showing zones debug, also show tile overlay (which we now use to render saved/manual zones shapes).
+              room.classList.toggle('show-tiles', v);
+            }
             try{ localStorage.setItem('lobsterRoom.showRegions', v?'1':'0'); }catch{}
             renderRegions();
           });
@@ -3269,7 +3282,7 @@
         renderEditor();
       })();
 
-      btnUpload.addEventListener('click', async ()=>{
+      if(btnUpload) btnUpload.addEventListener('click', async ()=>{
         const f = fileInput.files && fileInput.files[0];
         if(!f){ statusEl.textContent = 'Choose an image first.'; return; }
         if(f.size > 8*1024*1024){ statusEl.textContent = 'File too large (max 8MB).'; return; }
@@ -3319,7 +3332,7 @@
         }
       });
 
-      btnReset.addEventListener('click', async ()=>{
+      if(btnReset) btnReset.addEventListener('click', async ()=>{
         if(!confirm('Switch to Default room?')) return;
         statusEl.textContent = 'Switching…';
         const r = await fetch('./api/room-image/reset', {method:'POST'});
