@@ -767,8 +767,23 @@ export default {
     const FEED_MAX = Math.max(500, Number(api.config?.feedMaxItems) || 0, 600);
     const feedBuf: FeedItem[] = [];
 
+    // Synthetic feed events for spawned sub-agents (sessions_spawn).
+    // The runtime doesn't currently emit feed hooks for child agents unless they use /tools/invoke.
+    type SpawnInfo = {
+      childAgentId: string;
+      childSessionKey: string;
+      startTs: number;
+    };
+    const spawnStacksByAgent = new Map<string, SpawnInfo[]>();
+
+
     const redactSecretsInText = (s: string): string => {
       let out = String(s || "");
+
+      // OpenClaw tool call ids / file cache ids can appear in logs as call_*/fc_* tokens.
+      // Redact them WITHOUT leaking the prefixes (no literal 'call_' / 'fc_' should remain).
+      // Match even when embedded (e.g. JSON, markdown, stack traces).
+      out = out.replace(/(?:call|fc)_[A-Za-z0-9_-]{6,}/g, '[OC_ID_REDACTED]'); // CALL_FC_REDACTED
 
       // URLs can leak tokens/hostnames; replace with a placeholder.
       out = out.replace(/\bhttps?:\/\/[^\s)\]]+/gi, "[URL]");
@@ -937,6 +952,163 @@ export default {
       return tasks.sort((a, b) => b.startTs - a.startTs);
     };
 
+    // --- Message Feed v3 (human-friendly rows + folded low-level ops) ---
+    type FeedRowV3 = {
+      id: string;
+      ts: number;
+      agentId: string;
+      sessionKey?: string;
+      rowType: "important" | "fold";
+      kind?: FeedKind | "error" | "sessions_spawn";
+      action: string;
+      segment?: {
+        startTs: number;
+        endTs: number;
+        status: FeedTaskStatus;
+        doneOps: number;
+        totalOps: number;
+        byTool: Record<string, number>;
+      };
+    };
+
+    const isImportantFeedItem = (it: FeedItem): boolean => {
+      if (it.kind === "before_agent_start") return true;
+      if (it.kind === "agent_end") return true;
+      if (it.kind === "message_sent") return true;
+      if (it.kind === "before_tool_call" && it.toolName === "sessions_spawn") return true;
+      if (it.success === false) return true;
+      if (typeof it.error === "string" && it.error.trim()) return true;
+      return false;
+    };
+
+    const importantActionSentence = (it: FeedItem): { kind: FeedRowV3["kind"]; action: string } => {
+      // IMPORTANT: keep this human-friendly and content-free.
+      if (it.kind === "before_agent_start") return { kind: it.kind, action: "started" };
+      if (it.kind === "agent_end") {
+        if (it.success === false || it.error) return { kind: "error", action: "ended (error)" };
+        return { kind: it.kind, action: "ended" };
+      }
+      if (it.kind === "message_sent") {
+        if (it.success === false) return { kind: "error", action: "message failed to send" };
+        return { kind: it.kind, action: "sent a message" };
+      }
+      if (it.kind === "before_tool_call" && it.toolName === "sessions_spawn") {
+        const child = typeof (it.details as any)?.spawnAgentId === "string" ? String((it.details as any).spawnAgentId) : "";
+        const label = typeof (it.details as any)?.label === "string" ? String((it.details as any).label) : "";
+        const task = typeof (it.details as any)?.task === "string" ? String((it.details as any).task) : "";
+        const what = (label || task).trim();
+        const tail = what ? ` — ${redactSecretsInText(what).slice(0, 120)}` : "";
+        return { kind: "sessions_spawn", action: `spawned sub-agent${child ? ` @${child}` : ""}${tail}`.trim() };
+      }
+      if (it.success === false || it.error) {
+        const e = it.error ? redactSecretsInText(it.error).slice(0, 140) : "";
+        return { kind: "error", action: e ? `error: ${e}` : "error" };
+      }
+      return { kind: it.kind, action: feedPreview(it) };
+    };
+
+    const foldSentence = (seg: FeedRowV3["segment"]): string => {
+      if (!seg) return "";
+
+      const parts: string[] = [];
+      const st = seg.status;
+      const done = Math.max(0, seg.doneOps | 0);
+      const total = Math.max(done, seg.totalOps | 0);
+      const opPart = total ? `${done}/${total} ops` : "ops";
+
+      // tool breakdown (only show a few; stable order by count desc then name)
+      const tools = Object.entries(seg.byTool || {})
+        .filter(([, n]) => (n | 0) > 0)
+        .sort((a, b) => (b[1] - a[1]) || a[0].localeCompare(b[0]))
+        .slice(0, 4)
+        .map(([k, n]) => `${k} ${n}`);
+
+      if (st === "running") parts.push(`in progress · ${opPart}`);
+      else if (st === "error") parts.push(`error · ${opPart}`);
+      else parts.push(`${opPart}`);
+
+      if (tools.length) parts.push(`(${tools.join(" / ")})`);
+      return parts.join(" ").trim();
+    };
+
+    const buildFeedV3Rows = (items: FeedItem[]): FeedRowV3[] => {
+      const tasks = groupFeedIntoTasks(items, { includeRaw: true });
+      const out: FeedRowV3[] = [];
+
+      for (const task of tasks) {
+        const agentId = task.agentId || "unknown";
+        const sessionKey = task.sessionKey;
+        const raw = Array.isArray(task.items) ? task.items.slice().sort((a, b) => a.ts - b.ts) : [];
+        if (!raw.length) continue;
+
+        // Split into segments by important items.
+        let buf: FeedItem[] = [];
+
+        const flushBuf = () => {
+          const segItems = buf.slice();
+          buf = [];
+          if (!segItems.length) return;
+
+          // Count tool ops by before/after.
+          const before = segItems.filter((x) => x.kind === "before_tool_call");
+          const after = segItems.filter((x) => x.kind === "after_tool_call");
+          const totalOps = before.length;
+          const doneOps = Math.min(totalOps, after.length);
+
+          const byTool: Record<string, number> = {};
+          for (const it of before) {
+            const tn = (it.toolName || "tool").trim();
+            byTool[tn] = (byTool[tn] || 0) + 1;
+          }
+          // Also count persist-only events if we have no before_tool_call.
+          if (!totalOps) {
+            const pers = segItems.filter((x) => x.kind === "tool_result_persist").length;
+            if (pers) byTool.persist = pers;
+          }
+
+          const startTs = segItems[0]?.ts || task.startTs;
+          const endTs = segItems[segItems.length - 1]?.ts || startTs;
+          const id = `${sessionKey || task.id}:seg:${startTs}:${endTs}`;
+          out.push({
+            id,
+            ts: endTs,
+            agentId,
+            sessionKey,
+            rowType: "fold",
+            kind: "before_tool_call",
+            action: foldSentence({ startTs, endTs, status: task.status, doneOps, totalOps, byTool }),
+            segment: { startTs, endTs, status: task.status, doneOps, totalOps, byTool },
+          });
+        };
+
+        for (const it of raw) {
+          if (isImportantFeedItem(it)) {
+            // Fold whatever low-level ops we collected before this important event.
+            flushBuf();
+
+            const info = importantActionSentence(it);
+            const id = `${sessionKey || task.id}:imp:${it.ts}:${info.kind}:${it.toolName || ""}`;
+            out.push({
+              id,
+              ts: it.ts,
+              agentId: it.agentId || agentId,
+              sessionKey,
+              rowType: "important",
+              kind: info.kind,
+              action: info.action,
+            });
+          } else {
+            buf.push(it);
+          }
+        }
+
+        // Tail low-level segment.
+        flushBuf();
+      }
+
+      return out.sort((a, b) => b.ts - a.ts);
+    };
+
     const priority: Record<ActivityState, number> = {
       idle: 0,
       thinking: 1,
@@ -1095,6 +1267,44 @@ export default {
         toolData.label = p?.label;
         const task = typeof p?.task === "string" ? p.task : "";
         toolData.task = task ? task.slice(0, 160) : undefined;
+
+        // SYNTH_SUBAGENT_FEED_START
+        try {
+          const childAgentId = typeof p?.agentId === "string" ? String(p.agentId).trim() : "";
+          if (childAgentId) {
+            const parentSk = typeof ctx?.sessionKey === "string" ? String(ctx.sessionKey) : "";
+            const startTs = nowMs();
+            const childSessionKey = `spawn:${parentSk || agentId}:${childAgentId}:${startTs}`;
+            const st = spawnStacksByAgent.get(agentId) || [];
+            st.push({ childAgentId, childSessionKey, startTs });
+            spawnStacksByAgent.set(agentId, st);
+
+            // Start a synthetic task card for the child agent.
+            pushFeed({
+              ts: startTs,
+              kind: "before_agent_start",
+              agentId: childAgentId,
+              sessionKey: childSessionKey,
+              details: { parentSessionKey: parentSk ? redactSecretsInText(parentSk).slice(0, 120) : undefined },
+            });
+            pushFeed({
+              ts: startTs + 1,
+              kind: "before_tool_call",
+              agentId: childAgentId,
+              sessionKey: childSessionKey,
+              toolName: "sessions_spawn",
+              details: {
+                label: coerceStr(toolData.label, 120),
+                task: coerceStr(toolData.task, 180),
+                spawnAgentId: coerceStr(childAgentId, 80),
+              },
+            });
+            setState(childAgentId, "thinking", { sessionKey: childSessionKey, spawnedBy: agentId });
+          }
+        } catch {
+          // best-effort only
+        }
+        // SYNTH_SUBAGENT_FEED_END
       }
 
       // Show message preview when using the message tool.
@@ -1148,6 +1358,46 @@ export default {
             outputPreview = redactSecretsInText(c.trim()).slice(0, 220);
             break;
           }
+        }
+      }
+
+      // SYNTH_SUBAGENT_FEED_FINISH
+      if (event?.toolName === "sessions_spawn") {
+        try {
+          const st = spawnStacksByAgent.get(agentId) || [];
+          const info = st.pop();
+          if (st.length) spawnStacksByAgent.set(agentId, st);
+          else spawnStacksByAgent.delete(agentId);
+
+          if (info?.childAgentId && info.childSessionKey) {
+            const t = nowMs();
+            const rawErr = event?.error || event?.result?.error;
+            const err = typeof rawErr === "string" && rawErr.trim() ? rawErr.trim() : "";
+            const ok = !err;
+
+            pushFeed({
+              ts: t,
+              kind: "after_tool_call",
+              agentId: info.childAgentId,
+              sessionKey: info.childSessionKey,
+              toolName: "sessions_spawn",
+              durationMs: typeof event?.durationMs === "number" ? event.durationMs : undefined,
+              success: ok,
+              error: err ? redactSecretsInText(err).slice(0, 200) : undefined,
+              details: outputPreview ? { outputPreview } : undefined,
+            });
+            pushFeed({
+              ts: t + 1,
+              kind: "agent_end",
+              agentId: info.childAgentId,
+              sessionKey: info.childSessionKey,
+              success: ok,
+              error: err ? redactSecretsInText(err).slice(0, 200) : undefined,
+            });
+            setState(info.childAgentId, ok ? "idle" : "error", { sessionKey: info.childSessionKey });
+          }
+        } catch {
+          // best-effort only
         }
       }
 
@@ -1518,10 +1768,14 @@ export default {
               // Latest preview = most recent event.
               const last = items.length ? items[items.length - 1] : null;
 
+              const version = Number(payload?.version) || 2;
+              const rows = version >= 3 ? buildFeedV3Rows(items) : undefined;
+
               sendJson(res, 200, {
                 ok: true,
-                buildTagFeed: "feed-v2",
+                buildTagFeed: version >= 3 ? "feed-v3" : "feed-v2",
                 latest: last ? { ...last, preview: feedPreview(last) } : null,
+                rows,
                 tasks: tasks.map((t) => ({
                   id: t.id,
                   sessionKey: t.sessionKey,
@@ -1585,12 +1839,23 @@ export default {
                 ? payload.sinceMs
                 : (nowMs() - windowMs);
 
+              const startMs = typeof payload?.startMs === "number" && Number.isFinite(payload.startMs) ? payload.startMs : null;
+              const endMs = typeof payload?.endMs === "number" && Number.isFinite(payload.endMs) ? payload.endMs : null;
+
               let items = feedBuf.slice();
               if (sessionKey) items = items.filter((x) => x.sessionKey === sessionKey);
               else {
                 if (agentId) items = items.filter((x) => x.agentId === agentId);
                 items = items.filter((x) => x.ts >= sinceMs);
               }
+
+              // Optional explicit window (used by v3 "Summary: this segment")
+              if (startMs !== null || endMs !== null) {
+                const a = startMs !== null ? startMs : (nowMs() - windowMs);
+                const b = endMs !== null ? endMs : nowMs();
+                items = items.filter((x) => x.ts >= a && x.ts <= b);
+              }
+
               items = items.slice(-maxItems);
 
               const lines = items

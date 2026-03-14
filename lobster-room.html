@@ -317,7 +317,6 @@
         </svg>
       </div>
       </div>
-      </div>
 
       <!-- Message Feed (docked) -->
       <div id="feed-panel" class="feed-panel" aria-live="polite">
@@ -327,19 +326,18 @@
         </div>
         <div class="feed-body">
           <div class="feed-filters">
-            <select id="feed-view" title="Feed view">
-              <option value="timeline" selected>Timeline</option>
-              <option value="tasks">Tasks</option>
-            </select>
             <select id="feed-agent">
               <option value="">All agents</option>
             </select>
-            <select id="feed-range">
-              <option value="600000">Last 10m</option>
-              <option value="1800000">Last 30m</option>
-              <option value="3600000" selected>Last 60m</option>
-            </select>
-            <button id="feed-summarize" class="md-btn" type="button">Summarize</button>
+
+            <button id="feed-sum-60m" class="md-btn" type="button" title="Summarize important activity from the last 60 minutes">Summary: last 60m</button>
+            <button id="feed-sum-since" class="md-btn" type="button" title="Summarize since you last closed the feed panel">Summary: since last viewed</button>
+            <button id="feed-sum-seg" class="md-btn" type="button" style="display:none" title="Summarize the selected folded segment">Summary: this segment</button>
+
+            <label class="md-hint" style="display:flex;gap:8px;align-items:center;user-select:none">
+              <input id="feed-raw-toggle" type="checkbox" /> Show raw (scrubbed)
+            </label>
+
             <span class="md-hint" id="feed-status"></span>
           </div>
 
@@ -505,7 +503,7 @@
 
   <script>
     // UI build stamp (bump this when you deploy so we can confirm which frontend is running).
-    const UI_VERSION = 'b755d0e';
+    const UI_VERSION = 'feed-v3-20260314';
 
     const STATES = [
       {key:'reply', cls:'b-reply', label:'💬 replying'},
@@ -2722,19 +2720,32 @@
     // --- Message Feed ---
     const FEED = {
       show: false,
-      view: 'timeline', // 'timeline' (default) | 'tasks'
+
+      // v3: human-friendly rows (newest-first) with folded low-level ops.
+      rows: [],
+
+      // v2/raw: latest polled items/tasks (still useful for debug and segment details)
       tasks: [],
-      items: [], // latest polled items (sanitized server-side), newest-first from API
-      timeline: [], // accumulated, oldest-first
-      _seen: new Set(),
+      items: [], // newest-first from API
+
       latest: null,
-      selected: null, // selected row (task or item)
-      selectedType: '', // 'task' | 'item'
-      showRaw: false,
+
+      // Selection
+      selected: null,
+      selectedType: '', // 'row' | 'item' | 'task'
+      showRawDetail: false,
+
+      // UI toggles
+      showRawList: false, // "Show raw (scrubbed)"
+
       pollMs: 2000,
       summaryText: '',
       summaryMeta: null,
       devSpawnStatus: '',
+
+      // "since last viewed" anchor (set when panel opens; persisted when panel closes)
+      lastViewedMs: null,
+      _agentFilter: '',
     };
 
     function feedTime(ts){
@@ -2744,36 +2755,23 @@
       }catch{return '—'}
     }
 
-    function feedStatusLabel(st){
-      if(st==='running') return 'running';
-      if(st==='done') return 'done';
-      if(st==='error') return 'error';
-      return String(st||'—');
-    }
-
     function feedMaskUrls(s){
       if(typeof s !== 'string') return s;
       if(s === '[URL]') return s;
 
-      // Replace URL-ish substrings with a stable placeholder.
-      // - Explicit schemes: http(s)://...
-      // - Localhost: localhost:3000/path (with or without scheme)
-      // - Loopback IP: 127.0.0.1:3000/path (with or without scheme)
       return s
-        .replace(/https?:\/\/[^\s"'<>]+/gi, '[URL]')
-        .replace(/\blocalhost(?::\d+)?(?:\/[\w\-\.~%!$&'()*+,;=:@/]*)?/gi, '[URL]')
-        .replace(/\b127\.0\.0\.1(?::\d+)?(?:\/[\w\-\.~%!$&'()*+,;=:@/]*)?/gi, '[URL]');
+        .replace(/https?://[^s"'<>]+/gi, '[URL]')
+        .replace(/localhost(?::d+)?(?:/[w-.~%!$&'()*+,;=:@/]*)?/gi, '[URL]')
+        .replace(/127.0.0.1(?::d+)?(?:/[w-.~%!$&'()*+,;=:@/]*)?/gi, '[URL]');
     }
 
     function feedMaskSessionKey(s){
       if(typeof s !== 'string') return s;
       if(!s) return s;
 
-      // Mask session keys (QA flagged these). Example format: agent:<agentId>:discord:channel:...
-      // Keep only agentId + ellipsis.
-      return s.replace(/\bagent:([^:\s"'<>]+):[^\s"'<>]+/g, (_m, agentId)=>{
+      return s.replace(/agent:([^:s"'<>]+):[^s"'<>]+/g, (_m, agentId)=>{
         const a = String(agentId || '').trim();
-        return a ? `agent:${a}:…` : '[SESSION]';
+        return a ? ('agent:' + a + ':…') : '[SESSION]';
       });
     }
 
@@ -2785,47 +2783,34 @@
       const maskOne = (tok)=>{
         const t = String(tok || '').trim();
         if(!t) return tok;
-
-        // Keep short human-readable identifiers.
         if(t.length < 18) return tok;
 
         const isHex = /^[a-f0-9]+$/i.test(t) && t.length >= 24;
         const isBase64ish = /^[A-Za-z0-9+/=_-]+$/.test(t) && t.length >= 24;
         const isCall = /^call_[A-Za-z0-9_-]{6,}$/i.test(t);
         const isFc = /^fc_[A-Za-z0-9_-]{6,}$/i.test(t);
-
-        // Fully redact OpenClaw call_/fc_ tokens.
         if(isCall || isFc) return '[OC_ID_REDACTED]';
 
         if(isHex || isBase64ish){
           const head = t.slice(0, 4);
           const tail = t.slice(-4);
-          return `[ID:${head}…${tail}]`;
+          return '[ID:' + head + '…' + tail + ']';
         }
         return tok;
       };
 
-      // Replace tool call IDs even when embedded in a larger string.
-      // Examples:
-      // - "call_x|fc_y"
-      // - "toolCallId=call_..."
       let out = s;
-      out = out.replace(/\b(call_[A-Za-z0-9_-]{8,})\b/gi, (m)=> maskOne(m));
-      out = out.replace(/\b(fc_[A-Za-z0-9_-]{8,})\b/gi, (m)=> maskOne(m));
-
-      // Also mask very long hex/base64-ish substrings when they appear as standalone tokens.
-      out = out.replace(/\b[a-f0-9]{24,}\b/gi, (m)=> maskOne(m));
-      out = out.replace(/\b[A-Za-z0-9+/=_-]{24,}\b/g, (m)=> maskOne(m));
-
+      out = out.replace(/(call_[A-Za-z0-9_-]{8,})/gi, (m)=> maskOne(m));
+      out = out.replace(/(fc_[A-Za-z0-9_-]{8,})/gi, (m)=> maskOne(m));
+      out = out.replace(/[a-f0-9]{24,}/gi, (m)=> maskOne(m));
+      out = out.replace(/[A-Za-z0-9+/=_-]{24,}/g, (m)=> maskOne(m));
       return out;
     }
 
     function feedScrubValue(v, k){
-      // Recursive scrub for raw event JSON. Preserves structure but masks opaque IDs.
       const key = (typeof k === 'string') ? k : '';
 
       if(typeof v === 'string'){
-        // Order matters: URLs first, then session keys, then opaque IDs.
         let masked = feedMaskUrls(v);
         masked = feedMaskSessionKey(masked);
         masked = feedMaskOpaqueId(masked);
@@ -2840,8 +2825,12 @@
       return v;
     }
 
+    function feedRowKey(r){
+      if(!r || typeof r !== 'object') return '';
+      return String(r.id || r._id || r.ts || '');
+    }
+
     function feedItemKey(it){
-      // Stable-ish key for dedupe across polls; keep bounded by the server ring buffer.
       const ts = (it && typeof it.ts === 'number') ? String(it.ts) : '0';
       const k = String(it && (it.kind||'') || '');
       const a = String(it && (it.agentId||'') || '');
@@ -2850,35 +2839,11 @@
       return [ts,k,a,t,sk].join('|');
     }
 
-    function feedMergeTimeline(newItemsNewestFirst){
-      const incoming = Array.isArray(newItemsNewestFirst) ? newItemsNewestFirst.slice() : [];
-      // API returns newest-first. Render timeline oldest-first.
-      incoming.sort((a,b)=> (a.ts||0) - (b.ts||0));
-
-      for(const it of incoming){
-        const key = feedItemKey(it);
-        if(FEED._seen.has(key)) continue;
-        FEED._seen.add(key);
-        FEED.timeline.push(it);
-      }
-
-      // Keep memory bounded.
-      const MAX = 600;
-      if(FEED.timeline.length > MAX){
-        const drop = FEED.timeline.length - MAX;
-        const dropped = FEED.timeline.splice(0, drop);
-        // Rebuild seen set to match remaining.
-        FEED._seen = new Set(FEED.timeline.map(feedItemKey));
-        // If selection was dropped, clear.
-        if(FEED.selectedType === 'item' && FEED.selected){
-          const selKey = feedItemKey(FEED.selected);
-          if(!FEED._seen.has(selKey)){
-            FEED.selected = null;
-            FEED.selectedType = '';
-            FEED.showRaw = false;
-          }
-        }
-      }
+    function feedFindTaskItemsBySessionKey(sk){
+      if(!sk) return [];
+      const tasks = Array.isArray(FEED.tasks) ? FEED.tasks : [];
+      const t = tasks.find(x=> String(x && x.sessionKey || '') === String(sk));
+      return (t && Array.isArray(t.items)) ? t.items : [];
     }
 
     function feedRender(){
@@ -2887,15 +2852,15 @@
       const statusEl = document.getElementById('feed-status');
       const expandBtn = document.getElementById('feed-expand');
       const sumBody = document.getElementById('feed-summary-body');
+      const sumSegBtn = document.getElementById('feed-sum-seg');
       if(!listEl) return;
 
-      const tasks = Array.isArray(FEED.tasks) ? FEED.tasks : [];
-      const timeline = Array.isArray(FEED.timeline) ? FEED.timeline : [];
+      const rows = Array.isArray(FEED.rows) ? FEED.rows : [];
+      const items = Array.isArray(FEED.items) ? FEED.items : [];
 
       if(statusEl){
-        const base = (FEED.view === 'tasks')
-          ? (tasks.length ? (String(tasks.length) + ' tasks') : '—')
-          : (timeline.length ? (String(timeline.length) + ' events') : '—');
+        const base = FEED.showRawList ? (items.length ? (String(items.length) + ' raw events') : '—')
+          : (rows.length ? (String(rows.length) + ' rows') : '—');
         const extra = (FEED.devSpawnStatus || '').trim();
         statusEl.textContent = extra ? (base + ' · ' + extra) : base;
       }
@@ -2905,68 +2870,14 @@
         sumBody.textContent = txt ? txt : '(no summary yet)';
       }
 
-      const listWasNearEdge = (()=>{
-        try{
-          const slack = 40;
-          if(FEED.view === 'timeline'){
-            // Timeline is newest-first (top). Treat "near edge" as near TOP.
-            return listEl.scrollTop <= slack;
-          }
-          // Tasks view is small; keep default behavior.
-          return (listEl.scrollTop + listEl.clientHeight + slack) >= listEl.scrollHeight;
-        }catch{ return true; }
-      })();
-
       listEl.innerHTML = '';
 
-      if(FEED.view === 'tasks'){
-        for(const t of tasks){
-          const row = document.createElement('div');
-          const isSel = (FEED.selectedType === 'task' && FEED.selected && FEED.selected.id === t.id);
-          row.className = 'feed-item' + (isSel ? ' sel' : '');
-          row.addEventListener('click', ()=>{ FEED.selected = t; FEED.selectedType = 'task'; FEED.showRaw=false; feedRender(); });
-
-          const time = document.createElement('div');
-          time.className = 'feed-time';
-          time.textContent = feedTime(t.startTs);
-
-          const badge = document.createElement('div');
-          badge.className = 'feed-badge';
-          badge.textContent = feedStatusLabel(t.status);
-
-          const main = document.createElement('div');
-          main.className = 'feed-main';
-
-          const line1 = document.createElement('div');
-          line1.className = 'feed-line';
-          const agent = document.createElement('div');
-          agent.className = 'feed-agent';
-          agent.textContent = t.agentId || '—';
-          const title = document.createElement('div');
-          title.className = 'feed-preview';
-          title.textContent = t.title || '(untitled)';
-          line1.appendChild(agent);
-          line1.appendChild(title);
-
-          const line2 = document.createElement('div');
-          line2.className = 'feed-preview';
-          line2.textContent = t.summary || '';
-
-          main.appendChild(line1);
-          if(t.summary) main.appendChild(line2);
-
-          row.appendChild(time);
-          row.appendChild(badge);
-          row.appendChild(main);
-          listEl.appendChild(row);
-        }
-      }else{
-        // Timeline: newest first (top)
-        for(const it of timeline.slice().reverse()){
+      if(FEED.showRawList){
+        for(const it of items){
           const row = document.createElement('div');
           const isSel = (FEED.selectedType === 'item' && FEED.selected && feedItemKey(FEED.selected) === feedItemKey(it));
           row.className = 'feed-item' + (isSel ? ' sel' : '');
-          row.addEventListener('click', ()=>{ FEED.selected = it; FEED.selectedType = 'item'; FEED.showRaw=false; feedRender(); });
+          row.addEventListener('click', ()=>{ FEED.selected = it; FEED.selectedType = 'item'; FEED.showRawDetail=false; feedRender(); });
 
           const time = document.createElement('div');
           time.className = 'feed-time';
@@ -2991,7 +2902,41 @@
           preview.textContent = (it.preview || '') ? String(it.preview) : (k || '(event)');
           line1.appendChild(agent);
           line1.appendChild(preview);
+          main.appendChild(line1);
 
+          row.appendChild(time);
+          row.appendChild(badge);
+          row.appendChild(main);
+          listEl.appendChild(row);
+        }
+      }else{
+        for(const r of rows){
+          const row = document.createElement('div');
+          const isSel = (FEED.selectedType === 'row' && FEED.selected && feedRowKey(FEED.selected) === feedRowKey(r));
+          row.className = 'feed-item' + (isSel ? ' sel' : '');
+          row.addEventListener('click', ()=>{ FEED.selected = r; FEED.selectedType = 'row'; FEED.showRawDetail=false; feedRender(); });
+
+          const time = document.createElement('div');
+          time.className = 'feed-time';
+          time.textContent = feedTime(r.ts);
+
+          const badge = document.createElement('div');
+          badge.className = 'feed-badge';
+          badge.textContent = (r.rowType === 'fold') ? 'ops' : (String(r.kind || 'event') || 'event');
+
+          const main = document.createElement('div');
+          main.className = 'feed-main';
+
+          const line1 = document.createElement('div');
+          line1.className = 'feed-line';
+          const agent = document.createElement('div');
+          agent.className = 'feed-agent';
+          agent.textContent = r.agentId || '—';
+          const preview = document.createElement('div');
+          preview.className = 'feed-preview';
+          preview.textContent = String(r.action || '').trim() || '(event)';
+          line1.appendChild(agent);
+          line1.appendChild(preview);
           main.appendChild(line1);
 
           row.appendChild(time);
@@ -3004,27 +2949,41 @@
       if(FEED.selected){
         detailEl.style.display = 'block';
 
-        if(FEED.selectedType === 'task'){
-          const payload = {
+        let seg = null;
+        if(FEED.selectedType === 'row' && FEED.selected && FEED.selected.rowType === 'fold' && FEED.selected.segment){
+          seg = FEED.selected.segment;
+        }
+        if(sumSegBtn) sumSegBtn.style.display = seg ? '' : 'none';
+
+        if(FEED.selectedType === 'row'){
+          const base = {
             id: FEED.selected.id,
-            sessionKey: FEED.selected.sessionKey,
+            ts: FEED.selected.ts,
+            rowType: FEED.selected.rowType,
+            kind: FEED.selected.kind,
             agentId: FEED.selected.agentId,
-            status: FEED.selected.status,
-            startTs: FEED.selected.startTs,
-            endTs: FEED.selected.endTs,
-            title: FEED.selected.title,
-            summary: FEED.selected.summary,
+            sessionKey: FEED.selected.sessionKey,
+            action: FEED.selected.action,
+            segment: FEED.selected.segment || null,
           };
-          if(FEED.showRaw && Array.isArray(FEED.selected.items)){
-            payload.items = feedScrubValue(FEED.selected.items, 'items');
+
+          let payload = base;
+          if(FEED.showRawDetail && FEED.selected.sessionKey && FEED.selected.segment){
+            const raw = feedFindTaskItemsBySessionKey(FEED.selected.sessionKey);
+            const a = Number(FEED.selected.segment.startTs||0);
+            const b = Number(FEED.selected.segment.endTs||0);
+            const picked = raw.filter(x=> (x.ts||0) >= a && (x.ts||0) <= b);
+            payload = Object.assign({}, base, { rawItems: picked });
           }
+
           detailEl.textContent = JSON.stringify(feedScrubValue(payload, 'payload'), null, 2);
 
           if(expandBtn){
-            expandBtn.style.display = Array.isArray(FEED.selected.items) ? '' : 'none';
-            expandBtn.textContent = FEED.showRaw ? 'Hide raw events' : 'Show raw events';
+            const canExpand = !!(FEED.selected.sessionKey && FEED.selected.segment);
+            expandBtn.style.display = canExpand ? '' : 'none';
+            expandBtn.textContent = FEED.showRawDetail ? 'Hide raw (scrubbed)' : 'Show raw (scrubbed)';
           }
-        }else{
+        }else if(FEED.selectedType === 'item'){
           const base = {
             ts: FEED.selected.ts,
             kind: FEED.selected.kind,
@@ -3036,22 +2995,39 @@
             error: FEED.selected.error,
             preview: FEED.selected.preview,
           };
-          const payload = FEED.showRaw ? FEED.selected : base;
+          const payload = FEED.showRawDetail ? FEED.selected : base;
           detailEl.textContent = JSON.stringify(feedScrubValue(payload, 'payload'), null, 2);
 
           if(expandBtn){
             expandBtn.style.display = '';
-            expandBtn.textContent = FEED.showRaw ? 'Hide raw event' : 'Show raw event';
+            expandBtn.textContent = FEED.showRawDetail ? 'Hide raw (scrubbed)' : 'Show raw (scrubbed)';
           }
+        }else if(FEED.selectedType === 'task'){
+          const payload = {
+            id: FEED.selected.id,
+            sessionKey: FEED.selected.sessionKey,
+            agentId: FEED.selected.agentId,
+            status: FEED.selected.status,
+            startTs: FEED.selected.startTs,
+            endTs: FEED.selected.endTs,
+            title: FEED.selected.title,
+            summary: FEED.selected.summary,
+            items: (FEED.showRawDetail && Array.isArray(FEED.selected.items)) ? FEED.selected.items : undefined,
+          };
+          detailEl.textContent = JSON.stringify(feedScrubValue(payload, 'payload'), null, 2);
+
+          if(expandBtn){
+            expandBtn.style.display = Array.isArray(FEED.selected.items) ? '' : 'none';
+            expandBtn.textContent = FEED.showRawDetail ? 'Hide raw (scrubbed)' : 'Show raw (scrubbed)';
+          }
+        }else{
+          detailEl.textContent = JSON.stringify(feedScrubValue(FEED.selected, 'payload'), null, 2);
+          if(expandBtn) expandBtn.style.display='none';
         }
       }else{
         detailEl.style.display = 'none';
         if(expandBtn) expandBtn.style.display='none';
-      }
-
-      if(FEED.view === 'timeline' && listWasNearEdge){
-        // Newest-first timeline sticks to top when you are already at the top.
-        try{ listEl.scrollTop = 0; }catch{}
+        if(sumSegBtn) sumSegBtn.style.display='none';
       }
     }
 
@@ -3062,29 +3038,26 @@
       try{
         const data = await apiPostJson('./api/lobster-room', {
           op: 'feedGet',
-          limit: 300,
+          limit: 400,
           agentId: agentId || '',
           includeRaw: true,
+          version: 3,
         });
+
         if(data && data.ok){
-          // If agent filter changed, reset timeline accumulator to avoid mixing streams.
           if(typeof FEED._agentFilter !== 'string') FEED._agentFilter = '';
           if(FEED._agentFilter !== (agentId||'')){
             FEED._agentFilter = (agentId||'');
-            FEED.timeline = [];
-            FEED._seen = new Set();
             FEED.selected = null;
             FEED.selectedType = '';
-            FEED.showRaw = false;
+            FEED.showRawDetail = false;
           }
 
           FEED.latest = data.latest || null;
+          FEED.rows = Array.isArray(data.rows) ? data.rows : [];
           FEED.tasks = Array.isArray(data.tasks) ? data.tasks : [];
           FEED.items = Array.isArray(data.items) ? data.items : [];
-          // Default view is fine-grained timeline: continuously append new events.
-          feedMergeTimeline(FEED.items);
 
-          // Populate agent list (stable-ish)
           const agents = [...new Set((FEED.tasks||[]).map(x=>x.agentId).filter(Boolean))].sort();
           if(agentSel){
             const cur = agentSel.value;
@@ -3100,13 +3073,18 @@
           }
 
           if(FEED.selected){
+            if(FEED.selectedType === 'row'){
+              const k = feedRowKey(FEED.selected);
+              const m = (FEED.rows||[]).find(x=> feedRowKey(x)===k);
+              if(m) FEED.selected = m;
+            }
             if(FEED.selectedType === 'task'){
               const m = (FEED.tasks||[]).find(x=>x.id===FEED.selected.id);
               if(m) FEED.selected = m;
             }
             if(FEED.selectedType === 'item'){
               const k = feedItemKey(FEED.selected);
-              const m = (FEED.timeline||[]).find(x=> feedItemKey(x) === k);
+              const m = (FEED.items||[]).find(x=> feedItemKey(x)===k);
               if(m) FEED.selected = m;
             }
           }
@@ -3118,22 +3096,37 @@
       }
     }
 
-    async function feedSummarizeSelectionOrRange(){
-      const btn = document.getElementById('feed-summarize');
-      const rangeSel = document.getElementById('feed-range');
-      if(!btn) return;
+    async function feedSummarize(scope){
+      const btn60 = document.getElementById('feed-sum-60m');
+      const btnSince = document.getElementById('feed-sum-since');
+      const btnSeg = document.getElementById('feed-sum-seg');
 
-      const rangeMs = rangeSel ? Number(rangeSel.value||'3600000') : 3600000;
-      const body = FEED.selected && FEED.selected.sessionKey
-        ? {sessionKey: FEED.selected.sessionKey, maxItems: 300}
-        : {sinceMs: Date.now() - Math.max(60_000, rangeMs), maxItems: 300};
+      const disableAll = (v)=>{
+        for(const b of [btn60, btnSince, btnSeg]){
+          if(!b) continue;
+          b.disabled = !!v;
+        }
+      };
+
+      let body = {maxItems: 320};
+      const now = Date.now();
+
+      if(scope === 'seg'){
+        const r = (FEED.selectedType==='row') ? FEED.selected : null;
+        if(!(r && r.sessionKey && r.segment)) return;
+        body = Object.assign(body, { sessionKey: r.sessionKey, startMs: r.segment.startTs, endMs: r.segment.endTs });
+      }else if(scope === 'since'){
+        const since = (typeof FEED.lastViewedMs === 'number' && isFinite(FEED.lastViewedMs)) ? FEED.lastViewedMs : (now - 60*60*1000);
+        body = Object.assign(body, { sinceMs: since });
+      }else{
+        body = Object.assign(body, { sinceMs: now - 60*60*1000 });
+      }
 
       FEED.summaryText = 'Summarizing…';
-      FEED.summaryMeta = { at: Date.now(), scope: FEED.selected && FEED.selected.sessionKey ? 'selection' : 'range' };
+      FEED.summaryMeta = { at: Date.now(), scope };
       feedRender();
 
-      btn.textContent = 'Summarizing…';
-      btn.disabled = true;
+      disableAll(true);
       try{
         const r = await apiPostJson('./api/lobster-room', { op: 'feedSummarize', ...body });
         if(r && r.ok){
@@ -3146,8 +3139,7 @@
       }catch{
         FEED.summaryText = 'Summary failed.';
       }finally{
-        btn.textContent = 'Summarize';
-        btn.disabled = false;
+        disableAll(false);
         feedRender();
       }
     }
@@ -3157,23 +3149,40 @@
       const btnOpen = document.getElementById('btn-feed');
       const btnToggle = document.getElementById('feed-toggle');
       const btnClear = document.getElementById('feed-clear');
-      const viewSel = document.getElementById('feed-view');
       const agentSel = document.getElementById('feed-agent');
       const expandBtn = document.getElementById('feed-expand');
-      const summarizeBtn = document.getElementById('feed-summarize');
       const devSpawnBtn = document.getElementById('feed-dev-spawn');
 
-      // Dev-only helper for QA and layout sanity checks.
-      // Enabled only when the UI is loaded with ?dev=1.
+      const btn60 = document.getElementById('feed-sum-60m');
+      const btnSince = document.getElementById('feed-sum-since');
+      const btnSeg = document.getElementById('feed-sum-seg');
+      const rawToggle = document.getElementById('feed-raw-toggle');
+
       const devEnabled = (()=>{
         try{ return new URLSearchParams(location.search).get('dev') === '1'; }catch{ return false; }
       })();
+
+      function loadLastViewed(){
+        try{
+          const v = Number(localStorage.getItem('lobsterRoom.feed.lastViewedMs') || '0');
+          return (isFinite(v) && v>0) ? v : null;
+        }catch{ return null; }
+      }
+      function saveLastViewed(ms){
+        try{ localStorage.setItem('lobsterRoom.feed.lastViewedMs', String(ms||Date.now())); }catch{}
+      }
 
       function setShow(v){
         FEED.show = !!v;
         if(panel) panel.classList.toggle('show', FEED.show);
 
-        // Runtime layout sanity check for QA.
+        if(FEED.show){
+          FEED.lastViewedMs = loadLastViewed();
+          feedPollOnce();
+        }else{
+          saveLastViewed(Date.now());
+        }
+
         if(FEED.show && devEnabled && panel){
           try{
             const r = panel.getBoundingClientRect();
@@ -3182,23 +3191,29 @@
         }
       }
 
-      if(btnOpen) btnOpen.addEventListener('click', ()=> setShow(!FEED.show));
-      if(btnToggle) btnToggle.addEventListener('click', ()=> setShow(false));
-      if(btnClear) btnClear.addEventListener('click', ()=>{ FEED.selected = null; FEED.selectedType=''; FEED.showRaw=false; feedRender(); });
-      if(viewSel){
-        viewSel.value = FEED.view;
-        viewSel.addEventListener('change', ()=>{
-          const v = String(viewSel.value||'timeline');
-          FEED.view = (v==='tasks') ? 'tasks' : 'timeline';
+      if(rawToggle){
+        try{ FEED.showRawList = localStorage.getItem('lobsterRoom.feed.showRaw') === '1'; }catch{}
+        rawToggle.checked = !!FEED.showRawList;
+        rawToggle.addEventListener('change', ()=>{
+          FEED.showRawList = !!rawToggle.checked;
+          try{ localStorage.setItem('lobsterRoom.feed.showRaw', FEED.showRawList?'1':'0'); }catch{}
           FEED.selected = null;
           FEED.selectedType = '';
-          FEED.showRaw = false;
+          FEED.showRawDetail = false;
           feedRender();
         });
       }
+
+      if(btnOpen) btnOpen.addEventListener('click', ()=> setShow(!FEED.show));
+      if(btnToggle) btnToggle.addEventListener('click', ()=> setShow(false));
+      if(btnClear) btnClear.addEventListener('click', ()=>{ FEED.selected = null; FEED.selectedType=''; FEED.showRawDetail=false; feedRender(); });
       if(agentSel) agentSel.addEventListener('change', ()=> feedPollOnce());
-      if(expandBtn) expandBtn.addEventListener('click', ()=>{ FEED.showRaw = !FEED.showRaw; feedRender(); });
-      if(summarizeBtn) summarizeBtn.addEventListener('click', ()=> feedSummarizeSelectionOrRange());
+      if(expandBtn) expandBtn.addEventListener('click', ()=>{ FEED.showRawDetail = !FEED.showRawDetail; feedRender(); });
+
+      if(btn60) btn60.addEventListener('click', ()=> feedSummarize('60m'));
+      if(btnSince) btnSince.addEventListener('click', ()=> feedSummarize('since'));
+      if(btnSeg) btnSeg.addEventListener('click', ()=> feedSummarize('seg'));
+
       if(devSpawnBtn) devSpawnBtn.style.display = devEnabled ? '' : 'none';
       if(devSpawnBtn && devEnabled){
         devSpawnBtn.addEventListener('click', async ()=>{
@@ -3223,7 +3238,6 @@
               return;
             }
 
-            // Poll immediately so QA sees a second agent/task.
             await feedPollOnce();
           }catch(e){
             FEED.devSpawnStatus = ('dev spawn failed: ' + String(e && e.message ? e.message : e)).slice(0, 140);
