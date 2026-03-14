@@ -1,5 +1,5 @@
     // UI build stamp (bump this when you deploy so we can confirm which frontend is running).
-    const UI_VERSION = 'feed-v3-20260314.2';
+    const UI_VERSION = 'feed-v3-20260314.3';
 
     const STATES = [
       {key:'reply', cls:'b-reply', label:'💬 replying'},
@@ -35,8 +35,9 @@
       if(!r.ok) throw new Error('HTTP ' + r.status);
       return await r.json();
     }
-    async function apiPostJson(path, body){
-      const r = await fetch(path, {method:'POST', headers:{'content-type':'application/json'}, body: JSON.stringify(body)});
+    async function apiPostJson(path, body, opts){
+      const o = opts || {};
+      const r = await fetch(path, {method:'POST', headers:{'content-type':'application/json'}, body: JSON.stringify(body), signal: o.signal});
       if(!r.ok) throw new Error('HTTP ' + r.status);
       return await r.json().catch(()=>({ok:true}));
     }
@@ -2243,6 +2244,9 @@
       summaryText: '',
       summaryMeta: null,
       devSpawnStatus: '',
+      pollStatus: '',
+      _pollInFlight: false,
+      _lastOkMs: 0,
 
       // "since last viewed" anchor (set when panel opens; persisted when panel closes)
       lastViewedMs: null,
@@ -2358,102 +2362,61 @@
       if(!listEl) return;
 
       const rows = Array.isArray(FEED.rows) ? FEED.rows : [];
-      const items = Array.isArray(FEED.items) ? FEED.items : [];
 
       if(statusEl){
-        const base = FEED.showRawList ? (items.length ? (String(items.length) + ' raw events') : '—')
-          : (rows.length ? (String(rows.length) + ' rows') : '—');
-        const extra = (FEED.devSpawnStatus || '').trim();
+        const base = rows.length ? (String(rows.length) + ' rows') : '—';
+        const extra = [(FEED.pollStatus||'').trim(), (FEED.devSpawnStatus||'').trim()].filter(Boolean).join(' · ');
         statusEl.textContent = extra ? (base + ' · ' + extra) : base;
       }
 
       if(sumBody){
         const txt = (FEED.summaryText || '').trim();
-        sumBody.textContent = txt ? txt : '(no summary yet)';
+        sumBody.textContent = txt ? txt : '';
       }
 
       listEl.innerHTML = '';
 
-      if(FEED.showRawList){
-        for(const it of items){
-          const row = document.createElement('div');
-          const isSel = (FEED.selectedType === 'item' && FEED.selected && feedItemKey(FEED.selected) === feedItemKey(it));
-          row.className = 'feed-item' + (isSel ? ' sel' : '');
-          row.addEventListener('click', ()=>{ FEED.selected = it; FEED.selectedType = 'item'; FEED.showRawDetail=false; feedRender(); });
+      const fmtWhat = (r)=>{
+        if(!r || typeof r !== 'object') return '(event)';
+        let txt = String(r.what || r.plain || r.action || '').trim();
+        if(!txt) txt = '(event)';
+        if(r.rowType === 'fold') txt = 'tools · ' + txt;
+        return txt;
+      };
 
-          const time = document.createElement('div');
-          time.className = 'feed-time';
-          time.textContent = feedTime(it.ts);
+      for(const r of rows){
+        const row = document.createElement('div');
+        const isSel = (FEED.selectedType === 'row' && FEED.selected && feedRowKey(FEED.selected) === feedRowKey(r));
+        const kind = String(r && (r.kind||'') || '');
+        const isErr = (kind === 'error') || (r && r.segment && r.segment.status === 'error');
+        row.className = 'feed-item feed-row-v3' + (isSel ? ' sel' : '') + (r.rowType==='fold' ? ' fold' : '') + (isErr ? ' err' : '');
+        row.addEventListener('click', ()=>{ FEED.selected = r; FEED.selectedType = 'row'; FEED.showRawDetail=false; feedRender(); });
 
-          const badge = document.createElement('div');
-          badge.className = 'feed-badge';
-          const k = String(it.kind || '');
-          const tn = (it.toolName ? String(it.toolName) : '');
-          badge.textContent = tn ? (k + ':' + tn) : k;
+        const main = document.createElement('div');
+        main.className = 'feed-main';
 
-          const main = document.createElement('div');
-          main.className = 'feed-main';
+        const line1 = document.createElement('div');
+        line1.className = 'feed-v3-line';
 
-          const line1 = document.createElement('div');
-          line1.className = 'feed-line';
-          const agent = document.createElement('div');
-          agent.className = 'feed-agent';
-          agent.textContent = it.agentId || '—';
-          const preview = document.createElement('div');
-          preview.className = 'feed-preview';
-          preview.textContent = (it.preview || '') ? String(it.preview) : (k || '(event)');
-          line1.appendChild(agent);
-          line1.appendChild(preview);
-          main.appendChild(line1);
+        const time = document.createElement('span');
+        time.className = 'feed-v3-time';
+        time.textContent = feedTime(r.ts);
 
-          row.appendChild(time);
-          row.appendChild(badge);
-          row.appendChild(main);
-          listEl.appendChild(row);
-        }
-      }else{
-        const fmtWhat = (r)=>{
-          if(!r || typeof r !== 'object') return '(event)';
-          let txt = String(r.what || r.plain || r.action || '').trim();
-          if(!txt) txt = '(event)';
-          if(r.rowType === 'fold') txt = 'tools · ' + txt;
-          return txt;
-        };
+        const agent = document.createElement('span');
+        agent.className = 'feed-v3-agent';
+        agent.textContent = r.agentId ? ('@' + r.agentId) : '—';
 
-        for(const r of rows){
-          const row = document.createElement('div');
-          const isSel = (FEED.selectedType === 'row' && FEED.selected && feedRowKey(FEED.selected) === feedRowKey(r));
-          const kind = String(r && (r.kind||'') || '');
-          const isErr = (kind === 'error') || (r && r.segment && r.segment.status === 'error');
-          row.className = 'feed-item feed-row-v3' + (isSel ? ' sel' : '') + (r.rowType==='fold' ? ' fold' : '') + (isErr ? ' err' : '');
-          row.addEventListener('click', ()=>{ FEED.selected = r; FEED.selectedType = 'row'; FEED.showRawDetail=false; feedRender(); });
+        const what = document.createElement('span');
+        what.className = 'feed-v3-what';
+        what.textContent = fmtWhat(r);
 
-          const main = document.createElement('div');
-          main.className = 'feed-main';
+        line1.appendChild(time);
+        line1.appendChild(agent);
+        line1.appendChild(what);
+        main.appendChild(line1);
 
-          const line1 = document.createElement('div');
-          line1.className = 'feed-v3-line';
-
-          const time = document.createElement('span');
-          time.className = 'feed-v3-time';
-          time.textContent = feedTime(r.ts);
-
-          const agent = document.createElement('span');
-          agent.className = 'feed-v3-agent';
-          agent.textContent = r.agentId ? ('@' + r.agentId) : '—';
-
-          const what = document.createElement('span');
-          what.className = 'feed-v3-what';
-          what.textContent = fmtWhat(r);
-
-          line1.appendChild(time);
-          line1.appendChild(agent);
-          line1.appendChild(what);
-          main.appendChild(line1);
-
-          row.appendChild(main);
-          listEl.appendChild(row);
-        }
+        row.appendChild(main);
+        listEl.appendChild(row);
       }
 
       if(FEED.selected){
@@ -2544,17 +2507,24 @@
     }
 
     async function feedPollOnce(){
+      if(FEED._pollInFlight) return;
+      FEED._pollInFlight = true;
+
       const agentSel = document.getElementById('feed-agent');
       const agentId = agentSel ? agentSel.value : '';
+
+      const ctl = (typeof AbortController !== 'undefined') ? new AbortController() : null;
+      const t0 = Date.now();
+      const timeout = setTimeout(()=>{ try{ ctl && ctl.abort(); }catch{} }, 4500);
 
       try{
         const data = await apiPostJson('./api/lobster-room', {
           op: 'feedGet',
           limit: 400,
           agentId: agentId || '',
-          includeRaw: true,
+          includeRaw: false,
           version: 3,
-        });
+        }, { signal: ctl ? ctl.signal : undefined });
 
         if(data && data.ok){
           if(typeof FEED._agentFilter !== 'string') FEED._agentFilter = '';
@@ -2568,8 +2538,9 @@
           FEED.latest = data.latest || null;
           FEED.rows = Array.isArray(data.rows) ? data.rows : [];
           FEED.tasks = Array.isArray(data.tasks) ? data.tasks : [];
-          FEED.items = Array.isArray(data.items) ? data.items : [];
+          FEED.items = [];
 
+          // Build filter list from tasks; always include current selection.
           const agents = [...new Set((FEED.tasks||[]).map(x=>x.agentId).filter(Boolean))].sort();
           if(agentSel){
             const cur = agentSel.value;
@@ -2581,30 +2552,29 @@
               o.textContent = a ? a : 'All agents';
               agentSel.appendChild(o);
             }
-            agentSel.value = cur;
+            agentSel.value = opts.includes(cur) ? cur : '';
           }
 
-          if(FEED.selected){
-            if(FEED.selectedType === 'row'){
-              const k = feedRowKey(FEED.selected);
-              const m = (FEED.rows||[]).find(x=> feedRowKey(x)===k);
-              if(m) FEED.selected = m;
-            }
-            if(FEED.selectedType === 'task'){
-              const m = (FEED.tasks||[]).find(x=>x.id===FEED.selected.id);
-              if(m) FEED.selected = m;
-            }
-            if(FEED.selectedType === 'item'){
-              const k = feedItemKey(FEED.selected);
-              const m = (FEED.items||[]).find(x=> feedItemKey(x)===k);
-              if(m) FEED.selected = m;
-            }
+          if(FEED.selected && FEED.selectedType === 'row'){
+            const k = feedRowKey(FEED.selected);
+            const m = (FEED.rows||[]).find(x=> feedRowKey(x)===k);
+            if(m) FEED.selected = m;
           }
 
+          FEED._lastOkMs = Date.now();
+          const dt = Date.now() - t0;
+          FEED.pollStatus = 'live · ' + String(Math.round(dt)) + 'ms';
           feedRender();
         }
-      }catch{
-        // ignore
+      }catch(e){
+        const msg = String(e && e.name ? e.name : '') === 'AbortError' ? 'timeout' : 'disconnected';
+        const age = FEED._lastOkMs ? (Date.now() - FEED._lastOkMs) : 0;
+        const ageTxt = FEED._lastOkMs ? (' · last ok ' + String(Math.round(age/1000)) + 's ago') : '';
+        FEED.pollStatus = msg + ageTxt;
+        feedRender();
+      }finally{
+        clearTimeout(timeout);
+        FEED._pollInFlight = false;
       }
     }
 
@@ -2669,7 +2639,6 @@
       const btn60 = document.getElementById('feed-sum-60m');
       const btnSince = document.getElementById('feed-sum-since');
       const btnSeg = document.getElementById('feed-sum-seg');
-      const rawToggle = document.getElementById('feed-raw-toggle');
 
       const devEnabled = (()=>{
         try{ return new URLSearchParams(location.search).get('dev') === '1'; }catch{ return false; }
@@ -2704,18 +2673,8 @@
         }
       }
 
-      if(rawToggle){
-        try{ FEED.showRawList = localStorage.getItem('lobsterRoom.feed.showRaw') === '1'; }catch{}
-        rawToggle.checked = !!FEED.showRawList;
-        rawToggle.addEventListener('change', ()=>{
-          FEED.showRawList = !!rawToggle.checked;
-          try{ localStorage.setItem('lobsterRoom.feed.showRaw', FEED.showRawList?'1':'0'); }catch{}
-          FEED.selected = null;
-          FEED.selectedType = '';
-          FEED.showRawDetail = false;
-          feedRender();
-        });
-      }
+      // raw list toggle removed (always human-readable rows)
+      FEED.showRawList = false;
 
       if(btnOpen) btnOpen.addEventListener('click', ()=> setShow(!FEED.show));
       if(btnToggle) btnToggle.addEventListener('click', ()=> setShow(false));
