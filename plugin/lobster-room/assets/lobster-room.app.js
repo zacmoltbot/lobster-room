@@ -1,5 +1,5 @@
     // UI build stamp (bump this when you deploy so we can confirm which frontend is running).
-    const UI_VERSION = 'feed-v3-20260314.4';
+    const UI_VERSION = 'feed-v3-20260314.5';
 
     const STATES = [
       {key:'reply', cls:'b-reply', label:'💬 replying'},
@@ -2386,11 +2386,9 @@
 
       for(const r of rows){
         const row = document.createElement('div');
-        const isSel = (FEED.selectedType === 'row' && FEED.selected && feedRowKey(FEED.selected) === feedRowKey(r));
         const kind = String(r && (r.kind||'') || '');
-        const isErr = (kind === 'error') || (r && r.segment && r.segment.status === 'error');
-        row.className = 'feed-item feed-row-v3' + (isSel ? ' sel' : '') + (r.rowType==='fold' ? ' fold' : '') + (isErr ? ' err' : '');
-        row.addEventListener('click', ()=>{ FEED.selected = r; FEED.selectedType = 'row'; FEED.showRawDetail=false; feedRender(); });
+        const isErr = (kind === 'error');
+        row.className = 'feed-item feed-row-v3' + (isErr ? ' err' : '');
 
         const main = document.createElement('div');
         main.className = 'feed-main';
@@ -2419,91 +2417,13 @@
         listEl.appendChild(row);
       }
 
-      if(FEED.selected){
-        detailEl.style.display = 'block';
-
-        let seg = null;
-        if(FEED.selectedType === 'row' && FEED.selected && FEED.selected.rowType === 'fold' && FEED.selected.segment){
-          seg = FEED.selected.segment;
-        }
-        if(sumSegBtn) sumSegBtn.style.display = seg ? '' : 'none';
-
-        if(FEED.selectedType === 'row'){
-          const base = {
-            id: FEED.selected.id,
-            ts: FEED.selected.ts,
-            rowType: FEED.selected.rowType,
-            kind: FEED.selected.kind,
-            agentId: FEED.selected.agentId,
-            sessionKey: FEED.selected.sessionKey,
-            what: FEED.selected.what,
-            plain: FEED.selected.plain,
-            action: FEED.selected.action,
-            segment: FEED.selected.segment || null,
-          };
-
-          let payload = base;
-          if(FEED.showRawDetail && FEED.selected.sessionKey && FEED.selected.segment){
-            const raw = feedFindTaskItemsBySessionKey(FEED.selected.sessionKey);
-            const a = Number(FEED.selected.segment.startTs||0);
-            const b = Number(FEED.selected.segment.endTs||0);
-            const picked = raw.filter(x=> (x.ts||0) >= a && (x.ts||0) <= b);
-            payload = Object.assign({}, base, { rawItems: picked });
-          }
-
-          detailEl.textContent = JSON.stringify(feedScrubValue(payload, 'payload'), null, 2);
-
-          if(expandBtn){
-            const canExpand = !!(FEED.selected.sessionKey && FEED.selected.segment);
-            expandBtn.style.display = canExpand ? '' : 'none';
-            expandBtn.textContent = FEED.showRawDetail ? 'Hide raw (scrubbed)' : 'Show raw (scrubbed)';
-          }
-        }else if(FEED.selectedType === 'item'){
-          const base = {
-            ts: FEED.selected.ts,
-            kind: FEED.selected.kind,
-            agentId: FEED.selected.agentId,
-            sessionKey: FEED.selected.sessionKey,
-            toolName: FEED.selected.toolName,
-            durationMs: FEED.selected.durationMs,
-            success: FEED.selected.success,
-            error: FEED.selected.error,
-            preview: FEED.selected.preview,
-          };
-          const payload = FEED.showRawDetail ? FEED.selected : base;
-          detailEl.textContent = JSON.stringify(feedScrubValue(payload, 'payload'), null, 2);
-
-          if(expandBtn){
-            expandBtn.style.display = '';
-            expandBtn.textContent = FEED.showRawDetail ? 'Hide raw (scrubbed)' : 'Show raw (scrubbed)';
-          }
-        }else if(FEED.selectedType === 'task'){
-          const payload = {
-            id: FEED.selected.id,
-            sessionKey: FEED.selected.sessionKey,
-            agentId: FEED.selected.agentId,
-            status: FEED.selected.status,
-            startTs: FEED.selected.startTs,
-            endTs: FEED.selected.endTs,
-            title: FEED.selected.title,
-            summary: FEED.selected.summary,
-            items: (FEED.showRawDetail && Array.isArray(FEED.selected.items)) ? FEED.selected.items : undefined,
-          };
-          detailEl.textContent = JSON.stringify(feedScrubValue(payload, 'payload'), null, 2);
-
-          if(expandBtn){
-            expandBtn.style.display = Array.isArray(FEED.selected.items) ? '' : 'none';
-            expandBtn.textContent = FEED.showRawDetail ? 'Hide raw (scrubbed)' : 'Show raw (scrubbed)';
-          }
-        }else{
-          detailEl.textContent = JSON.stringify(feedScrubValue(FEED.selected, 'payload'), null, 2);
-          if(expandBtn) expandBtn.style.display='none';
-        }
-      }else{
-        detailEl.style.display = 'none';
-        if(expandBtn) expandBtn.style.display='none';
-        if(sumSegBtn) sumSegBtn.style.display='none';
-      }
+      // UX: no row selection / no detail panel (keep the feed purely as a readable timeline).
+      if(detailEl) detailEl.style.display = 'none';
+      if(expandBtn) expandBtn.style.display = 'none';
+      if(sumSegBtn) sumSegBtn.style.display = 'none';
+      FEED.selected = null;
+      FEED.selectedType = '';
+      FEED.showRawDetail = false;
     }
 
     async function feedPollOnce(){

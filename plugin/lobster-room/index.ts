@@ -952,13 +952,14 @@ export default {
       return tasks.sort((a, b) => b.startTs - a.startTs);
     };
 
-    // --- Message Feed v3 (human-friendly rows + folded low-level ops) ---
+    // --- Message Feed v3 (human-friendly rows; timeline style) ---
     type FeedRowV3 = {
       id: string;
       ts: number;
       agentId: string;
       sessionKey?: string;
-      rowType: "important" | "fold";
+      // Keep legacy rowType field for older clients; v3 now uses only timeline rows.
+      rowType: "timeline";
       kind?: FeedKind | "error" | "sessions_spawn";
 
       // v3 UX: human-friendly, single-line text.
@@ -966,75 +967,51 @@ export default {
       what: string;
       plain?: string;
       action?: string;
-
-      segment?: {
-        startTs: number;
-        endTs: number;
-        status: FeedTaskStatus;
-        doneOps: number;
-        totalOps: number;
-        byTool: Record<string, number>;
-      };
     };
 
-    const isImportantFeedItem = (it: FeedItem): boolean => {
-      if (it.kind === "before_agent_start") return true;
-      if (it.kind === "agent_end") return true;
-      if (it.kind === "message_sent") return true;
-      if (it.kind === "before_tool_call" && it.toolName === "sessions_spawn") return true;
-      if (it.success === false) return true;
-      if (typeof it.error === "string" && it.error.trim()) return true;
-      return false;
-    };
-
-    const importantActionSentence = (it: FeedItem): { kind: FeedRowV3["kind"]; action: string } => {
+    const rowSentence = (it: FeedItem): { kind: FeedRowV3["kind"]; what: string } => {
       // IMPORTANT: keep this human-friendly and content-free.
-      if (it.kind === "before_agent_start") return { kind: it.kind, action: "started" };
+      const tn = (it.toolName || "tool").trim();
+
+      if (it.kind === "before_agent_start") return { kind: it.kind, what: "started" };
       if (it.kind === "agent_end") {
-        if (it.success === false || it.error) return { kind: "error", action: "ended (error)" };
-        return { kind: it.kind, action: "ended" };
+        if (it.success === false || it.error) return { kind: "error", what: "ended (error)" };
+        return { kind: it.kind, what: "ended" };
       }
+
+      if (it.kind === "before_tool_call") {
+        if (tn === "sessions_spawn") {
+          const child = typeof (it.details as any)?.spawnAgentId === "string" ? String((it.details as any).spawnAgentId) : "";
+          const label = typeof (it.details as any)?.label === "string" ? String((it.details as any).label) : "";
+          const task = typeof (it.details as any)?.task === "string" ? String((it.details as any).task) : "";
+          const desc = (label || task).trim();
+          const tail = desc ? ` — ${redactSecretsInText(desc).slice(0, 120)}` : "";
+          return { kind: "sessions_spawn", what: `spawned sub-agent${child ? ` @${child}` : ""}${tail}`.trim() };
+        }
+        return { kind: it.kind, what: `${tn} started` };
+      }
+
+      if (it.kind === "after_tool_call") {
+        const ms = typeof it.durationMs === "number" ? Math.round(it.durationMs) : null;
+        const dur = ms !== null ? ` · ${ms}ms` : "";
+        if (it.success === false || it.error) return { kind: "error", what: `${tn} failed${dur}`.trim() };
+        return { kind: it.kind, what: `${tn} done${dur}`.trim() };
+      }
+
+      if (it.kind === "tool_result_persist") return { kind: it.kind, what: "tool result persisted" };
+
+      if (it.kind === "message_sending") return { kind: it.kind, what: "sending message" };
       if (it.kind === "message_sent") {
-        if (it.success === false) return { kind: "error", action: "message failed to send" };
-        return { kind: it.kind, action: "sent a message" };
+        if (it.success === false) return { kind: "error", what: "message failed to send" };
+        return { kind: it.kind, what: "sent a message" };
       }
-      if (it.kind === "before_tool_call" && it.toolName === "sessions_spawn") {
-        const child = typeof (it.details as any)?.spawnAgentId === "string" ? String((it.details as any).spawnAgentId) : "";
-        const label = typeof (it.details as any)?.label === "string" ? String((it.details as any).label) : "";
-        const task = typeof (it.details as any)?.task === "string" ? String((it.details as any).task) : "";
-        const what = (label || task).trim();
-        const tail = what ? ` — ${redactSecretsInText(what).slice(0, 120)}` : "";
-        return { kind: "sessions_spawn", action: `spawned sub-agent${child ? ` @${child}` : ""}${tail}`.trim() };
-      }
+
       if (it.success === false || it.error) {
-        const e = it.error ? redactSecretsInText(it.error).slice(0, 140) : "";
-        return { kind: "error", action: e ? `error: ${e}` : "error" };
+        const e = it.error ? redactSecretsInText(it.error).slice(0, 120) : "";
+        return { kind: "error", what: e ? `error: ${e}` : "error" };
       }
-      return { kind: it.kind, action: feedPreview(it) };
-    };
 
-    const foldSentence = (seg: FeedRowV3["segment"]): string => {
-      if (!seg) return "";
-
-      const parts: string[] = [];
-      const st = seg.status;
-      const done = Math.max(0, seg.doneOps | 0);
-      const total = Math.max(done, seg.totalOps | 0);
-      const opPart = total ? `${done}/${total} ops` : "ops";
-
-      // tool breakdown (only show a few; stable order by count desc then name)
-      const tools = Object.entries(seg.byTool || {})
-        .filter(([, n]) => (n | 0) > 0)
-        .sort((a, b) => (b[1] - a[1]) || a[0].localeCompare(b[0]))
-        .slice(0, 4)
-        .map(([k, n]) => `${k} ${n}`);
-
-      if (st === "running") parts.push(`in progress · ${opPart}`);
-      else if (st === "error") parts.push(`error · ${opPart}`);
-      else parts.push(`${opPart}`);
-
-      if (tools.length) parts.push(`(${tools.join(" / ")})`);
-      return parts.join(" ").trim();
+      return { kind: it.kind, what: it.kind };
     };
 
     const buildFeedV3Rows = (items: FeedItem[]): FeedRowV3[] => {
@@ -1047,77 +1024,26 @@ export default {
         const raw = Array.isArray(task.items) ? task.items.slice().sort((a, b) => a.ts - b.ts) : [];
         if (!raw.length) continue;
 
-        // Split into segments by important items.
-        let buf: FeedItem[] = [];
-
-        const flushBuf = () => {
-          const segItems = buf.slice();
-          buf = [];
-          if (!segItems.length) return;
-
-          // Count tool ops by before/after.
-          const before = segItems.filter((x) => x.kind === "before_tool_call");
-          const after = segItems.filter((x) => x.kind === "after_tool_call");
-          const totalOps = before.length;
-          const doneOps = Math.min(totalOps, after.length);
-
-          const byTool: Record<string, number> = {};
-          for (const it of before) {
-            const tn = (it.toolName || "tool").trim();
-            byTool[tn] = (byTool[tn] || 0) + 1;
-          }
-          // Also count persist-only events if we have no before_tool_call.
-          if (!totalOps) {
-            const pers = segItems.filter((x) => x.kind === "tool_result_persist").length;
-            if (pers) byTool.persist = pers;
-          }
-
-          const startTs = segItems[0]?.ts || task.startTs;
-          const endTs = segItems[segItems.length - 1]?.ts || startTs;
-          const id = `${sessionKey || task.id}:seg:${startTs}:${endTs}`;
-          const what = foldSentence({ startTs, endTs, status: task.status, doneOps, totalOps, byTool });
+        for (const it of raw) {
+          const s = rowSentence(it);
+          const who = it.agentId || agentId;
+          const id = `${sessionKey || task.id}:row:${it.ts}:${String(s.kind || it.kind)}:${it.toolName || ""}`;
+          const what = s.what;
           out.push({
             id,
-            ts: endTs,
-            agentId,
+            ts: it.ts,
+            agentId: who,
             sessionKey,
-            rowType: "fold",
-            kind: "before_tool_call",
+            rowType: "timeline",
+            kind: s.kind,
             what,
             plain: what,
             action: what,
-            segment: { startTs, endTs, status: task.status, doneOps, totalOps, byTool },
           });
-        };
-
-        for (const it of raw) {
-          if (isImportantFeedItem(it)) {
-            // Fold whatever low-level ops we collected before this important event.
-            flushBuf();
-
-            const info = importantActionSentence(it);
-            const id = `${sessionKey || task.id}:imp:${it.ts}:${info.kind}:${it.toolName || ""}`;
-            const what = info.action;
-            out.push({
-              id,
-              ts: it.ts,
-              agentId: it.agentId || agentId,
-              sessionKey,
-              rowType: "important",
-              kind: info.kind,
-              what,
-              plain: what,
-              action: what,
-            });
-          } else {
-            buf.push(it);
-          }
         }
-
-        // Tail low-level segment.
-        flushBuf();
       }
 
+      // Timeline newest-first (UI shows latest at top).
       return out.sort((a, b) => b.ts - a.ts);
     };
 
