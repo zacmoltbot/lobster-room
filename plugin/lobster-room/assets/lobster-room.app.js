@@ -1,5 +1,5 @@
     // UI build stamp (bump this when you deploy so we can confirm which frontend is running).
-    const UI_VERSION = 'feed-v3-20260314.5';
+    const UI_VERSION = 'feed-v3-20260314.6.1';
 
     const STATES = [
       {key:'reply', cls:'b-reply', label:'💬 replying'},
@@ -2582,10 +2582,16 @@
       const panel = document.getElementById('feed-panel');
       const btnOpen = document.getElementById('btn-feed');
       const btnToggle = document.getElementById('feed-toggle');
-      const btnClear = document.getElementById('feed-clear');
       const agentSel = document.getElementById('feed-agent');
-      const expandBtn = document.getElementById('feed-expand');
       const adv = document.getElementById('feed-advanced');
+
+      function setShow(v){
+        FEED.show = !!v;
+        if(panel) panel.classList.toggle('show', FEED.show);
+        if(FEED.show){
+          feedPollOnce();
+        }
+      }
 
       // Persisted toggle
       try{
@@ -2600,6 +2606,10 @@
           feedRender();
         });
       }
+
+      if(btnOpen) btnOpen.addEventListener('click', ()=> setShow(!FEED.show));
+      if(btnToggle) btnToggle.addEventListener('click', ()=> setShow(false));
+      if(agentSel) agentSel.addEventListener('change', ()=> feedPollOnce());
 
       setShow(false);
       setInterval(()=>{ if(FEED.show) feedPollOnce(); }, FEED.pollMs);
