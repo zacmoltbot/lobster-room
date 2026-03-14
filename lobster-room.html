@@ -24,7 +24,7 @@
     .room{position:relative;border:1px solid var(--border);background:var(--surface);border-radius:18px;min-height:720px;overflow:hidden}
 
     /* Room + Feed dock layout */
-    .room-row{display:flex;gap:12px;align-items:stretch;width:100%}
+    .room-row{display:flex;gap:12px;align-items:stretch;width:100%;flex-wrap:wrap}
     .room-col{flex:1 1 0;min-width:0;display:flex}
     .room-col > .room{flex:1 1 auto}
 
@@ -190,7 +190,7 @@
     .b-wait .b-dot{background:var(--yellow)}
     .b-err .b-dot{background:var(--red)}
 
-    .footer{margin-top:10px;color:var(--dim);font-size:12px;display:flex;justify-content:space-between;gap:10px;flex-wrap:wrap}
+    .footer{margin-top:10px;color:var(--dim);font-size:12px;display:flex;justify-content:space-between;gap:10px;flex-wrap:wrap;flex:0 0 100%;width:100%}
     code{font-family:ui-monospace,SFMono-Regular,Menlo,Monaco,Consolas,monospace;font-size:11px;color:var(--muted)}
 
     /* Settings modal */
