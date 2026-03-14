@@ -161,7 +161,8 @@
     .feed-title{font-weight:800;letter-spacing:.2px}
     .feed-body{flex:1 1 auto;min-height:0;padding:10px 12px;display:flex;flex-direction:column;gap:10px;overflow:auto}
     .feed-filters{display:flex;gap:8px;flex-wrap:wrap;align-items:center}
-    .feed-filters select{background:rgba(255,255,255,.04);border:1px solid rgba(255,255,255,.10);color:rgba(255,255,255,.85);border-radius:10px;padding:6px 8px;font-size:12px;outline:none}
+    .feed-filters select{background:rgba(255,255,255,.06);border:1px solid rgba(255,255,255,.14);color:rgba(255,255,255,.90);border-radius:10px;padding:6px 10px;font-size:12px;outline:none}
+    .feed-filters select option{background:#0f1115;color:rgba(255,255,255,.92)}
     .feed-list{flex:1 1 auto;min-height:120px;overflow:auto;border:1px solid rgba(255,255,255,.08);border-radius:10px;background:rgba(0,0,0,.25)}
     .feed-item{display:flex;gap:10px;align-items:flex-start;padding:8px 10px;border-bottom:1px solid rgba(255,255,255,.06);cursor:pointer}
     .feed-item:last-child{border-bottom:0}
@@ -332,21 +333,12 @@
               <option value="">All agents</option>
             </select>
 
-            <button id="feed-sum-60m" class="md-btn" type="button" title="Summarize important activity from the last 60 minutes">Summary: last 60m</button>
-            <button id="feed-sum-since" class="md-btn" type="button" title="Summarize since you last closed the feed panel">Summary: since last viewed</button>
-            <button id="feed-sum-seg" class="md-btn" type="button" style="display:none" title="Summarize the selected folded segment">Summary: this segment</button>
-
             <label class="md-hint" style="display:flex;gap:8px;align-items:center;user-select:none">
               <input id="feed-raw-toggle" type="checkbox" /> Show raw (scrubbed)
             </label>
 
             <span class="md-hint" id="feed-status"></span>
           </div>
-
-          <details id="feed-summary" class="feed-summary" open>
-            <summary>Summary</summary>
-            <div id="feed-summary-body" class="feed-summary-body">(no summary yet)</div>
-          </details>
 
           <div id="feed-list" class="feed-list"></div>
           <div id="feed-detail" class="feed-detail" style="display:none"></div>
@@ -552,6 +544,6 @@
       });
     })();
   </script>
-  <script src="./assets/lobster-room.app.js?v=feed-v3-20260314.1" defer></script>
+  <script src="./assets/lobster-room.app.js?v=feed-v3-20260314.2" defer></script>
 </body>
 </html>
