@@ -124,7 +124,7 @@ function contentTypeByExt(ext: string): string | null {
   return null;
 }
 
-const BUILD_TAG = "feed-v3-20260315.12";
+const BUILD_TAG = "feed-v3-20260315.13";
 
 export default {
   id: "lobster-room",
@@ -832,7 +832,9 @@ export default {
     const FEED_MAX = Math.max(500, Number(api.config?.feedMaxItems) || 0, 600);
     const feedBuf: FeedItem[] = [];
     const FEED_PRESENCE_MIN_MS = Math.max(2000, Number(api.config?.feedPresenceMinMs) || 0);
+    const FEED_HEARTBEAT_MS = Math.max(5000, Number(api.config?.feedPresenceHeartbeatMs) || 0);
     const lastPresenceByAgent = new Map<string, { state: ActivityState; ts: number; toolName?: string }>();
+    const lastFeedByAgent = new Map<string, number>();
 
     // Synthetic feed events for spawned sub-agents (sessions_spawn).
     // The runtime doesn't currently emit feed hooks for child agents unless they use /tools/invoke.
@@ -932,17 +934,27 @@ export default {
 
     const pushFeed = (item: FeedItem) => {
       feedBuf.push(item);
+      if (typeof item.agentId === "string" && item.agentId.trim()) {
+        lastFeedByAgent.set(item.agentId.trim(), item.ts || nowMs());
+      }
       if (feedBuf.length > FEED_MAX) feedBuf.splice(0, feedBuf.length - FEED_MAX);
     };
 
-    const pushPresence = (agentId: string, state: ActivityState, details?: Record<string, unknown> | null) => {
+    const pushPresence = (
+      agentId: string,
+      state: ActivityState,
+      details?: Record<string, unknown> | null,
+      opts?: { force?: boolean; heartbeat?: boolean },
+    ) => {
       const t = nowMs();
       const toolName = typeof (details as any)?.toolName === "string" ? String((details as any).toolName) : undefined;
       const prev = lastPresenceByAgent.get(agentId);
-      if (prev && prev.state === state && (prev.toolName || "") === (toolName || "")) return;
-      if (prev && (t - prev.ts) < FEED_PRESENCE_MIN_MS) return;
+      const force = !!opts?.force;
+      if (!force && prev && prev.state === state && (prev.toolName || "") === (toolName || "")) return;
+      if (!force && prev && (t - prev.ts) < FEED_PRESENCE_MIN_MS) return;
       lastPresenceByAgent.set(agentId, { state, ts: t, toolName });
       const detailPayload: Record<string, unknown> = { state, toolName };
+      if (opts?.heartbeat) detailPayload.heartbeat = true;
       const extra: any = details && typeof details === "object" ? details : null;
       if (extra) {
         if (typeof extra.command === "string" || Array.isArray(extra.command)) detailPayload.command = extra.command;
@@ -1154,23 +1166,23 @@ export default {
     const browserActionLabel = (raw: string): string => {
       const v = String(raw || "").trim().toLowerCase();
       if (!v) return "";
-      if (v === "navigate" || v === "open") return "開啟";
-      if (v === "focus") return "切換分頁";
-      if (v === "close") return "關閉分頁";
-      if (v === "screenshot") return "截圖";
-      if (v === "snapshot") return "擷取快照";
-      if (v === "upload") return "上傳";
-      if (v === "console") return "主控台";
-      if (v === "pdf") return "輸出 PDF";
-      if (v === "click") return "點擊";
-      if (v === "type") return "輸入";
-      if (v === "press") return "按鍵";
-      if (v === "hover") return "滑過";
-      if (v === "drag") return "拖曳";
-      if (v === "select") return "選取";
-      if (v === "fill") return "填寫";
-      if (v === "resize") return "調整大小";
-      if (v === "wait") return "等待";
+      if (v === "navigate" || v === "open") return "Open";
+      if (v === "focus") return "Switch tab";
+      if (v === "close") return "Close tab";
+      if (v === "screenshot") return "Screenshot";
+      if (v === "snapshot") return "Capture snapshot";
+      if (v === "upload") return "Upload";
+      if (v === "console") return "Console";
+      if (v === "pdf") return "Export PDF";
+      if (v === "click") return "Click";
+      if (v === "type") return "Type";
+      if (v === "press") return "Press key";
+      if (v === "hover") return "Hover";
+      if (v === "drag") return "Drag";
+      if (v === "select") return "Select";
+      if (v === "fill") return "Fill";
+      if (v === "resize") return "Resize";
+      if (v === "wait") return "Wait";
       return raw;
     };
 
@@ -1193,33 +1205,33 @@ export default {
             : (typeof d?.request?.kind === "string" ? String(d.request.kind) : ""));
         const verb = browserActionLabel(action);
         const target = browserTarget(d);
-        const detail = target ? `${verb || "操作"}：${target}` : (verb ? verb : "");
-        const tail = detail ? `（${detail}）` : "";
-        return `操作網頁${tail}`;
+        const detail = target ? `${verb || "Action"}: ${target}` : (verb ? verb : "");
+        const tail = detail ? ` (${detail})` : "";
+        return `Browser action${tail}`;
       }
 
       if (tn === "exec") {
         const first = safeCmdSummary(d.command);
         const token = redactLine(first, 80);
         const code = typeof d.exitCode === "number" ? d.exitCode : (typeof d.code === "number" ? d.code : null);
-        const tail = code === null ? "" : `（exit ${code}）`;
-        return token ? `跑指令：${token}${tail}`.trim() : `跑指令${tail}`.trim();
+        const tail = code === null ? "" : ` (exit ${code})`;
+        return token ? `Run command: ${token}${tail}`.trim() : `Run command${tail}`.trim();
       }
 
       if (tn === "read") {
         const p = d.path ?? d.file_path;
         const base = basenameLite(p);
-        return base ? `讀取檔案：${base}` : "讀取檔案";
+        return base ? `Read file: ${base}` : "Read file";
       }
       if (tn === "write") {
         const p = d.path ?? d.file_path;
         const base = basenameLite(p);
-        return base ? `寫入檔案：${base}` : "寫入檔案";
+        return base ? `Write file: ${base}` : "Write file";
       }
       if (tn === "edit") {
         const p = d.path ?? d.file_path;
         const base = basenameLite(p);
-        return base ? `修改檔案：${base}` : "修改檔案";
+        return base ? `Edit file: ${base}` : "Edit file";
       }
 
       if (tn === "sessions_spawn") {
@@ -1228,7 +1240,7 @@ export default {
         const task = typeof d.task === "string" ? String(d.task) : "";
         const desc = redactLine((label || task).trim(), 120);
         const tail = desc ? ` — ${desc}` : "";
-        return `啟動子代理${child ? ` @${child}` : ""}${tail}`.trim();
+        return `Spawn sub-agent${child ? ` @${child}` : ""}${tail}`.trim();
       }
 
       return tn;
@@ -1242,16 +1254,16 @@ export default {
             : (typeof details?.request?.kind === "string" ? String(details.request.kind) : ""));
         const verb = browserActionLabel(action);
         const target = browserTarget(details || {});
-        const detail = target ? `${verb || "操作"}：${target}` : (verb ? verb : "");
-        const tail = detail ? `（${detail}）` : "";
-        return `正在操作網頁${tail}`;
+        const detail = target ? `${verb || "Action"}: ${target}` : (verb ? verb : "");
+        const tail = detail ? ` (${detail})` : "";
+        return `Using browser${tail}`;
       }
       if (tn === "exec") {
         const token = redactLine(safeCmdSummary(details?.command), 80);
-        return token ? `正在跑指令（${token}）` : "正在跑指令";
+        return token ? `Running command (${token})` : "Running command";
       }
-      if (tn) return `正在使用工具（${redactLine(tn, 40)}）`;
-      return "正在使用工具";
+      if (tn) return `Using tool (${redactLine(tn, 40)})`;
+      return "Using tool";
     };
 
     const humanStateLabel = (stRaw: string, details?: any): string => {
@@ -1261,12 +1273,12 @@ export default {
         : stRaw === "idle" ? "idle"
         : stRaw === "error" ? "error"
         : stRaw;
-      if (st === "thinking") return "在思考下一步";
-      if (st === "replying") return "正在回覆訊息";
-      if (st === "idle") return "閒置";
+      if (st === "thinking") return "Thinking";
+      if (st === "replying") return "Replying";
+      if (st === "idle") return "Idle";
       if (st === "tool") return toolStateSummary(details || {});
-      if (st === "error") return "發生錯誤";
-      return st || "狀態更新";
+      if (st === "error") return "Error";
+      return st || "State update";
     };
 
     const rowSentenceHuman = (it: FeedItem): { kind: FeedRowV3["kind"]; what: string } | null => {
@@ -1280,17 +1292,17 @@ export default {
 
       // started/ended rows are rendered at the task level for clearer titles.
 
-      if (it.kind === "message_sending") return { kind: it.kind, what: "正在傳送訊息" };
+      if (it.kind === "message_sending") return { kind: it.kind, what: "Sending message" };
       if (it.kind === "message_sent") {
-        if (it.success === false) return { kind: "error", what: "訊息傳送失敗" };
-        return { kind: it.kind, what: "已送出訊息" };
+        if (it.success === false) return { kind: "error", what: "Message failed" };
+        return { kind: it.kind, what: "Message sent" };
       }
 
       // State changes: show as "idle", "thinking", "tool", "reply", "error".
       if (it.kind === "state") {
         const stRaw = typeof (it.details as any)?.state === "string" ? String((it.details as any).state) : "";
         const label = humanStateLabel(stRaw, it.details || {});
-        return { kind: it.kind, what: stRaw ? `狀態更新：${label}` : "狀態更新" };
+        return { kind: it.kind, what: stRaw ? `State update: ${label}` : "State update" };
       }
 
       // Hide low-signal bookkeeping in default view.
@@ -1301,8 +1313,8 @@ export default {
         const summary = toolHumanSummary(it);
         if (it.kind === "before_tool_call") return { kind: it.kind, what: `${summary}…` };
         // after_tool_call
-        if (it.success === false || it.error) return { kind: "error", what: `${summary}（失敗）` };
-        return { kind: it.kind, what: `${summary}（完成）` };
+        if (it.success === false || it.error) return { kind: "error", what: `${summary} (failed)` };
+        return { kind: it.kind, what: `${summary} (done)` };
       }
 
       // Fallback: omit other raw events in default feed.
@@ -1530,6 +1542,18 @@ export default {
       row.lastEventMs = scheduledAt;
     };
 
+    // Feed heartbeat: keep the timeline advancing while an agent is active.
+    const feedHeartbeatPollMs = Math.max(1000, Math.floor(FEED_HEARTBEAT_MS / 2));
+    setInterval(() => {
+      const t = nowMs();
+      for (const [agentId, row] of activity.entries()) {
+        if (!row || row.state === "idle") continue;
+        const last = lastFeedByAgent.get(agentId) || 0;
+        if (t - last < FEED_HEARTBEAT_MS) continue;
+        pushPresence(agentId, row.state, row.details || null, { force: true, heartbeat: true });
+      }
+    }, feedHeartbeatPollMs);
+
     // Hooks → real runtime state
     const resolveAgentId = (ctx: any): string => {
       const sk = typeof ctx?.sessionKey === "string" ? String(ctx.sessionKey) : "";
@@ -1544,7 +1568,9 @@ export default {
       const agentId = resolveAgentId(ctx);
       api.logger.info("[lobster-room] hook before_agent_start", { buildTag: BUILD_TAG, agentId, sessionKey: ctx?.sessionKey });
       pushEvent("before_agent_start", { agentId, data: { sessionKey: ctx?.sessionKey, messageProvider: ctx?.messageProvider } });
-      pushFeed({ ts: nowMs(), kind: "before_agent_start", agentId, sessionKey: typeof ctx?.sessionKey === "string" ? ctx.sessionKey : undefined });
+      const startTs = nowMs();
+      pushFeed({ ts: startTs, kind: "before_agent_start", agentId, sessionKey: typeof ctx?.sessionKey === "string" ? ctx.sessionKey : undefined });
+      pushPresence(agentId, "thinking", { sessionKey: ctx?.sessionKey, messageProvider: ctx?.messageProvider }, { force: true });
       setState(agentId, "thinking", { sessionKey: ctx?.sessionKey, messageProvider: ctx?.messageProvider });
     });
 
