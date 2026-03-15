@@ -124,7 +124,7 @@ function contentTypeByExt(ext: string): string | null {
   return null;
 }
 
-const BUILD_TAG = "feed-v3-20260315.13";
+const BUILD_TAG = "feed-v3-20260315.14";
 
 export default {
   id: "lobster-room",
@@ -1118,13 +1118,15 @@ export default {
 
     const safeCmdSummary = (cmd: unknown): string => {
       if (Array.isArray(cmd)) {
-        const t = cmd.find((x) => typeof x === "string" && x.trim());
-        return t ? String(t).trim().split(/\s+/)[0] : "command";
+        const parts = cmd
+          .map((x) => (typeof x === "string" ? x.trim() : ""))
+          .filter(Boolean);
+        return parts.length ? parts.join(" ") : "command";
       }
       if (typeof cmd === "string") {
         const s = cmd.trim();
         if (!s) return "command";
-        return s.split(/\s+/)[0];
+        return s.split(/\r?\n/)[0].trim();
       }
       return "command";
     };
@@ -1203,19 +1205,17 @@ export default {
         const action = typeof d.action === "string" ? d.action
           : (typeof d.op === "string" ? d.op
             : (typeof d?.request?.kind === "string" ? String(d.request.kind) : ""));
-        const verb = browserActionLabel(action);
+        const verb = browserActionLabel(action) || "Action";
         const target = browserTarget(d);
-        const detail = target ? `${verb || "Action"}: ${target}` : (verb ? verb : "");
-        const tail = detail ? ` (${detail})` : "";
-        return `Browser action${tail}`;
+        if (target) return `Browser: ${verb} ${target}`;
+        return `Browser: ${verb}`;
       }
 
       if (tn === "exec") {
-        const first = safeCmdSummary(d.command);
-        const token = redactLine(first, 80);
+        const cmd = redactLine(safeCmdSummary(d.command), 120);
         const code = typeof d.exitCode === "number" ? d.exitCode : (typeof d.code === "number" ? d.code : null);
         const tail = code === null ? "" : ` (exit ${code})`;
-        return token ? `Run command: ${token}${tail}`.trim() : `Run command${tail}`.trim();
+        return cmd ? `Run: ${cmd}${tail}`.trim() : `Run${tail}`.trim();
       }
 
       if (tn === "read") {
@@ -1252,15 +1252,14 @@ export default {
         const action = typeof details?.action === "string" ? details.action
           : (typeof details?.op === "string" ? details.op
             : (typeof details?.request?.kind === "string" ? String(details.request.kind) : ""));
-        const verb = browserActionLabel(action);
+        const verb = browserActionLabel(action) || "Action";
         const target = browserTarget(details || {});
-        const detail = target ? `${verb || "Action"}: ${target}` : (verb ? verb : "");
-        const tail = detail ? ` (${detail})` : "";
-        return `Using browser${tail}`;
+        if (target) return `Using browser: ${verb} ${target}`;
+        return `Using browser: ${verb}`;
       }
       if (tn === "exec") {
-        const token = redactLine(safeCmdSummary(details?.command), 80);
-        return token ? `Running command (${token})` : "Running command";
+        const token = redactLine(safeCmdSummary(details?.command), 120);
+        return token ? `Running: ${token}` : "Running";
       }
       if (tn) return `Using tool (${redactLine(tn, 40)})`;
       return "Using tool";
@@ -1311,7 +1310,7 @@ export default {
       const humanTools = new Set(["browser", "exec", "read", "write", "edit", "sessions_spawn"]);
       if ((it.kind === "before_tool_call" || it.kind === "after_tool_call") && humanTools.has(tn)) {
         const summary = toolHumanSummary(it);
-        if (it.kind === "before_tool_call") return { kind: it.kind, what: `${summary}…` };
+        if (it.kind === "before_tool_call") return { kind: it.kind, what: summary };
         // after_tool_call
         if (it.success === false || it.error) return { kind: "error", what: `${summary} (failed)` };
         return { kind: it.kind, what: `${summary} (done)` };
@@ -1327,6 +1326,8 @@ export default {
 
       // Default feed should be readable: de-dup short bursts of identical low-signal rows.
       const humanDedupeWindowMs = 1500;
+      const presenceDedupeWindowMs = 12000;
+      const heartbeatDedupeWindowMs = 15000;
       const lastHumanSigByAgent = new Map<string, { sig: string; ts: number }>();
 
       const toolPresenceMergeWindowMs = 1200;
@@ -1404,7 +1405,12 @@ export default {
           if (h) {
             const sig = `${who}|${String(h.kind)}|${h.what}`;
             const prev = lastHumanSigByAgent.get(who);
-            if (!(prev && prev.sig === sig && Math.abs(it.ts - prev.ts) < humanDedupeWindowMs)) {
+            const isPresence = it.kind === "presence" || it.kind === "state";
+            const isHeartbeat = it.kind === "presence" && !!(it.details as any)?.heartbeat;
+            const dedupeWindowMs = isHeartbeat
+              ? heartbeatDedupeWindowMs
+              : (isPresence ? presenceDedupeWindowMs : humanDedupeWindowMs);
+            if (!(prev && prev.sig === sig && Math.abs(it.ts - prev.ts) < dedupeWindowMs)) {
               lastHumanSigByAgent.set(who, { sig, ts: it.ts });
               pushRow(it, h.what, h.kind, who, sessionKey, task.id);
             }

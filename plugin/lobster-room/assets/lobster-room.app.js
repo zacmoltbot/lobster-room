@@ -1,5 +1,5 @@
     // UI build stamp (bump this when you deploy so we can confirm which frontend is running).
-    const UI_VERSION = 'feed-v3-20260315.13';
+    const UI_VERSION = 'feed-v3-20260315.14';
 
     const STATES = [
       {key:'reply', cls:'b-reply', label:'💬 replying'},
