@@ -8,6 +8,7 @@ set -euo pipefail
 # SECURITY NOTE
 # - Prefer installing a pinned release version (VERSION=vX.Y.Z) to reduce supply-chain risk.
 # - If VERSION is not set, we install the latest GitHub Release (best-effort).
+# - To install a specific branch tip (dev/staging), set BRANCH=branch-name.
 
 REPO="zacmoltbot/lobster-room"
 EXT_DIR="${HOME}/.openclaw/extensions/lobster-room"
@@ -24,6 +25,7 @@ need_cmd curl
 need_cmd tar
 
 VERSION="${VERSION:-}"
+BRANCH="${BRANCH:-}"
 
 fetch_latest_release_tag() {
   # No jq dependency; parse tag_name with sed.
@@ -38,6 +40,9 @@ STRIP_COMPONENTS=1
 if [[ -n "$VERSION" ]]; then
   # Pinned tag (recommended)
   TARBALL_URL="https://github.com/${REPO}/archive/refs/tags/${VERSION}.tar.gz"
+elif [[ -n "$BRANCH" ]]; then
+  # Branch tip (dev/staging)
+  TARBALL_URL="https://github.com/${REPO}/archive/refs/heads/${BRANCH}.tar.gz"
 else
   # Latest release tag (best-effort); fallback to main if missing.
   LATEST_TAG="$(fetch_latest_release_tag || true)"
@@ -66,6 +71,7 @@ cp -f "$TMP/src/lobster-room.html" "$EXT_DIR/assets/lobster-room.html"
 
 echo "Installed plugin to: $EXT_DIR"
 [[ -n "${VERSION:-}" ]] && echo "Installed version: ${VERSION}"
+[[ -n "${BRANCH:-}" ]] && echo "Installed branch: ${BRANCH}"
 
 echo "Attempting: openclaw gateway restart"
 if command -v openclaw >/dev/null 2>&1; then

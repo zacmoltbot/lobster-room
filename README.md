@@ -12,6 +12,14 @@ A cute, practical dashboard that visualizes your OpenClaw **agents & sessions** 
 
 ## Install / Update
 
+### Install modes (recommended order)
+
+- **Pinned release (recommended):** `VERSION=vX.Y.Z`
+- **Latest release (default):** no env vars
+- **Latest branch tip (dev/staging/hotfix):** `BRANCH=main` (or any branch)
+
+> ⚠️ **Security note:** installing from a branch tip is higher supply-chain risk than a pinned release tag.
+
 ### Option A (recommended): Install via “OpenClaw prompt”
 
 Copy/paste this into your OpenClaw agent:
@@ -25,13 +33,28 @@ Copy/paste this into your OpenClaw agent:
 > 4) Verify `https://<openclaw-host>/lobster-room/`.
 >
 > Optional: if I ask for a pinned install, use `VERSION=vX.Y.Z` when running the installer.
+> Optional: if I ask for a branch tip, use `BRANCH=main` (or another branch) when running the installer.
 
 ### Option B: Manual install (advanced)
 
-#### 1) Install (latest release)
+#### 1) Install
+
+Latest release (default):
 
 ```bash
 bash -c "$(curl -fsSL https://raw.githubusercontent.com/zacmoltbot/lobster-room/main/plugin/lobster-room/install.sh)"
+```
+
+Pinned release (recommended):
+
+```bash
+VERSION=vX.Y.Z bash -c "$(curl -fsSL https://raw.githubusercontent.com/zacmoltbot/lobster-room/main/plugin/lobster-room/install.sh)"
+```
+
+Branch tip (dev/staging/hotfix):
+
+```bash
+BRANCH=main bash -c "$(curl -fsSL https://raw.githubusercontent.com/zacmoltbot/lobster-room/main/plugin/lobster-room/install.sh)"
 ```
 
 #### 2) Enable the plugin
@@ -62,8 +85,15 @@ This is an OpenClaw **plugin**. After installing/updating, you must restart/rede
 
 ## Verify
 
-- `https://<openclaw-host>/lobster-room/`
-- `https://<openclaw-host>/lobster-room/api/lobster-room`
+Minimal smoke test (after restart):
+
+- Open `https://<openclaw-host>/lobster-room/`
+- Run:
+  ```bash
+  curl -sS -X POST 'https://<openclaw-host>/lobster-room/api/lobster-room' \
+    -H 'content-type: application/json' \
+    -d '{"op":"feedGet","limit":1}'
+  ```
 
 If you see the OpenClaw Control UI instead of Lobster Room, the plugin is not loaded/enabled.
 
