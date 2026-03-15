@@ -1,5 +1,5 @@
     // UI build stamp (bump this when you deploy so we can confirm which frontend is running).
-    const UI_VERSION = 'feed-v3-20260315.7';
+    const UI_VERSION = 'feed-v3-20260315.8';
 
     const STATES = [
       {key:'reply', cls:'b-reply', label:'💬 replying'},
@@ -2403,10 +2403,9 @@
           const tn = (a && a.debug && a.debug.decision && a.debug.decision.details && a.debug.decision.details.toolName)
             ? String(a.debug.decision.details.toolName)
             : '';
-          const tail = tn ? (' · ' + tn) : '';
-          lines.push('@' + id + ': ' + st + tail);
+          lines.push({ agent: '@' + id, state: st, tool: tn });
         }
-        lines.sort();
+        lines.sort((a, b)=> String(a.agent).localeCompare(String(b.agent)));
         if(lines.length){
           nowEl.style.display = '';
           nowEl.innerHTML = '';
@@ -2417,7 +2416,14 @@
           for(const line of lines){
             const row = document.createElement('div');
             row.className = 'feed-now-line';
-            row.textContent = line;
+            const agent = document.createElement('span');
+            agent.className = 'feed-now-agent';
+            agent.textContent = line.agent;
+            const state = document.createElement('span');
+            state.className = 'feed-now-state';
+            state.textContent = line.tool ? (line.state + ' · ' + line.tool) : line.state;
+            row.appendChild(agent);
+            row.appendChild(state);
             nowEl.appendChild(row);
           }
         }else{
@@ -2494,6 +2500,7 @@
 
     async function feedPollOnce(){
       if(!FEED.show) return;
+      const reschedule = ()=>{ if(FEED.show) feedScheduleNext(FEED.pollMs); };
       if(FEED._pollInFlight){
         const age = FEED._pollInFlightAt ? (Date.now() - FEED._pollInFlightAt) : 0;
         const staleMs = Math.max(10000, (FEED.pollMs || 2000) * 5);
@@ -2502,7 +2509,7 @@
           FEED._pollInFlight = false;
           FEED._pollInFlightAt = 0;
         }else{
-          feedScheduleNext(FEED.pollMs);
+          reschedule();
           return;
         }
       }
@@ -2576,7 +2583,7 @@
         clearTimeout(timeout);
         FEED._pollInFlight = false;
         FEED._pollInFlightAt = 0;
-        feedScheduleNext(FEED.pollMs);
+        reschedule();
       }
     }
 

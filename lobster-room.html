@@ -178,15 +178,15 @@
     .feed-item.err .feed-preview{color:rgba(255,145,145,.92)}
 
     /* Feed v3 row UX (time | agent | action) */
-    .feed-item.feed-row-v3{align-items:flex-start}
-    .feed-v3-line{display:grid;grid-template-columns:72px minmax(92px,140px) 1fr;column-gap:10px;row-gap:2px;align-items:start}
-    .feed-v3-time{color:rgba(255,255,255,.55);font-size:11px;white-space:nowrap}
-    .feed-v3-agent{color:rgba(255,255,255,.86);font-weight:800;font-size:12px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-    .feed-v3-what{color:rgba(255,255,255,.74);font-size:12px;white-space:normal;overflow:visible;text-overflow:clip;word-break:break-word}
+    .feed-item.feed-row-v3{align-items:stretch;padding:10px 12px}
+    .feed-v3-line{display:grid;grid-template-columns:78px minmax(96px,150px) 1fr;column-gap:12px;row-gap:4px;align-items:start}
+    .feed-v3-time{color:rgba(255,255,255,.55);font-size:11px;white-space:nowrap;font-variant-numeric:tabular-nums}
+    .feed-v3-agent{color:rgba(255,255,255,.86);font-weight:800;font-size:12px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;letter-spacing:.01em}
+    .feed-v3-what{color:rgba(255,255,255,.74);font-size:12px;line-height:1.35;white-space:normal;overflow:visible;text-overflow:clip;word-break:break-word}
     .feed-item.feed-row-v3.fold .feed-v3-what{color:rgba(255,255,255,.70);font-style:italic}
     .feed-item.feed-row-v3.err .feed-v3-what{color:rgba(255,145,145,.92)}
     @media (max-width: 640px){
-      .feed-v3-line{grid-template-columns:64px minmax(78px,110px) 1fr;column-gap:8px}
+      .feed-v3-line{grid-template-columns:66px minmax(78px,120px) 1fr;column-gap:8px}
       .feed-v3-time{font-size:10px}
       .feed-v3-agent,.feed-v3-what{font-size:11px}
     }
@@ -194,8 +194,10 @@
     /* Feed "Now" block */
     #feed-now{white-space:normal}
     .feed-now-title{font-weight:700;color:rgba(255,255,255,.92);margin-bottom:6px}
-    .feed-now-line{line-height:1.35;margin-top:6px}
+    .feed-now-line{display:grid;grid-template-columns:120px 1fr;column-gap:10px;align-items:baseline;line-height:1.35;margin-top:6px}
     .feed-now-line:first-of-type{margin-top:0}
+    .feed-now-agent{font-weight:700;color:rgba(255,255,255,.88);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+    .feed-now-state{color:rgba(255,255,255,.72);font-size:12px;line-height:1.35}
 
     .feed-detail{border:1px solid rgba(255,255,255,.08);border-radius:10px;background:rgba(0,0,0,.28);padding:8px 10px;font-size:11px;line-height:1.35;color:rgba(255,255,255,.80);white-space:pre-wrap;max-height:240px;overflow:auto}
     .feed-actions{display:flex;gap:8px;flex-wrap:wrap}
@@ -559,6 +561,6 @@
       });
     })();
   </script>
-  <script src="./assets/lobster-room.app.js?v=feed-v3-20260315.7" defer></script>
+  <script src="./assets/lobster-room.app.js?v=feed-v3-20260315.8" defer></script>
 </body>
 </html>
