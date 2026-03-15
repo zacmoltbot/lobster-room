@@ -67,6 +67,28 @@ This is an OpenClaw **plugin**. After installing/updating, you must restart/rede
 
 If you see the OpenClaw Control UI instead of Lobster Room, the plugin is not loaded/enabled.
 
+### API smoke tests
+
+This deployment multiplexes control operations via **POST JSON** on `/lobster-room/api/lobster-room` (some proxies/gateways only reliably match this exact route).
+
+Feed (latest tasks):
+
+```bash
+curl -sS -X POST 'https://<openclaw-host>/lobster-room/api/lobster-room' \
+  -H 'content-type: application/json' \
+  -d '{"op":"feedGet","limit":50}'
+```
+
+Feed (include raw items per task; sanitized previews):
+
+```bash
+curl -sS -X POST 'https://<openclaw-host>/lobster-room/api/lobster-room' \
+  -H 'content-type: application/json' \
+  -d '{"op":"feedGet","limit":120,"includeRaw":true}'
+```
+
+If you omit the `content-type: application/json` header, the request may be treated as a regular status poll and you’ll get the standard room state payload instead of the op response.
+
 ### Important: updates require a Gateway restart
 
 This is an OpenClaw **plugin**. After updating, you must restart/redeploy the OpenClaw Gateway so it reloads plugin assets. A browser refresh (even incognito) cannot pick up a new build unless the server is updated.
@@ -144,6 +166,38 @@ Each entry includes:
 - `kind` (hook name)
 - `agentId` (derived from `sessionKey` when available)
 - `data` (best-effort; e.g. `toolName`, and for `exec` we include the command)
+
+### Message Feed v2 (docked)
+
+The UI includes a **Message Feed** panel (📰 Feed) that is **docked on the right** of the room.
+
+Instead of raw hook rows, it aggregates events into human-readable **Task cards** (grouped by `sessionKey` when available). Each task shows:
+
+- start time
+- `agentId`
+- status (`running` / `done` / `error`)
+- short title + 1–2 line summary
+
+You can expand a task to view the underlying raw events for debugging.
+
+#### Demo: sub-agent task
+
+To validate multi-agent grouping, spawn a sub-agent from any run that has tool access to `sessions_spawn`.
+
+Example prompt to your assistant:
+
+- "Spawn a sub-agent to write a short plan for X, then report back."
+
+In the feed, you should see a parent task (the `sessions_spawn` tool call) and a separate task grouped under the spawned sub-agent `sessionKey`.
+
+API endpoints (multiplexed via POST JSON on `/lobster-room/api/lobster-room`):
+
+- `feedGet` (tasks + latest preview)
+  - `{"op":"feedGet","limit":300,"agentId":"","includeRaw":false}`
+  - If `includeRaw=true`, tasks include `items[]` with sanitized event payloads.
+- `feedSummarize` (plain-language summary)
+  - `{"op":"feedSummarize","sessionKey":"agent:...","maxItems":300}`
+  - or `{"op":"feedSummarize","sinceMs": <epoch_ms>, "maxItems":300}`
 
 ### After uploading a new room background
 
