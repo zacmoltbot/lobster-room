@@ -124,7 +124,7 @@ function contentTypeByExt(ext: string): string | null {
   return null;
 }
 
-const BUILD_TAG = "feed-v3-20260315.4";
+const BUILD_TAG = "feed-v3-20260315.6";
 
 export default {
   id: "lobster-room",
@@ -454,8 +454,17 @@ export default {
                 await fs.writeFile(mapPath, txt);
               } catch {}
             } catch {
-              res.statusCode = 404;
-              res.end("not_found");
+              const empty = { version: 1, tx: 32, ty: 20, cells: new Array(32 * 20).fill(null), updatedAt: null };
+              const txt = JSON.stringify(empty, null, 2);
+              res.statusCode = 200;
+              res.setHeader("content-type", "application/json; charset=utf-8");
+              res.setHeader("cache-control", "no-store");
+              res.end(txt);
+              // Best-effort seed so future reads succeed.
+              try {
+                await fs.mkdir(dirname(mapPath), { recursive: true });
+                await fs.writeFile(mapPath, txt);
+              } catch {}
             }
           }
           return true;
