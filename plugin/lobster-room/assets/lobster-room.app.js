@@ -1,5 +1,5 @@
     // UI build stamp (bump this when you deploy so we can confirm which frontend is running).
-    const UI_VERSION = 'feed-v3-20260315.9';
+    const UI_VERSION = 'feed-v3-20260315.10';
 
     const STATES = [
       {key:'reply', cls:'b-reply', label:'💬 replying'},
@@ -2400,8 +2400,10 @@
 
       if(statusEl){
         const base = rows.length ? (String(rows.length) + ' rows') : '—';
+        const age = FEED.latest && FEED.latest.ts ? feedAge(FEED.latest.ts) : '';
+        const ageText = age ? ' · last: ' + age : '';
         const extra = [(FEED.pollStatus||'').trim(), (FEED.devSpawnStatus||'').trim()].filter(Boolean).join(' · ');
-        statusEl.textContent = extra ? (base + ' · ' + extra) : base;
+        statusEl.textContent = extra ? (base + ageText + ' · ' + extra) : (base + ageText);
       }
 
       // "Now" section (per-agent activity snapshot)

@@ -811,7 +811,8 @@ export default {
       | "tool_result_persist"
       | "message_sending"
       | "message_sent"
-      | "agent_end";
+      | "agent_end"
+      | "presence";
 
     type FeedItem = {
       ts: number;
@@ -830,6 +831,8 @@ export default {
 
     const FEED_MAX = Math.max(500, Number(api.config?.feedMaxItems) || 0, 600);
     const feedBuf: FeedItem[] = [];
+    const FEED_PRESENCE_MIN_MS = Math.max(2000, Number(api.config?.feedPresenceMinMs) || 0);
+    const lastPresenceByAgent = new Map<string, { state: ActivityState; ts: number; toolName?: string }>();
 
     // Synthetic feed events for spawned sub-agents (sessions_spawn).
     // The runtime doesn't currently emit feed hooks for child agents unless they use /tools/invoke.
@@ -881,6 +884,18 @@ export default {
 
     const feedPreview = (it: FeedItem): string => {
       const agent = it.agentId ? `@${it.agentId}` : "";
+      if (it.kind === "presence") {
+        const stRaw = typeof (it.details as any)?.state === "string" ? String((it.details as any).state) : "";
+        const st = stRaw === "reply" ? "replying"
+          : stRaw === "tool" ? "tool"
+          : stRaw === "thinking" ? "thinking"
+          : stRaw === "idle" ? "idle"
+          : stRaw === "error" ? "error"
+          : stRaw;
+        const tn = typeof it.toolName === "string" ? it.toolName : (typeof (it.details as any)?.toolName === "string" ? (it.details as any).toolName : "");
+        const tail = (stRaw === "tool" && tn) ? `: ${tn}` : "";
+        return `${agent} ${st}${tail}`.trim();
+      }
       if (it.kind === "before_agent_start") return `${agent} started`;
       if (it.kind === "before_tool_call") {
         const tn = it.toolName || "tool";
@@ -908,12 +923,33 @@ export default {
         if (it.success === false) return `${agent} ended (error)`;
         return `${agent} ended`;
       }
+      if (it.kind === "state") {
+        const st = String((it.details as any)?.state || "");
+        return st ? `${agent} state → ${st}` : `${agent} state changed`;
+      }
       return it.kind;
     };
 
     const pushFeed = (item: FeedItem) => {
       feedBuf.push(item);
       if (feedBuf.length > FEED_MAX) feedBuf.splice(0, feedBuf.length - FEED_MAX);
+    };
+
+    const pushPresence = (agentId: string, state: ActivityState, details?: Record<string, unknown> | null) => {
+      const t = nowMs();
+      const toolName = typeof (details as any)?.toolName === "string" ? String((details as any).toolName) : undefined;
+      const prev = lastPresenceByAgent.get(agentId);
+      if (prev && prev.state === state && (prev.toolName || "") === (toolName || "")) return;
+      if (prev && (t - prev.ts) < FEED_PRESENCE_MIN_MS) return;
+      lastPresenceByAgent.set(agentId, { state, ts: t, toolName });
+      pushFeed({
+        ts: t,
+        kind: "presence",
+        agentId,
+        sessionKey: typeof (details as any)?.sessionKey === "string" ? String((details as any).sessionKey) : undefined,
+        toolName,
+        details: { state, toolName },
+      });
     };
 
     type FeedTaskStatus = "running" | "done" | "error";
@@ -1174,12 +1210,33 @@ export default {
     const rowSentenceHuman = (it: FeedItem): { kind: FeedRowV3["kind"]; what: string } | null => {
       const tn = (it.toolName || "tool").trim();
 
+      if (it.kind === "presence") {
+        const stRaw = typeof (it.details as any)?.state === "string" ? String((it.details as any).state) : "";
+        const st = stRaw === "reply" ? "replying"
+          : stRaw === "tool" ? "tool"
+          : stRaw === "thinking" ? "thinking"
+          : stRaw === "idle" ? "idle"
+          : stRaw === "error" ? "error"
+          : stRaw;
+        const tn2 = typeof it.toolName === "string" ? it.toolName : (typeof (it.details as any)?.toolName === "string" ? (it.details as any).toolName : "");
+        const tool = tn2 ? redactLine(tn2, 40) : "";
+        const tail = (stRaw === "tool" && tool) ? `: ${tool}` : "";
+        const what = (st || "state") + tail;
+        return { kind: stRaw === "error" ? "error" : it.kind, what };
+      }
+
       // started/ended rows are rendered at the task level for clearer titles.
 
       if (it.kind === "message_sending") return { kind: it.kind, what: "sending a message" };
       if (it.kind === "message_sent") {
         if (it.success === false) return { kind: "error", what: "message failed to send" };
         return { kind: it.kind, what: "sent a message" };
+      }
+
+      // State changes: show as "idle", "thinking", "tool", "reply", "error".
+      if (it.kind === "state") {
+        const st = String((it.details as any)?.state || "changed");
+        return { kind: it.kind, what: `state → ${st}` };
       }
 
       // Hide low-signal bookkeeping in default view.
@@ -1295,6 +1352,7 @@ export default {
         cur.sinceMs = t;
         cur.lastEventMs = t;
         cur.details = { stale: true };
+        pushPresence(agentId, "idle", cur.details || null);
       }, staleMs + 50);
 
       // Tool-specific max duration: demote tool -> thinking -> (later) idle.
@@ -1316,6 +1374,7 @@ export default {
     const setState = (agentId: string, next: ActivityState, details?: Record<string, unknown> | null) => {
       const row = ensure(agentId);
       const t = nowMs();
+      const prevState = row.state;
 
       // Persist to snapshot for API consumers.
       try {
@@ -1348,6 +1407,8 @@ export default {
       if (row.state !== next) {
         row.state = next;
         row.sinceMs = t;
+        // Emit state change to feed.
+        pushPresence(agentId, next, details ?? null);
       }
 
       if (next !== "idle") {
