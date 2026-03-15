@@ -124,7 +124,7 @@ function contentTypeByExt(ext: string): string | null {
   return null;
 }
 
-const BUILD_TAG = "feed-v3-20260315.6";
+const BUILD_TAG = "feed-v3-20260315.7";
 
 export default {
   id: "lobster-room",

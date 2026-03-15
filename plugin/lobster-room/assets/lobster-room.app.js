@@ -1,5 +1,5 @@
     // UI build stamp (bump this when you deploy so we can confirm which frontend is running).
-    const UI_VERSION = 'feed-v3-20260315.6';
+    const UI_VERSION = 'feed-v3-20260315.7';
 
     const STATES = [
       {key:'reply', cls:'b-reply', label:'💬 replying'},
@@ -2252,12 +2252,25 @@
       devSpawnStatus: '',
       pollStatus: '',
       _pollInFlight: false,
+      _pollInFlightAt: 0,
+      _pollTimer: null,
       _lastOkMs: 0,
 
       // "since last viewed" anchor (set when panel opens; persisted when panel closes)
       lastViewedMs: null,
       _agentFilter: '',
     };
+
+    const FEED_DEBUG = (()=>{
+      try{
+        return /(?:\?|&)feedDebug=1\b/.test(location.search || '') || (localStorage && localStorage.getItem('feedDebug') === '1');
+      }catch{ return false; }
+    })();
+
+    function feedLog(){
+      if(!FEED_DEBUG) return;
+      try{ console.log('[feed]', ...arguments); }catch{}
+    }
 
     function feedTime(ts){
       try{
@@ -2396,7 +2409,17 @@
         lines.sort();
         if(lines.length){
           nowEl.style.display = '';
-          nowEl.textContent = 'Now\n' + lines.join('\n');
+          nowEl.innerHTML = '';
+          const title = document.createElement('div');
+          title.className = 'feed-now-title';
+          title.textContent = 'Now';
+          nowEl.appendChild(title);
+          for(const line of lines){
+            const row = document.createElement('div');
+            row.className = 'feed-now-line';
+            row.textContent = line;
+            nowEl.appendChild(row);
+          }
         }else{
           nowEl.style.display = 'none';
           nowEl.textContent = '';
@@ -2460,9 +2483,31 @@
       FEED.showRawDetail = false;
     }
 
+    function feedScheduleNext(delayMs){
+      if(!FEED.show) return;
+      const d = Math.max(500, Math.floor(Number(delayMs) || 0));
+      try{ if(FEED._pollTimer) clearTimeout(FEED._pollTimer); }catch{}
+      FEED._pollTimer = setTimeout(()=>{
+        if(FEED.show) feedPollOnce();
+      }, d);
+    }
+
     async function feedPollOnce(){
-      if(FEED._pollInFlight) return;
+      if(!FEED.show) return;
+      if(FEED._pollInFlight){
+        const age = FEED._pollInFlightAt ? (Date.now() - FEED._pollInFlightAt) : 0;
+        const staleMs = Math.max(10000, (FEED.pollMs || 2000) * 5);
+        if(age > staleMs){
+          feedLog('stale in-flight reset', { age });
+          FEED._pollInFlight = false;
+          FEED._pollInFlightAt = 0;
+        }else{
+          feedScheduleNext(FEED.pollMs);
+          return;
+        }
+      }
       FEED._pollInFlight = true;
+      FEED._pollInFlightAt = Date.now();
 
       const agentSel = document.getElementById('feed-agent');
       const agentId = agentSel ? agentSel.value : '';
@@ -2521,6 +2566,7 @@
           feedRender();
         }
       }catch(e){
+        feedLog('poll error', e);
         const msg = String(e && e.name ? e.name : '') === 'AbortError' ? 'timeout' : 'disconnected';
         const age = FEED._lastOkMs ? (Date.now() - FEED._lastOkMs) : 0;
         const ageTxt = FEED._lastOkMs ? (' (last ok ' + String(Math.round(age/1000)) + 's ago)') : '';
@@ -2529,6 +2575,8 @@
       }finally{
         clearTimeout(timeout);
         FEED._pollInFlight = false;
+        FEED._pollInFlightAt = 0;
+        feedScheduleNext(FEED.pollMs);
       }
     }
 
@@ -2595,6 +2643,9 @@
         if(btnToggle) btnToggle.textContent = FEED.show ? 'Hide' : 'Show';
         if(FEED.show){
           feedPollOnce();
+        }else{
+          try{ if(FEED._pollTimer) clearTimeout(FEED._pollTimer); }catch{}
+          FEED._pollTimer = null;
         }
       };
 
@@ -2603,7 +2654,6 @@
       if(agentSel) agentSel.addEventListener('change', ()=> feedPollOnce());
 
       setShow(false);
-      setInterval(()=>{ if(FEED.show) feedPollOnce(); }, FEED.pollMs);
     }
 
     function init(){
