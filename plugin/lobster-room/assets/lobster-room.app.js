@@ -1,5 +1,5 @@
     // UI build stamp (bump this when you deploy so we can confirm which frontend is running).
-    const UI_VERSION = 'feed-v3-20260315.8';
+    const UI_VERSION = 'feed-v3-20260315.9';
 
     const STATES = [
       {key:'reply', cls:'b-reply', label:'💬 replying'},
@@ -2279,6 +2279,21 @@
       }catch{return '—'}
     }
 
+    function feedAge(ts){
+      try{
+        const ms = Date.now() - Number(ts || 0);
+        if(!isFinite(ms) || ms < 0) return '';
+        const sec = Math.max(0, Math.round(ms/1000));
+        if(sec < 60) return sec + 's ago';
+        const min = Math.round(sec/60);
+        if(min < 60) return min + 'm ago';
+        const hr = Math.round(min/60);
+        if(hr < 48) return hr + 'h ago';
+        const day = Math.round(hr/24);
+        return day + 'd ago';
+      }catch{return ''}
+    }
+
     function feedMaskUrls(s){
       if(typeof s !== 'string') return s;
       if(s === '[URL]') return s;
@@ -2403,7 +2418,11 @@
           const tn = (a && a.debug && a.debug.decision && a.debug.decision.details && a.debug.decision.details.toolName)
             ? String(a.debug.decision.details.toolName)
             : '';
-          lines.push({ agent: '@' + id, state: st, tool: tn });
+          const lastMs = (a && a.debug && a.debug.decision && typeof a.debug.decision.lastEventMs === 'number')
+            ? a.debug.decision.lastEventMs
+            : ((a && a.meta && typeof a.meta.maxUpdatedAt === 'number') ? a.meta.maxUpdatedAt : null);
+          const age = lastMs ? feedAge(lastMs) : '';
+          lines.push({ agent: '@' + id, state: st, tool: tn, age });
         }
         lines.sort((a, b)=> String(a.agent).localeCompare(String(b.agent)));
         if(lines.length){
@@ -2421,7 +2440,10 @@
             agent.textContent = line.agent;
             const state = document.createElement('span');
             state.className = 'feed-now-state';
-            state.textContent = line.tool ? (line.state + ' · ' + line.tool) : line.state;
+            const bits = [line.state];
+            if(line.tool) bits.push(line.tool);
+            if(line.age) bits.push(line.age);
+            state.textContent = bits.join(' · ');
             row.appendChild(agent);
             row.appendChild(state);
             nowEl.appendChild(row);
