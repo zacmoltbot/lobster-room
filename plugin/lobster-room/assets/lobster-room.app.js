@@ -1,5 +1,5 @@
     // UI build stamp (bump this when you deploy so we can confirm which frontend is running).
-    const UI_VERSION = 'feed-v3-20260315.4';
+    const UI_VERSION = 'feed-v3-20260315.5';
 
     const STATES = [
       {key:'reply', cls:'b-reply', label:'💬 replying'},
@@ -18,6 +18,7 @@
       lastZoneFocus: null,
       layout: null,
       activity: null,
+      activityPollDisabled: false,
       selfName: null,
       tiles: null,
       manualMap: null,
@@ -2079,10 +2080,15 @@
       // Lightweight build/activity monitor. If file exists, show it; otherwise keep blank.
       const el = document.getElementById('activity');
       if(!el) return;
+      if(MODEL.activityPollDisabled) return;
       try{
         // Note: assets handler may not allow .json in some deployments; use .js extension with JSON body.
         const r = await fetch('./assets/user/activity.js?ts=' + Date.now(), {cache:'no-store'});
-        if(!r.ok){ el.textContent = ''; return; }
+        if(!r.ok){
+          if(r.status === 404){ MODEL.activityPollDisabled = true; }
+          el.textContent = '';
+          return;
+        }
         const txt = await r.text();
         const j = JSON.parse(txt);
         if(!j || !j.status){ el.textContent=''; MODEL.activity=null; return; }
