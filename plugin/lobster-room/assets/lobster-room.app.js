@@ -1,5 +1,5 @@
     // UI build stamp (bump this when you deploy so we can confirm which frontend is running).
-    const UI_VERSION = 'feed-v3-20260315.2';
+    const UI_VERSION = 'feed-v3-20260315.3';
 
     const STATES = [
       {key:'reply', cls:'b-reply', label:'💬 replying'},
@@ -2582,14 +2582,15 @@
       const agentSel = document.getElementById('feed-agent');
       const expandBtn = document.getElementById('feed-expand');
 
-      function setShow(v){
+      // Define before any listeners to avoid ReferenceError in some builds.
+      const setShow = (v)=>{
         FEED.show = !!v;
         if(panel) panel.classList.toggle('show', FEED.show);
         if(btnToggle) btnToggle.textContent = FEED.show ? 'Hide' : 'Show';
         if(FEED.show){
           feedPollOnce();
         }
-      }
+      };
 
       if(btnOpen) btnOpen.addEventListener('click', ()=> setShow(!FEED.show));
       if(btnToggle) btnToggle.addEventListener('click', ()=> setShow(false));
