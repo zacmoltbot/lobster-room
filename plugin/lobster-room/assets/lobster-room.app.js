@@ -1,5 +1,5 @@
     // UI build stamp (bump this when you deploy so we can confirm which frontend is running).
-    const UI_VERSION = 'feed-v3-20260315.3';
+    const UI_VERSION = 'feed-v3-20260315.4';
 
     const STATES = [
       {key:'reply', cls:'b-reply', label:'💬 replying'},
@@ -2693,6 +2693,7 @@
           const img = document.getElementById('room-bg');
           if(!room || !img) return;
           room.classList.add('has-bg');
+          let fallbackApplied = false;
           img.onload = () => {
             ensureLayout(false);
             ensureTiles(false);
@@ -2702,6 +2703,12 @@
               const backdrop = document.getElementById('settings-backdrop');
               if(backdrop && backdrop.classList.contains('show')) renderEditor();
             }catch{}
+          };
+          img.onerror = () => {
+            if(fallbackApplied) return;
+            fallbackApplied = true;
+            try{ img.src = './assets/default-room.jpg?v=' + Date.now(); }catch{}
+            try{ statusEl.textContent = 'Current room: (fallback image)'; }catch{}
           };
           // Cache-busting strategy A: use versioned URL param derived from room-image/info.updatedAt.
           // Backend serves ./api/room-image with long-lived immutable caching.

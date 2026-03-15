@@ -124,7 +124,7 @@ function contentTypeByExt(ext: string): string | null {
   return null;
 }
 
-const BUILD_TAG = "feed-v3-20260315.3";
+const BUILD_TAG = "feed-v3-20260315.4";
 
 export default {
   id: "lobster-room",
@@ -133,6 +133,8 @@ export default {
     // Resolve asset path relative to this plugin module (NOT the gateway cwd).
     const pluginDir = dirname(fileURLToPath(import.meta.url));
     const portalHtmlPath = join(pluginDir, "assets", "lobster-room.html");
+    const bundledRoomImgPath = join(pluginDir, "assets", "default-room.jpg");
+    const bundledManualMapPath = join(pluginDir, "assets", "default-manual-map.json");
 
     // --- Rooms (multi-background profiles) ---
     const rootUserDir = join(pluginDir, "assets", "user");
@@ -301,8 +303,22 @@ export default {
           res.setHeader("cache-control", "no-store");
           res.end(buf);
         } catch {
-          res.statusCode = 404;
-          res.end("not_found");
+          if (rel === "user/activity.js") {
+            const payload = JSON.stringify({ status: "" });
+            res.statusCode = 200;
+            res.setHeader("content-type", "application/json; charset=utf-8");
+            res.setHeader("cache-control", "no-store");
+            res.end(payload);
+            // Best-effort seed so future reads succeed.
+            try {
+              const target = join(pluginDir, "assets", rel);
+              await fs.mkdir(dirname(target), { recursive: true });
+              await fs.writeFile(target, payload);
+            } catch {}
+          } else {
+            res.statusCode = 404;
+            res.end("not_found");
+          }
         }
         return true;
       }
@@ -426,8 +442,21 @@ export default {
             res.setHeader("cache-control", "no-store");
             res.end(txt);
           } catch {
-            res.statusCode = 404;
-            res.end("not_found");
+            try {
+              const txt = await fs.readFile(bundledManualMapPath, "utf8");
+              res.statusCode = 200;
+              res.setHeader("content-type", "application/json; charset=utf-8");
+              res.setHeader("cache-control", "no-store");
+              res.end(txt);
+              // Best-effort seed so future reads succeed.
+              try {
+                await fs.mkdir(dirname(mapPath), { recursive: true });
+                await fs.writeFile(mapPath, txt);
+              } catch {}
+            } catch {
+              res.statusCode = 404;
+              res.end("not_found");
+            }
           }
           return true;
         }
@@ -573,8 +602,34 @@ export default {
             res.statusCode = 200;
             res.end(buf);
           } catch {
-            res.statusCode = 404;
-            res.end("not_found");
+            try {
+              const st = await fs.stat(bundledRoomImgPath);
+              const etag = `W/"${st.size}-${Math.floor(st.mtimeMs)}"`;
+
+              res.setHeader("content-type", "image/jpeg");
+              res.setHeader("cache-control", "public, max-age=31536000, immutable");
+              res.setHeader("etag", etag);
+              res.setHeader("last-modified", st.mtime.toUTCString());
+
+              const inm = String(req.headers["if-none-match"] || "");
+              if (inm && inm === etag) {
+                res.statusCode = 304;
+                res.end();
+                return true;
+              }
+
+              const buf = await fs.readFile(bundledRoomImgPath);
+              res.statusCode = 200;
+              res.end(buf);
+              // Best-effort seed so future reads succeed.
+              try {
+                await fs.mkdir(dirname(imgPath), { recursive: true });
+                await fs.writeFile(imgPath, buf);
+              } catch {}
+            } catch {
+              res.statusCode = 404;
+              res.end("not_found");
+            }
           }
           return true;
         }
