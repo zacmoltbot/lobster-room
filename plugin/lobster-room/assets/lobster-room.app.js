@@ -1,5 +1,5 @@
     // UI build stamp (bump this when you deploy so we can confirm which frontend is running).
-    const UI_VERSION = 'feed-v3-20260314.6.1';
+    const UI_VERSION = 'feed-v3-20260315.1';
 
     const STATES = [
       {key:'reply', cls:'b-reply', label:'💬 replying'},
@@ -2238,7 +2238,6 @@
       showRawDetail: false,
 
       // UI toggles
-      showAdvanced: false, // engineers toggle (persisted)
       showRawList: false, // "Show raw (scrubbed)"
 
       pollMs: 2000,
@@ -2363,12 +2362,7 @@
       const nowEl = document.getElementById('feed-now');
       if(!listEl) return;
 
-      const allRows = Array.isArray(FEED.rows) ? FEED.rows : [];
-      const rows = allRows.filter(r=>{
-        const lvl = String(r && r.level || '');
-        if(FEED.showAdvanced) return (lvl === 'advanced' || !lvl);
-        return lvl === 'human';
-      });
+      const rows = Array.isArray(FEED.rows) ? FEED.rows : [];
 
       if(statusEl){
         const base = rows.length ? (String(rows.length) + ' rows') : '—';
@@ -2381,8 +2375,10 @@
         const lines = [];
         const agents = Array.isArray(MODEL.agents) ? MODEL.agents : [];
         for(const a of agents){
-          const id = String(a && a.id || '').trim();
-          if(!id) continue;
+          const id0 = String(a && a.id || '').trim();
+          if(!id0) continue;
+          const m = id0.match(/^resident@(.+)$/);
+          const id = m ? m[1] : id0;
           const st = (a && a.debug && a.debug.decision) ? String(a.debug.decision.activityState||'idle') : 'idle';
           // Optional detail: current tool name
           const tn = (a && a.debug && a.debug.decision && a.debug.decision.details && a.debug.decision.details.toolName)
@@ -2582,34 +2578,9 @@
       const panel = document.getElementById('feed-panel');
       const btnOpen = document.getElementById('btn-feed');
       const btnToggle = document.getElementById('feed-toggle');
+      const btnClear = document.getElementById('feed-clear');
       const agentSel = document.getElementById('feed-agent');
-      const adv = document.getElementById('feed-advanced');
-
-      function setShow(v){
-        FEED.show = !!v;
-        if(panel) panel.classList.toggle('show', FEED.show);
-        if(FEED.show){
-          feedPollOnce();
-        }
-      }
-
-      // Persisted toggle
-      try{
-        const v = localStorage.getItem('lobster.feed.advanced');
-        FEED.showAdvanced = (v === '1' || v === 'true');
-      }catch{}
-      if(adv){
-        adv.checked = !!FEED.showAdvanced;
-        adv.addEventListener('change', ()=>{
-          FEED.showAdvanced = !!adv.checked;
-          try{ localStorage.setItem('lobster.feed.advanced', FEED.showAdvanced ? '1' : '0'); }catch{}
-          feedRender();
-        });
-      }
-
-      if(btnOpen) btnOpen.addEventListener('click', ()=> setShow(!FEED.show));
-      if(btnToggle) btnToggle.addEventListener('click', ()=> setShow(false));
-      if(agentSel) agentSel.addEventListener('change', ()=> feedPollOnce());
+      const expandBtn = document.getElementById('feed-expand');
 
       setShow(false);
       setInterval(()=>{ if(FEED.show) feedPollOnce(); }, FEED.pollMs);

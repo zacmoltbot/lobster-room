@@ -124,7 +124,7 @@ function contentTypeByExt(ext: string): string | null {
   return null;
 }
 
-const BUILD_TAG = "feed-v3-20260314.5";
+const BUILD_TAG = "feed-v3-20260315.1";
 
 export default {
   id: "lobster-room",
@@ -879,9 +879,16 @@ export default {
         }
       }
 
-      // Otherwise, use first tool name.
-      const firstTool = items.find((x) => x.kind === "before_tool_call" && x.toolName)?.toolName;
-      if (firstTool) return "Tool: " + firstTool;
+      // Otherwise infer intent from the first meaningful tool call(s).
+      const first = items.find((x) => x.kind === "before_tool_call" && x.toolName)?.toolName;
+      if (first) {
+        const tn = String(first);
+        if (tn === "browser") return "QA in browser";
+        if (tn === "read" || tn === "write" || tn === "edit") return "Update files";
+        if (tn === "exec") return "Run command";
+        if (tn === "message") return "Send message";
+        return "Tool: " + tn;
+      }
 
       return "Agent run";
     };
@@ -962,9 +969,6 @@ export default {
       rowType: "timeline";
       kind?: FeedKind | "error" | "sessions_spawn";
 
-      // Feed presentation layer. Default UI shows `human` rows; engineers can toggle `advanced`.
-      level?: "human" | "advanced";
-
       // v3 UX: human-friendly, single-line text.
       // Keep legacy `action` for backwards compatibility with older frontends.
       what: string;
@@ -986,50 +990,7 @@ export default {
       return maskUrlLite(x).slice(0, max);
     };
 
-    const rowSentenceAdvanced = (it: FeedItem): { kind: FeedRowV3["kind"]; what: string } => {
-      // Advanced timeline = close to raw hooks, but still scrubbed.
-      const tn = (it.toolName || "tool").trim();
-
-      if (it.kind === "before_agent_start") return { kind: it.kind, what: "started" };
-      if (it.kind === "agent_end") {
-        if (it.success === false || it.error) return { kind: "error", what: "ended (error)" };
-        return { kind: it.kind, what: "ended" };
-      }
-
-      if (it.kind === "before_tool_call") {
-        if (tn === "sessions_spawn") {
-          const child = typeof (it.details as any)?.spawnAgentId === "string" ? String((it.details as any).spawnAgentId) : "";
-          const label = typeof (it.details as any)?.label === "string" ? String((it.details as any).label) : "";
-          const task = typeof (it.details as any)?.task === "string" ? String((it.details as any).task) : "";
-          const desc = (label || task).trim();
-          const tail = desc ? ` — ${redactLine(desc, 120)}` : "";
-          return { kind: "sessions_spawn", what: `spawned sub-agent${child ? ` @${child}` : ""}${tail}`.trim() };
-        }
-        return { kind: it.kind, what: `${tn} started` };
-      }
-
-      if (it.kind === "after_tool_call") {
-        const ms = typeof it.durationMs === "number" ? Math.round(it.durationMs) : null;
-        const dur = ms !== null ? ` · ${ms}ms` : "";
-        if (it.success === false || it.error) return { kind: "error", what: `${tn} failed${dur}`.trim() };
-        return { kind: it.kind, what: `${tn} done${dur}`.trim() };
-      }
-
-      if (it.kind === "tool_result_persist") return { kind: it.kind, what: "tool result persisted" };
-
-      if (it.kind === "message_sending") return { kind: it.kind, what: "sending message" };
-      if (it.kind === "message_sent") {
-        if (it.success === false) return { kind: "error", what: "message failed to send" };
-        return { kind: it.kind, what: "sent a message" };
-      }
-
-      if (it.success === false || it.error) {
-        const e = it.error ? redactLine(it.error, 120) : "";
-        return { kind: "error", what: e ? `error: ${e}` : "error" };
-      }
-
-      return { kind: it.kind, what: it.kind };
-    };
+    // (Advanced feed removed)
 
     const safeCmdSummary = (cmd: unknown): string => {
       if (Array.isArray(cmd)) {
@@ -1044,35 +1005,94 @@ export default {
       return "command";
     };
 
+    const basenameLite = (p: unknown): string => {
+      const s = typeof p === "string" ? p.trim() : "";
+      if (!s) return "";
+      const parts = s.split(/\\|\//g).filter(Boolean);
+      const base = parts[parts.length - 1] || "";
+      return redactLine(base, 80);
+    };
+
+    const scrubUrlForFeed = (u: unknown): string => {
+      const s = typeof u === "string" ? u.trim() : "";
+      if (!s) return "";
+      // Keep it non-clickable: drop scheme + query/hash.
+      // Also avoid leaking localhost.
+      try {
+        const uu = new URL(s);
+        const host = uu.hostname;
+        const path = uu.pathname || "/";
+        const out = `${host}${path}`;
+        if (/^(localhost|127\.0\.0\.1)$/i.test(host)) return "[URL]";
+        return redactLine(out, 80);
+      } catch {
+        // Fall back: remove protocol if present.
+        const out = s.replace(/^https?:\/\//i, "").split(/[?#]/)[0];
+        if (/\blocalhost\b|\b127\.0\.0\.1\b/i.test(out)) return "[URL]";
+        return redactLine(out, 80);
+      }
+    };
+
     const toolHumanSummary = (it: FeedItem): string => {
       const tn = (it.toolName || "tool").trim();
       const d: any = it.details || {};
 
       if (tn === "browser") {
-        const act = typeof d.action === "string" ? d.action : (typeof d.op === "string" ? d.op : "action");
-        const url = typeof d.targetUrl === "string" ? d.targetUrl : (typeof d.url === "string" ? d.url : "");
-        const ref = typeof d.ref === "string" ? d.ref : "";
-        const selector = typeof d.selector === "string" ? d.selector : "";
-        const target = url ? redactLine(url, 80) : (ref ? `ref ${redactLine(ref, 60)}` : (selector ? `selector ${redactLine(selector, 60)}` : ""));
-        return target ? `browser: ${act} ${target}` : `browser: ${act}`;
+        const action = typeof d.action === "string" ? d.action : (typeof d.op === "string" ? d.op : "");
+        const reqKind = typeof d?.request?.kind === "string" ? String(d.request.kind) : "";
+
+        let verb = action || reqKind || "browser";
+        // Map to clear verbs.
+        if (verb === "navigate") verb = "Go to";
+        else if (verb === "open") verb = "Open";
+        else if (verb === "focus") verb = "Focus tab";
+        else if (verb === "close") verb = "Close tab";
+        else if (verb === "screenshot") verb = "Screenshot";
+        else if (verb === "snapshot") verb = "Snapshot";
+        else if (verb === "upload") verb = "Upload";
+        else if (verb === "console") verb = "Console";
+        else if (verb === "pdf") verb = "Export PDF";
+        else if (verb === "click") verb = "Click";
+        else if (verb === "type") verb = "Type";
+        else if (verb === "press") verb = "Press";
+        else if (verb === "hover") verb = "Hover";
+        else if (verb === "drag") verb = "Drag";
+        else if (verb === "select") verb = "Select";
+        else if (verb === "fill") verb = "Fill";
+        else if (verb === "resize") verb = "Resize";
+
+        const url = scrubUrlForFeed(d.targetUrl || d.url);
+        const ref = typeof d.ref === "string" ? redactLine(d.ref, 60) : (typeof d?.request?.ref === "string" ? redactLine(d.request.ref, 60) : "");
+        const selector = typeof d.selector === "string" ? redactLine(d.selector, 60) : (typeof d?.request?.selector === "string" ? redactLine(d.request.selector, 60) : "");
+
+        const target = url || (ref ? `ref ${ref}` : (selector ? selector : ""));
+        return target ? `${verb}: ${target}` : verb;
       }
 
       if (tn === "exec") {
         const first = safeCmdSummary(d.command);
-        return `running ${redactLine(first, 40)}`;
+        // Keep it short: do not render the whole command.
+        const token = redactLine(first, 40);
+        // Include exit code when available.
+        const code = typeof d.exitCode === "number" ? d.exitCode : (typeof d.code === "number" ? d.code : null);
+        const tail = code === null ? "" : ` (exit ${code})`;
+        return `Run: ${token}${tail}`.trim();
       }
 
       if (tn === "read") {
-        const p = (typeof d.path === "string" ? d.path : (typeof d.file_path === "string" ? d.file_path : ""));
-        return p ? `reading file ${redactLine(p, 80)}` : "reading a file";
+        const p = d.path ?? d.file_path;
+        const base = basenameLite(p);
+        return base ? `Read: ${base}` : "Read file";
       }
       if (tn === "write") {
-        const p = (typeof d.path === "string" ? d.path : (typeof d.file_path === "string" ? d.file_path : ""));
-        return p ? `writing file ${redactLine(p, 80)}` : "writing a file";
+        const p = d.path ?? d.file_path;
+        const base = basenameLite(p);
+        return base ? `Write: ${base}` : "Write file";
       }
       if (tn === "edit") {
-        const p = (typeof d.path === "string" ? d.path : (typeof d.file_path === "string" ? d.file_path : ""));
-        return p ? `editing file ${redactLine(p, 80)}` : "editing a file";
+        const p = d.path ?? d.file_path;
+        const base = basenameLite(p);
+        return base ? `Edit: ${base}` : "Edit file";
       }
 
       if (tn === "sessions_spawn") {
@@ -1081,7 +1101,7 @@ export default {
         const task = typeof d.task === "string" ? String(d.task) : "";
         const desc = redactLine((label || task).trim(), 120);
         const tail = desc ? ` — ${desc}` : "";
-        return `spawning sub-agent${child ? ` @${child}` : ""}${tail}`.trim();
+        return `Spawn sub-agent${child ? ` @${child}` : ""}${tail}`.trim();
       }
 
       return tn;
@@ -1090,11 +1110,7 @@ export default {
     const rowSentenceHuman = (it: FeedItem): { kind: FeedRowV3["kind"]; what: string } | null => {
       const tn = (it.toolName || "tool").trim();
 
-      if (it.kind === "before_agent_start") return { kind: it.kind, what: "started" };
-      if (it.kind === "agent_end") {
-        if (it.success === false || it.error) return { kind: "error", what: "ended (error)" };
-        return { kind: it.kind, what: "ended" };
-      }
+      // started/ended rows are rendered at the task level for clearer titles.
 
       if (it.kind === "message_sending") return { kind: it.kind, what: "sending a message" };
       if (it.kind === "message_sent") {
@@ -1126,10 +1142,9 @@ export default {
       const humanDedupeWindowMs = 1500;
       const lastHumanSigByAgent = new Map<string, { sig: string; ts: number }>();
 
-      const pushRow = (it: FeedItem, what: string, kind: FeedRowV3["kind"], level: FeedRowV3["level"], agentId: string, sessionKey?: string, taskId?: string) => {
+      const pushRow = (it: FeedItem, what: string, kind: FeedRowV3["kind"], agentId: string, sessionKey?: string, taskId?: string) => {
         const base = `${sessionKey || taskId || "task"}:row:${it.ts}:${String(kind || it.kind)}:${it.toolName || ""}`;
-        // Make IDs unique across levels so UI doesn't treat them as the same row.
-        const id = `${base}:${level || ""}`;
+        const id = base;
         out.push({
           id,
           ts: it.ts,
@@ -1137,7 +1152,6 @@ export default {
           sessionKey,
           rowType: "timeline",
           kind,
-          level,
           what,
           plain: what,
           action: what,
@@ -1153,20 +1167,28 @@ export default {
         for (const it of raw) {
           const who = it.agentId || fallbackAgentId;
 
-          // Human rows (default)
+          // Task boundaries: render meaningful started/ended rows.
+          if (it.kind === "before_agent_start") {
+            const title = redactLine(task.title || "Agent run", 120);
+            pushRow(it, `started — ${title}`, it.kind, who, sessionKey, task.id);
+            continue;
+          }
+          if (it.kind === "agent_end") {
+            const title = redactLine(task.title || "Agent run", 120);
+            const ok = task.status !== "error";
+            pushRow(it, `ended — ${title} (${ok ? "ok" : "failed"})`, ok ? it.kind : "error", who, sessionKey, task.id);
+            continue;
+          }
+
           const h = rowSentenceHuman(it);
           if (h) {
             const sig = `${who}|${String(h.kind)}|${h.what}`;
             const prev = lastHumanSigByAgent.get(who);
             if (!(prev && prev.sig === sig && Math.abs(it.ts - prev.ts) < humanDedupeWindowMs)) {
               lastHumanSigByAgent.set(who, { sig, ts: it.ts });
-              pushRow(it, h.what, h.kind, "human", who, sessionKey, task.id);
+              pushRow(it, h.what, h.kind, who, sessionKey, task.id);
             }
           }
-
-          // Advanced rows (engineers)
-          const a = rowSentenceAdvanced(it);
-          pushRow(it, a.what, a.kind, "advanced", who, sessionKey, task.id);
         }
       }
 
