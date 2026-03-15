@@ -1,5 +1,5 @@
     // UI build stamp (bump this when you deploy so we can confirm which frontend is running).
-    const UI_VERSION = 'feed-v3-20260315.10';
+    const UI_VERSION = 'feed-v3-20260315.12';
 
     const STATES = [
       {key:'reply', cls:'b-reply', label:'💬 replying'},
@@ -2401,7 +2401,7 @@
       if(statusEl){
         const base = rows.length ? (String(rows.length) + ' rows') : '—';
         const age = FEED.latest && FEED.latest.ts ? feedAge(FEED.latest.ts) : '';
-        const ageText = age ? ' · last: ' + age : '';
+        const ageText = age ? ' · last event: ' + age : '';
         const extra = [(FEED.pollStatus||'').trim(), (FEED.devSpawnStatus||'').trim()].filter(Boolean).join(' · ');
         statusEl.textContent = extra ? (base + ageText + ' · ' + extra) : (base + ageText);
       }
@@ -2493,7 +2493,9 @@
 
         const what = document.createElement('span');
         what.className = 'feed-v3-what';
-        what.textContent = fmtWhat(r);
+        const whatText = fmtWhat(r);
+        what.textContent = whatText;
+        what.title = whatText;
 
         line1.appendChild(time);
         line1.appendChild(agent);

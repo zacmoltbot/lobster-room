@@ -124,7 +124,7 @@ function contentTypeByExt(ext: string): string | null {
   return null;
 }
 
-const BUILD_TAG = "feed-v3-20260315.9";
+const BUILD_TAG = "feed-v3-20260315.12";
 
 export default {
   id: "lobster-room",
@@ -942,13 +942,25 @@ export default {
       if (prev && prev.state === state && (prev.toolName || "") === (toolName || "")) return;
       if (prev && (t - prev.ts) < FEED_PRESENCE_MIN_MS) return;
       lastPresenceByAgent.set(agentId, { state, ts: t, toolName });
+      const detailPayload: Record<string, unknown> = { state, toolName };
+      const extra: any = details && typeof details === "object" ? details : null;
+      if (extra) {
+        if (typeof extra.command === "string" || Array.isArray(extra.command)) detailPayload.command = extra.command;
+        if (typeof extra.action === "string") detailPayload.action = extra.action;
+        if (typeof extra.targetUrl === "string") detailPayload.targetUrl = extra.targetUrl;
+        if (typeof extra.ref === "string") detailPayload.ref = extra.ref;
+        if (typeof extra.selector === "string") detailPayload.selector = extra.selector;
+        if (typeof extra.op === "string") detailPayload.op = extra.op;
+        if (typeof extra.url === "string") detailPayload.url = extra.url;
+      }
+
       pushFeed({
         ts: t,
         kind: "presence",
         agentId,
         sessionKey: typeof (details as any)?.sessionKey === "string" ? String((details as any).sessionKey) : undefined,
         toolName,
-        details: { state, toolName },
+        details: detailPayload,
       });
     };
 
@@ -1085,7 +1097,7 @@ export default {
         .replace(/\b127\.0\.0\.1(?:\:\d+)?(?:\/[\w-.~%!$&'()*+,;=:@\/]*)?/gi, "[URL]");
     };
 
-    const redactLine = (s: string, max = 120): string => {
+    const redactLine = (s: string, max = 200): string => {
       const x = redactSecretsInText(String(s || "")).replace(/\s+/g, " ").trim();
       return maskUrlLite(x).slice(0, max);
     };
@@ -1133,66 +1145,81 @@ export default {
       }
     };
 
+    const isOpaqueRef = (s: string): boolean => {
+      const t = String(s || "").trim();
+      if (!t) return false;
+      return /^[a-z]{1,2}\d{1,6}$/i.test(t);
+    };
+
+    const browserActionLabel = (raw: string): string => {
+      const v = String(raw || "").trim().toLowerCase();
+      if (!v) return "";
+      if (v === "navigate" || v === "open") return "開啟";
+      if (v === "focus") return "切換分頁";
+      if (v === "close") return "關閉分頁";
+      if (v === "screenshot") return "截圖";
+      if (v === "snapshot") return "擷取快照";
+      if (v === "upload") return "上傳";
+      if (v === "console") return "主控台";
+      if (v === "pdf") return "輸出 PDF";
+      if (v === "click") return "點擊";
+      if (v === "type") return "輸入";
+      if (v === "press") return "按鍵";
+      if (v === "hover") return "滑過";
+      if (v === "drag") return "拖曳";
+      if (v === "select") return "選取";
+      if (v === "fill") return "填寫";
+      if (v === "resize") return "調整大小";
+      if (v === "wait") return "等待";
+      return raw;
+    };
+
+    const browserTarget = (d: any): string => {
+      const url = scrubUrlForFeed(d.targetUrl || d.url);
+      const selectorRaw = typeof d.selector === "string" ? d.selector : (typeof d?.request?.selector === "string" ? d.request.selector : "");
+      const selector = selectorRaw ? redactLine(selectorRaw, 120) : "";
+      const refRaw = typeof d.ref === "string" ? d.ref : (typeof d?.request?.ref === "string" ? d.request.ref : "");
+      const ref = refRaw && !isOpaqueRef(refRaw) ? redactLine(refRaw, 80) : "";
+      return url || selector || (ref ? `ref ${ref}` : "");
+    };
+
     const toolHumanSummary = (it: FeedItem): string => {
       const tn = (it.toolName || "tool").trim();
       const d: any = it.details || {};
 
       if (tn === "browser") {
-        const action = typeof d.action === "string" ? d.action : (typeof d.op === "string" ? d.op : "");
-        const reqKind = typeof d?.request?.kind === "string" ? String(d.request.kind) : "";
-
-        let verb = action || reqKind || "browser";
-        // Map to clear verbs.
-        if (verb === "navigate") verb = "Go to";
-        else if (verb === "open") verb = "Open";
-        else if (verb === "focus") verb = "Focus tab";
-        else if (verb === "close") verb = "Close tab";
-        else if (verb === "screenshot") verb = "Screenshot";
-        else if (verb === "snapshot") verb = "Snapshot";
-        else if (verb === "upload") verb = "Upload";
-        else if (verb === "console") verb = "Console";
-        else if (verb === "pdf") verb = "Export PDF";
-        else if (verb === "click") verb = "Click";
-        else if (verb === "type") verb = "Type";
-        else if (verb === "press") verb = "Press";
-        else if (verb === "hover") verb = "Hover";
-        else if (verb === "drag") verb = "Drag";
-        else if (verb === "select") verb = "Select";
-        else if (verb === "fill") verb = "Fill";
-        else if (verb === "resize") verb = "Resize";
-
-        const url = scrubUrlForFeed(d.targetUrl || d.url);
-        const ref = typeof d.ref === "string" ? redactLine(d.ref, 60) : (typeof d?.request?.ref === "string" ? redactLine(d.request.ref, 60) : "");
-        const selector = typeof d.selector === "string" ? redactLine(d.selector, 60) : (typeof d?.request?.selector === "string" ? redactLine(d.request.selector, 60) : "");
-
-        const target = url || (ref ? `ref ${ref}` : (selector ? selector : ""));
-        return target ? `${verb}: ${target}` : verb;
+        const action = typeof d.action === "string" ? d.action
+          : (typeof d.op === "string" ? d.op
+            : (typeof d?.request?.kind === "string" ? String(d.request.kind) : ""));
+        const verb = browserActionLabel(action);
+        const target = browserTarget(d);
+        const detail = target ? `${verb || "操作"}：${target}` : (verb ? verb : "");
+        const tail = detail ? `（${detail}）` : "";
+        return `操作網頁${tail}`;
       }
 
       if (tn === "exec") {
         const first = safeCmdSummary(d.command);
-        // Keep it short: do not render the whole command.
-        const token = redactLine(first, 40);
-        // Include exit code when available.
+        const token = redactLine(first, 80);
         const code = typeof d.exitCode === "number" ? d.exitCode : (typeof d.code === "number" ? d.code : null);
-        const tail = code === null ? "" : ` (exit ${code})`;
-        return `Run: ${token}${tail}`.trim();
+        const tail = code === null ? "" : `（exit ${code}）`;
+        return token ? `跑指令：${token}${tail}`.trim() : `跑指令${tail}`.trim();
       }
 
       if (tn === "read") {
         const p = d.path ?? d.file_path;
         const base = basenameLite(p);
-        return base ? `Read: ${base}` : "Read file";
+        return base ? `讀取檔案：${base}` : "讀取檔案";
       }
       if (tn === "write") {
         const p = d.path ?? d.file_path;
         const base = basenameLite(p);
-        return base ? `Write: ${base}` : "Write file";
+        return base ? `寫入檔案：${base}` : "寫入檔案";
       }
       if (tn === "edit") {
         const p = d.path ?? d.file_path;
         const base = basenameLite(p);
-        return base ? `Edit: ${base}` : "Edit file";
+        return base ? `修改檔案：${base}` : "修改檔案";
       }
 
       if (tn === "sessions_spawn") {
@@ -1201,10 +1228,45 @@ export default {
         const task = typeof d.task === "string" ? String(d.task) : "";
         const desc = redactLine((label || task).trim(), 120);
         const tail = desc ? ` — ${desc}` : "";
-        return `Spawn sub-agent${child ? ` @${child}` : ""}${tail}`.trim();
+        return `啟動子代理${child ? ` @${child}` : ""}${tail}`.trim();
       }
 
       return tn;
+    };
+
+    const toolStateSummary = (details: any): string => {
+      const tn = typeof details?.toolName === "string" ? String(details.toolName).trim() : "";
+      if (tn === "browser") {
+        const action = typeof details?.action === "string" ? details.action
+          : (typeof details?.op === "string" ? details.op
+            : (typeof details?.request?.kind === "string" ? String(details.request.kind) : ""));
+        const verb = browserActionLabel(action);
+        const target = browserTarget(details || {});
+        const detail = target ? `${verb || "操作"}：${target}` : (verb ? verb : "");
+        const tail = detail ? `（${detail}）` : "";
+        return `正在操作網頁${tail}`;
+      }
+      if (tn === "exec") {
+        const token = redactLine(safeCmdSummary(details?.command), 80);
+        return token ? `正在跑指令（${token}）` : "正在跑指令";
+      }
+      if (tn) return `正在使用工具（${redactLine(tn, 40)}）`;
+      return "正在使用工具";
+    };
+
+    const humanStateLabel = (stRaw: string, details?: any): string => {
+      const st = stRaw === "reply" ? "replying"
+        : stRaw === "tool" ? "tool"
+        : stRaw === "thinking" ? "thinking"
+        : stRaw === "idle" ? "idle"
+        : stRaw === "error" ? "error"
+        : stRaw;
+      if (st === "thinking") return "在思考下一步";
+      if (st === "replying") return "正在回覆訊息";
+      if (st === "idle") return "閒置";
+      if (st === "tool") return toolStateSummary(details || {});
+      if (st === "error") return "發生錯誤";
+      return st || "狀態更新";
     };
 
     const rowSentenceHuman = (it: FeedItem): { kind: FeedRowV3["kind"]; what: string } | null => {
@@ -1212,31 +1274,23 @@ export default {
 
       if (it.kind === "presence") {
         const stRaw = typeof (it.details as any)?.state === "string" ? String((it.details as any).state) : "";
-        const st = stRaw === "reply" ? "replying"
-          : stRaw === "tool" ? "tool"
-          : stRaw === "thinking" ? "thinking"
-          : stRaw === "idle" ? "idle"
-          : stRaw === "error" ? "error"
-          : stRaw;
-        const tn2 = typeof it.toolName === "string" ? it.toolName : (typeof (it.details as any)?.toolName === "string" ? (it.details as any).toolName : "");
-        const tool = tn2 ? redactLine(tn2, 40) : "";
-        const tail = (stRaw === "tool" && tool) ? `: ${tool}` : "";
-        const what = (st || "state") + tail;
+        const what = humanStateLabel(stRaw, it.details || {});
         return { kind: stRaw === "error" ? "error" : it.kind, what };
       }
 
       // started/ended rows are rendered at the task level for clearer titles.
 
-      if (it.kind === "message_sending") return { kind: it.kind, what: "sending a message" };
+      if (it.kind === "message_sending") return { kind: it.kind, what: "正在傳送訊息" };
       if (it.kind === "message_sent") {
-        if (it.success === false) return { kind: "error", what: "message failed to send" };
-        return { kind: it.kind, what: "sent a message" };
+        if (it.success === false) return { kind: "error", what: "訊息傳送失敗" };
+        return { kind: it.kind, what: "已送出訊息" };
       }
 
       // State changes: show as "idle", "thinking", "tool", "reply", "error".
       if (it.kind === "state") {
-        const st = String((it.details as any)?.state || "changed");
-        return { kind: it.kind, what: `state → ${st}` };
+        const stRaw = typeof (it.details as any)?.state === "string" ? String((it.details as any).state) : "";
+        const label = humanStateLabel(stRaw, it.details || {});
+        return { kind: it.kind, what: stRaw ? `狀態更新：${label}` : "狀態更新" };
       }
 
       // Hide low-signal bookkeeping in default view.
@@ -1247,8 +1301,8 @@ export default {
         const summary = toolHumanSummary(it);
         if (it.kind === "before_tool_call") return { kind: it.kind, what: `${summary}…` };
         // after_tool_call
-        if (it.success === false || it.error) return { kind: "error", what: `${summary} (failed)` };
-        return { kind: it.kind, what: `${summary} (done)` };
+        if (it.success === false || it.error) return { kind: "error", what: `${summary}（失敗）` };
+        return { kind: it.kind, what: `${summary}（完成）` };
       }
 
       // Fallback: omit other raw events in default feed.
@@ -1262,6 +1316,36 @@ export default {
       // Default feed should be readable: de-dup short bursts of identical low-signal rows.
       const humanDedupeWindowMs = 1500;
       const lastHumanSigByAgent = new Map<string, { sig: string; ts: number }>();
+
+      const toolPresenceMergeWindowMs = 1200;
+
+      const shouldSkipPresenceTool = (it: FeedItem, idx: number, raw: FeedItem[], who: string): boolean => {
+        if (it.kind !== "presence") return false;
+        const stRaw = typeof (it.details as any)?.state === "string" ? String((it.details as any).state) : "";
+        if (stRaw !== "tool") return false;
+        const toolName = typeof it.toolName === "string" ? it.toolName
+          : (typeof (it.details as any)?.toolName === "string" ? String((it.details as any).toolName) : "");
+
+        const matches = (x: FeedItem): boolean => {
+          if (!x || x.kind !== "before_tool_call") return false;
+          const agent = x.agentId || who;
+          if (agent !== who) return false;
+          if (!toolName) return true;
+          return (x.toolName || "") === toolName;
+        };
+
+        for (let j = idx - 1; j >= 0; j--) {
+          const prev = raw[j];
+          if (it.ts - prev.ts > toolPresenceMergeWindowMs) break;
+          if (matches(prev)) return true;
+        }
+        for (let j = idx + 1; j < raw.length; j++) {
+          const next = raw[j];
+          if (next.ts - it.ts > toolPresenceMergeWindowMs) break;
+          if (matches(next)) return true;
+        }
+        return false;
+      };
 
       const pushRow = (it: FeedItem, what: string, kind: FeedRowV3["kind"], agentId: string, sessionKey?: string, taskId?: string) => {
         const base = `${sessionKey || taskId || "task"}:row:${it.ts}:${String(kind || it.kind)}:${it.toolName || ""}`;
@@ -1285,7 +1369,8 @@ export default {
         const raw = Array.isArray(task.items) ? task.items.slice().sort((a, b) => a.ts - b.ts) : [];
         if (!raw.length) continue;
 
-        for (const it of raw) {
+        for (let i = 0; i < raw.length; i++) {
+          const it = raw[i];
           const who = it.agentId || fallbackAgentId;
 
           // Task boundaries: render meaningful started/ended rows.
@@ -1300,6 +1385,8 @@ export default {
             pushRow(it, `ended — ${title} (${ok ? "ok" : "failed"})`, ok ? it.kind : "error", who, sessionKey, task.id);
             continue;
           }
+
+          if (shouldSkipPresenceTool(it, i, raw, who)) continue;
 
           const h = rowSentenceHuman(it);
           if (h) {
@@ -1367,6 +1454,7 @@ export default {
         cur.sinceMs = t;
         cur.lastEventMs = t;
         cur.details = { ...(cur.details || {}), toolMax: true };
+        pushPresence(agentId, "thinking", cur.details || null);
         setIdleWithCooldown(agentId);
       }, toolMaxMs);
     };
@@ -1436,6 +1524,7 @@ export default {
         cur.sinceMs = t;
         cur.lastEventMs = t;
         cur.details = null;
+        pushPresence(agentId, "idle", null);
       }, waitMs);
       // Update lastEvent so API knows something just happened.
       row.lastEventMs = scheduledAt;
@@ -1563,7 +1652,7 @@ export default {
           spawnAgentId: toolName === "sessions_spawn" ? coerceStr(toolData.spawnAgentId, 80) : undefined,
         },
       });
-      setState(agentId, "tool", { toolName, sessionKey: ctx?.sessionKey });
+      setState(agentId, "tool", { ...toolData, sessionKey: ctx?.sessionKey });
     });
 
     api.on("after_tool_call", (event, ctx) => {
