@@ -124,7 +124,7 @@ function contentTypeByExt(ext: string): string | null {
   return null;
 }
 
-const BUILD_TAG = "feed-v3-20260315.14";
+const BUILD_TAG = "feed-v3-20260315.19";
 
 export default {
   id: "lobster-room",
@@ -790,6 +790,178 @@ export default {
           await mergeAndWriteSnapshot();
         }, 50);
       } catch {}
+    };
+
+    const readSnapshotDisk = async (): Promise<ActivitySnapshot | null> => {
+      try {
+        const txt = await fs.readFile(snapshotPath, "utf8");
+        const obj = JSON.parse(txt);
+        if (obj && typeof obj === "object" && typeof (obj as any).buildTag === "string") return obj as any;
+      } catch {
+        return null;
+      }
+      return null;
+    };
+
+    const collectAllowedAgentIds = (snapDisk: ActivitySnapshot | null): string[] => {
+      const agentIdAllowRaw = (process.env.LOBSTER_ROOM_AGENT_IDS || "").trim();
+      let allowIds: string[] = [];
+      if (agentIdAllowRaw) {
+        allowIds = agentIdAllowRaw
+          .split(",")
+          .map((s) => s.trim())
+          .filter(Boolean);
+      } else {
+        const ids: string[] = [];
+        const seen = new Set<string>();
+        const agentListRaw = Array.isArray(api.config?.agents?.list) ? api.config.agents.list : [];
+        for (const a of agentListRaw) {
+          const id = a?.id;
+          if (typeof id === "string" && id.trim() && !seen.has(id.trim())) {
+            ids.push(id.trim());
+            seen.add(id.trim());
+          }
+        }
+        for (const id of activity.keys()) {
+          if (id && !seen.has(id)) {
+            ids.push(id);
+            seen.add(id);
+          }
+        }
+        const snapAgentIds = snapDisk && snapDisk.agents ? Object.keys(snapDisk.agents) : [];
+        for (const id of snapAgentIds) {
+          if (id && !seen.has(id)) {
+            ids.push(id);
+            seen.add(id);
+          }
+        }
+        if (!seen.has("main")) {
+          ids.push("main");
+          seen.add("main");
+        }
+        allowIds = ids.length ? ids : ["main"];
+      }
+      return allowIds;
+    };
+
+    const deriveActivitySnapshot = async (): Promise<ActivitySnapshot> => {
+      const t = nowMs();
+      const snapDisk = await readSnapshotDisk();
+      const allowIds = collectAllowedAgentIds(snapDisk);
+      for (const id of allowIds) ensure(id);
+
+      const gatewayToken: string | null = typeof api.config?.gateway?.auth?.token === "string" ? api.config.gateway.auth.token : null;
+      const invokeUrl = "http://127.0.0.1:18789/tools/invoke";
+      const invoke = async (tool: string, args: any) => {
+        const headers: Record<string, string> = { "content-type": "application/json" };
+        if (gatewayToken) headers.authorization = `Bearer ${gatewayToken}`;
+        const resp = await fetch(invokeUrl, { method: "POST", headers, body: JSON.stringify({ tool, args }) });
+        const data = await resp.json();
+        if (!data?.ok) throw new Error(String(data?.error || "invoke_failed"));
+        return data;
+      };
+
+      const skToAgentId = (sk: unknown): string | null => {
+        if (typeof sk !== "string") return null;
+        const m = sk.match(/^agent:([^:]+):/);
+        return m && m[1] ? m[1] : null;
+      };
+
+      let sessions: any[] = [];
+      try {
+        const r = await invoke("sessions_list", {});
+        const details = r?.result?.details || {};
+        sessions = Array.isArray(details.sessions) ? details.sessions : [];
+      } catch {
+        sessions = [];
+      }
+
+      const sessionsByAgent = new Map<string, any[]>();
+      for (const s of sessions) {
+        const aid = skToAgentId(s?.key);
+        if (!aid) continue;
+        const arr = sessionsByAgent.get(aid) || [];
+        arr.push(s);
+        sessionsByAgent.set(aid, arr);
+      }
+
+      const agents: ActivitySnapshot["agents"] = {};
+      let updatedAtMs = snapDisk?.updatedAtMs || 0;
+
+      for (const agentId of allowIds) {
+        const list = (sessionsByAgent.get(agentId) || []).filter((s) => typeof s?.key === "string");
+        list.sort((a, b) => (Number(b?.updatedAt || 0) - Number(a?.updatedAt || 0)));
+
+        const maxUpdatedAt = list.length ? Number(list[0]?.updatedAt || 0) : 0;
+        const recent = !!(maxUpdatedAt && (t - maxUpdatedAt) <= staleMs);
+
+        let queueDepth: number | null = null;
+        let statusText: string | null = null;
+        if (list.length) {
+          try {
+            const r2 = await invoke("session_status", { sessionKey: String(list[0].key) });
+            const det2 = r2?.result?.details || {};
+            const qd = det2.queueDepth ?? det2?.queue?.depth;
+            if (Number.isFinite(Number(qd))) queueDepth = Number(qd);
+            if (typeof det2.statusText === "string") statusText = det2.statusText;
+          } catch {}
+        }
+
+        let lastType: string | null = null;
+        let lastRole: string | null = null;
+        let historyTypes: string[] = [];
+        if (list.length) {
+          try {
+            const r3 = await invoke("sessions_history", { sessionKey: String(list[0].key), limit: 8 });
+            const msgs = r3?.result?.details?.messages || [];
+            const last = Array.isArray(msgs) && msgs.length ? msgs[0] : null;
+            lastRole = typeof last?.role === "string" ? last.role : null;
+            const c = last?.content;
+            if (Array.isArray(c)) {
+              for (const part of c) {
+                if (part && typeof part === "object" && typeof part.type === "string") historyTypes.push(part.type);
+              }
+              lastType = historyTypes[0] || null;
+            }
+          } catch {}
+        }
+
+        let activityState: ActivityState = "idle";
+        const snapRow = snapDisk?.agents?.[agentId];
+        const snapFresh = !!(snapRow && typeof snapRow.lastEventMs === "number" && (t - snapRow.lastEventMs) <= staleMs);
+        if (snapFresh) {
+          activityState = snapRow.state as ActivityState;
+        } else if (typeof queueDepth === "number" && queueDepth > 0) {
+          activityState = "thinking";
+        } else if (recent && lastType === "toolCall") {
+          activityState = "tool";
+        } else if (recent && lastType === "text" && lastRole === "assistant") {
+          activityState = "reply";
+        } else {
+          activityState = "idle";
+        }
+
+        const sinceOut = snapFresh ? (snapRow?.sinceMs || null) : (maxUpdatedAt || null);
+        const lastOut = snapFresh ? (snapRow?.lastEventMs || null) : (maxUpdatedAt || null);
+        const details = snapFresh ? (snapRow?.details || null) : { queueDepth, statusText, historyTypes, lastRole, lastType };
+
+        agents[agentId] = {
+          state: activityState,
+          sinceMs: sinceOut || t,
+          lastEventMs: lastOut || t,
+          details: details || null,
+        };
+        if (typeof lastOut === "number" && Number.isFinite(lastOut)) updatedAtMs = Math.max(updatedAtMs, lastOut);
+      }
+
+      if (!updatedAtMs) updatedAtMs = t;
+
+      return {
+        buildTag: BUILD_TAG,
+        updatedAtMs,
+        agents,
+        events: snapDisk?.events || [],
+      };
     };
 
     const pushEvent = (kind: string, params: { agentId?: string; data?: any }) => {
@@ -2103,6 +2275,18 @@ export default {
 
             // --- Message Feed ops (multiplexed) ---
             if (op === "feedGet") {
+              const tNow = nowMs();
+              // Feed freeze fix: ensure latest.ts always advances while any agent is non-idle.
+              // Inject heartbeat presence events into feedBuf to prevent feed freeze.
+              // This runs on every feedGet call (not just when gap > 10s) to ensure feed keeps moving.
+              try {
+                const snapDerived = await deriveActivitySnapshot();
+                const activeAgents = Object.entries(snapDerived.agents || {}).filter(([, row]) => row && row.state !== "idle");
+                for (const [agentId, row] of activeAgents) {
+                  pushPresence(agentId as string, row.state as ActivityState, row.details || null, { force: true, heartbeat: true });
+                }
+              } catch {}
+
               const limit = Math.max(1, Math.min(500, Number(payload?.limit) || 120));
               const agentId = typeof payload?.agentId === "string" ? payload.agentId.trim() : "";
               const kind = typeof payload?.kind === "string" ? payload.kind.trim() : "";
@@ -2139,6 +2323,16 @@ export default {
                 })),
                 items: includeRaw ? items.slice().reverse().map((it) => ({ ...it, preview: feedPreview(it) })) : undefined,
               });
+              return;
+            }
+
+            if (op === "activityGet") {
+              try {
+                const snapshot = await deriveActivitySnapshot();
+                sendJson(res, 200, { ok: true, snapshot });
+              } catch (err: any) {
+                sendJson(res, 200, { ok: false, error: "activity_failed", detail: String(err?.message || err) });
+              }
               return;
             }
 

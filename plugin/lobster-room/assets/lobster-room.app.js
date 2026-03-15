@@ -1,5 +1,5 @@
     // UI build stamp (bump this when you deploy so we can confirm which frontend is running).
-    const UI_VERSION = 'feed-v3-20260315.14';
+    const UI_VERSION = 'feed-v3-20260315.19';
 
     const STATES = [
       {key:'reply', cls:'b-reply', label:'💬 replying'},
@@ -2082,43 +2082,56 @@
       if(!el) return;
       if(MODEL.activityPollDisabled) return;
       try{
-        // Note: assets handler may not allow .json in some deployments; use .js extension with JSON body.
-        const r = await fetch('./assets/user/activity.js?ts=' + Date.now(), {cache:'no-store'});
+        const r = await fetch('./api/lobster-room', {
+          method: 'POST',
+          headers: {'content-type':'application/json'},
+          cache: 'no-store',
+          body: JSON.stringify({op: 'activityGet'}),
+        });
         if(!r.ok){
           if(r.status === 404){ MODEL.activityPollDisabled = true; }
           el.textContent = '';
           return;
         }
-        const txt = await r.text();
-        const j = JSON.parse(txt);
-        if(!j || !j.status){ el.textContent=''; MODEL.activity=null; return; }
+        const data = await r.json();
+        const snap = (data && data.snapshot) ? data.snapshot : null;
+        if(!data || !data.ok || !snap || !snap.agents){ el.textContent=''; MODEL.activity=null; return; }
 
-        const ageMs = (typeof j.updatedAt === 'number') ? (Date.now() - j.updatedAt) : null;
+        const agents = snap.agents || {};
+        let agentId = 'main';
+        if(!agents[agentId]){
+          const ids = Object.keys(agents || {});
+          agentId = ids[0] || '';
+        }
+        const row = agentId ? agents[agentId] : null;
+        if(!row || !row.state){ el.textContent=''; MODEL.activity=null; return; }
+
+        const updatedAt = (typeof snap.updatedAtMs === 'number') ? snap.updatedAtMs : null;
+        const ageMs = (updatedAt!=null) ? (Date.now() - updatedAt) : null;
         const ageSec = (ageMs==null) ? null : Math.max(0, Math.round(ageMs/1000));
-        // "working" is only valid if we have a fresh update.
         const fresh = (ageMs!=null && isFinite(ageMs) && ageMs < 45*1000);
-        const effectiveStatus = (j.status === 'working' && !fresh) ? 'paused' : j.status;
+        const rawState = String(row.state||'');
+        const effectiveStatus = (rawState === 'idle') ? 'paused' : (rawState === 'error' ? 'blocked' : 'working');
         const ageTxt = (ageSec==null) ? '' : (' · ' + ageSec + 's ago');
 
         const who = MODEL.selfName || 'Zac';
+        const detail = (row.details && (row.details.toolName || row.details.statusText)) ? (row.details.toolName || row.details.statusText) : '';
         let msg = '';
         if(effectiveStatus === 'working'){
-          msg = `${who}: WORKING ${j.task||''} ${j.step||''} — ${j.detail||''}${ageTxt}`;
-        }else if(effectiveStatus === 'done'){
-          msg = `${who}: DONE ${j.task||''} ${j.step||''} — ${j.detail||''}${ageTxt}`;
+          msg = \`${who}: WORKING ${detail||''}${ageTxt}\`;
         }else if(effectiveStatus === 'blocked'){
-          msg = `${who}: BLOCKED ${j.task||''} ${j.step||''} — ${j.detail||''}${ageTxt}`;
+          msg = \`${who}: BLOCKED ${detail||''}${ageTxt}\`;
         }else{
-          msg = `${who}: PAUSED ${j.task||''} ${j.step||''} — ${j.detail||''}${ageTxt}`;
+          msg = \`${who}: PAUSED ${detail||''}${ageTxt}\`;
         }
 
         el.textContent = msg.replace(/\s+/g,' ').trim();
         MODEL.activity = {
           status: effectiveStatus,
-          task: j.task || null,
-          step: j.step || null,
-          detail: j.detail || null,
-          updatedAt: (typeof j.updatedAt === 'number') ? j.updatedAt : null,
+          task: null,
+          step: null,
+          detail: detail || null,
+          updatedAt,
           fresh,
         };
       }catch{ el.textContent=''; MODEL.activity = null; }
