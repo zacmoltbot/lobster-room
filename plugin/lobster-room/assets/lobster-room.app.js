@@ -1,5 +1,5 @@
     // UI build stamp (bump this when you deploy so we can confirm which frontend is running).
-    const UI_VERSION = 'feed-v3-20260315.19';
+    const UI_VERSION = 'feed-v3-20260315.20';
 
     const STATES = [
       {key:'reply', cls:'b-reply', label:'💬 replying'},
@@ -2118,11 +2118,11 @@
         const detail = (row.details && (row.details.toolName || row.details.statusText)) ? (row.details.toolName || row.details.statusText) : '';
         let msg = '';
         if(effectiveStatus === 'working'){
-          msg = \`${who}: WORKING ${detail||''}${ageTxt}\`;
+          msg = `${who}: WORKING ${detail||''}${ageTxt}`;
         }else if(effectiveStatus === 'blocked'){
-          msg = \`${who}: BLOCKED ${detail||''}${ageTxt}\`;
+          msg = `${who}: BLOCKED ${detail||''}${ageTxt}`;
         }else{
-          msg = \`${who}: PAUSED ${detail||''}${ageTxt}\`;
+          msg = `${who}: PAUSED ${detail||''}${ageTxt}`;
         }
 
         el.textContent = msg.replace(/\s+/g,' ').trim();
