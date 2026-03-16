@@ -1,5 +1,5 @@
     // UI build stamp (bump this when you deploy so we can confirm which frontend is running).
-    const UI_VERSION = 'feed-v3-20260316.1';
+    const UI_VERSION = 'feed-v3-20260316.2';
 
     const STATES = [
       {key:'reply', cls:'b-reply', label:'💬 replying'},
@@ -2426,7 +2426,8 @@
         for(const a of agents){
           const id0 = String(a && a.id || '').trim();
           if(!id0) continue;
-          const m = id0.match(/^resident@(.+)$/);
+          // Strip any prefix like "resident@" to show clean agent names (@main, @qa_agent, etc)
+          const m = id0.match(/^[^@]+@(.+)$/);
           const id = m ? m[1] : id0;
           const st = (a && a.debug && a.debug.decision) ? String(a.debug.decision.activityState||'idle') : 'idle';
           // Optional detail: current tool name
