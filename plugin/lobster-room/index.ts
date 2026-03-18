@@ -9,7 +9,6 @@ type PluginApi = {
   logger: { info: (msg: string, meta?: any) => void; warn: (msg: string, meta?: any) => void };
   registerHttpRoute: (params: {
     path: string;
-    match?: "exact" | "prefix";
     handler: (req: IncomingMessage, res: ServerResponse) => void | Promise<void>;
   }) => void;
   on: (hookName: string, handler: (event: any, ctx: any) => any, opts?: { priority?: number }) => void;
@@ -125,7 +124,7 @@ function contentTypeByExt(ext: string): string | null {
   return null;
 }
 
-const BUILD_TAG = "feed-v3-20260315.19";
+const BUILD_TAG = "2026-03-08-debug-hooks-1";
 
 export default {
   id: "lobster-room",
@@ -134,8 +133,6 @@ export default {
     // Resolve asset path relative to this plugin module (NOT the gateway cwd).
     const pluginDir = dirname(fileURLToPath(import.meta.url));
     const portalHtmlPath = join(pluginDir, "assets", "lobster-room.html");
-    const bundledRoomImgPath = join(pluginDir, "assets", "default-room.jpg");
-    const bundledManualMapPath = join(pluginDir, "assets", "default-manual-map.json");
 
     // --- Rooms (multi-background profiles) ---
     const rootUserDir = join(pluginDir, "assets", "user");
@@ -273,15 +270,12 @@ export default {
     };
 
     // --- HTTP: dynamic handler (prefix routing) ---
-    // Use registerHttpRoute with match: "prefix" for routes like /lobster-room/**
-    api.registerHttpRoute({
-      path: "/lobster-room/",
-      match: "prefix",
-      handler: async (req, res) => {
-        const url = readRequestUrl(req);
-        // Normalize trailing slashes so routes work with or without a final '/'
-        const pRaw = url.pathname || "/";
-        const p = (pRaw !== "/") ? pRaw.replace(/\/+$/, "") : "/";
+    // OpenClaw plugin httpRoutes are exact-path matches; use httpHandler for prefix routes like static assets.
+    api.registerHttpRoute(async (req, res) => {
+      const url = readRequestUrl(req);
+      // Normalize trailing slashes so routes work with or without a final '/'
+      const pRaw = url.pathname || "/";
+      const p = (pRaw !== "/") ? pRaw.replace(/\/+$/, "") : "/";
 
       // Static assets: /lobster-room/assets/** → <pluginDir>/assets/**
       const assetsPrefix = "/lobster-room/assets/";
@@ -292,11 +286,13 @@ export default {
         if (!rel || rel.includes("..") || rel.includes("\\")) {
           res.statusCode = 400;
           res.end("bad_request");
+          return true;
         }
         const ct = contentTypeByExt(extname(rel));
         if (!ct) {
           res.statusCode = 415;
           res.end("unsupported_media_type");
+          return true;
         }
         try {
           const buf = await fs.readFile(join(pluginDir, "assets", rel));
@@ -305,23 +301,10 @@ export default {
           res.setHeader("cache-control", "no-store");
           res.end(buf);
         } catch {
-          if (rel === "user/activity.js") {
-            const payload = JSON.stringify({ status: "" });
-            res.statusCode = 200;
-            res.setHeader("content-type", "application/json; charset=utf-8");
-            res.setHeader("cache-control", "no-store");
-            res.end(payload);
-            // Best-effort seed so future reads succeed.
-            try {
-              const target = join(pluginDir, "assets", rel);
-              await fs.mkdir(dirname(target), { recursive: true });
-              await fs.writeFile(target, payload);
-            } catch {}
-          } else {
-            res.statusCode = 404;
-            res.end("not_found");
-          }
+          res.statusCode = 404;
+          res.end("not_found");
         }
+        return true;
       }
 
       // Agent label mapping API
@@ -329,6 +312,7 @@ export default {
         if ((req.method || "GET").toUpperCase() === "GET") {
           const m = await readAgentLabels();
           sendJson(res, 200, { ok: true, labels: m });
+          return true;
         }
         if ((req.method || "GET").toUpperCase() === "POST") {
           try {
@@ -350,9 +334,11 @@ export default {
           } catch (err: any) {
             sendJson(res, 400, { ok: false, error: String(err?.message || err) });
           }
+          return true;
         }
         res.statusCode = 405;
         res.end("method_not_allowed");
+        return true;
       }
 
       // Rooms API
@@ -360,6 +346,7 @@ export default {
         if ((req.method || "GET").toUpperCase() === "GET") {
           const idx = (await readRoomsIndex()) || { activeRoomId: defaultRoomId, rooms: [{ id: defaultRoomId, name: "Default", createdAt: 0, updatedAt: 0 }] };
           sendJson(res, 200, { ok: true, ...idx });
+          return true;
         }
         if ((req.method || "GET").toUpperCase() === "POST" && p.endsWith("/active")) {
           try {
@@ -375,6 +362,7 @@ export default {
           } catch (err: any) {
             sendJson(res, 400, { ok: false, error: String(err?.message || err) });
           }
+          return true;
         }
 
         if ((req.method || "GET").toUpperCase() === "POST" && p.endsWith("/delete")) {
@@ -402,10 +390,12 @@ export default {
           } catch (err: any) {
             sendJson(res, 400, { ok: false, error: String(err?.message || err) });
           }
+          return true;
         }
 
         res.statusCode = 405;
         res.end("method_not_allowed");
+        return true;
       }
 
       // Manual map API (user painted walkable zones) (per-active-room)
@@ -417,6 +407,7 @@ export default {
           if ((req.method || "GET").toUpperCase() !== "POST") {
             res.statusCode = 405;
             res.end("method_not_allowed");
+            return true;
           }
           try {
             await fs.unlink(mapPath).catch(() => undefined);
@@ -424,6 +415,7 @@ export default {
           } catch (err: any) {
             sendJson(res, 500, { ok: false, error: String(err?.message || err) });
           }
+          return true;
         }
 
         if ((req.method || "GET").toUpperCase() === "GET") {
@@ -434,31 +426,10 @@ export default {
             res.setHeader("cache-control", "no-store");
             res.end(txt);
           } catch {
-            try {
-              const txt = await fs.readFile(bundledManualMapPath, "utf8");
-              res.statusCode = 200;
-              res.setHeader("content-type", "application/json; charset=utf-8");
-              res.setHeader("cache-control", "no-store");
-              res.end(txt);
-              // Best-effort seed so future reads succeed.
-              try {
-                await fs.mkdir(dirname(mapPath), { recursive: true });
-                await fs.writeFile(mapPath, txt);
-              } catch {}
-            } catch {
-              const empty = { version: 1, tx: 32, ty: 20, cells: new Array(32 * 20).fill(null), updatedAt: null };
-              const txt = JSON.stringify(empty, null, 2);
-              res.statusCode = 200;
-              res.setHeader("content-type", "application/json; charset=utf-8");
-              res.setHeader("cache-control", "no-store");
-              res.end(txt);
-              // Best-effort seed so future reads succeed.
-              try {
-                await fs.mkdir(dirname(mapPath), { recursive: true });
-                await fs.writeFile(mapPath, txt);
-              } catch {}
-            }
+            res.statusCode = 404;
+            res.end("not_found");
           }
+          return true;
         }
 
         if ((req.method || "GET").toUpperCase() === "POST") {
@@ -484,10 +455,12 @@ export default {
           } catch (err: any) {
             sendJson(res, 400, { ok: false, error: String(err?.message || err) });
           }
+          return true;
         }
 
         res.statusCode = 405;
         res.end("method_not_allowed");
+        return true;
       }
 
       // Room layout API (inferred regions)
@@ -498,6 +471,7 @@ export default {
           if ((req.method || "GET").toUpperCase() !== "POST") {
             res.statusCode = 405;
             res.end("method_not_allowed");
+            return true;
           }
           try {
             await fs.unlink(layoutPath).catch(() => undefined);
@@ -505,6 +479,7 @@ export default {
           } catch (err: any) {
             sendJson(res, 500, { ok: false, error: String(err?.message || err) });
           }
+          return true;
         }
 
         if ((req.method || "GET").toUpperCase() === "GET") {
@@ -518,6 +493,7 @@ export default {
             res.statusCode = 404;
             res.end("not_found");
           }
+          return true;
         }
 
         if ((req.method || "GET").toUpperCase() === "POST") {
@@ -533,10 +509,12 @@ export default {
           } catch (err: any) {
             sendJson(res, 400, { ok: false, error: String(err?.message || err) });
           }
+          return true;
         }
 
         res.statusCode = 405;
         res.end("method_not_allowed");
+        return true;
       }
 
       // Room image API (per-active-room)
@@ -549,6 +527,7 @@ export default {
           const idx = await readRoomsIndex();
           const room = idx?.rooms?.find((r) => r.id === roomId) || { id: roomId, name: roomId, createdAt: 0, updatedAt: 0 };
           sendJson(res, 200, { ok: true, exists: true, roomId, roomName: room.name, updatedAt: room.updatedAt || null });
+          return true;
         }
 
         // reset = switch to default (do not delete)
@@ -556,6 +535,7 @@ export default {
           if ((req.method || "GET").toUpperCase() !== "POST") {
             res.statusCode = 405;
             res.end("method_not_allowed");
+            return true;
           }
           try {
             const idx = (await readRoomsIndex()) || { activeRoomId: defaultRoomId, rooms: [{ id: defaultRoomId, name: "Default", createdAt: 0, updatedAt: 0 }] };
@@ -565,6 +545,7 @@ export default {
           } catch (err: any) {
             sendJson(res, 500, { ok: false, error: String(err?.message || err) });
           }
+          return true;
         }
 
         // GET image bytes
@@ -585,40 +566,17 @@ export default {
             if (inm && inm === etag) {
               res.statusCode = 304;
               res.end();
+              return true;
             }
 
             const buf = await fs.readFile(imgPath);
             res.statusCode = 200;
             res.end(buf);
           } catch {
-            try {
-              const st = await fs.stat(bundledRoomImgPath);
-              const etag = `W/"${st.size}-${Math.floor(st.mtimeMs)}"`;
-
-              res.setHeader("content-type", "image/jpeg");
-              res.setHeader("cache-control", "public, max-age=31536000, immutable");
-              res.setHeader("etag", etag);
-              res.setHeader("last-modified", st.mtime.toUTCString());
-
-              const inm = String(req.headers["if-none-match"] || "");
-              if (inm && inm === etag) {
-                res.statusCode = 304;
-                res.end();
-              }
-
-              const buf = await fs.readFile(bundledRoomImgPath);
-              res.statusCode = 200;
-              res.end(buf);
-              // Best-effort seed so future reads succeed.
-              try {
-                await fs.mkdir(dirname(imgPath), { recursive: true });
-                await fs.writeFile(imgPath, buf);
-              } catch {}
-            } catch {
-              res.statusCode = 404;
-              res.end("not_found");
-            }
+            res.statusCode = 404;
+            res.end("not_found");
           }
+          return true;
         }
 
         // POST upload multipart: create new room, set active, create empty manual map
@@ -627,6 +585,7 @@ export default {
           const m = ct.match(/multipart\/form-data;\s*boundary=([^;]+)/i);
           if (!m) {
             sendJson(res, 400, { ok: false, error: "expected_multipart" });
+            return true;
           }
           const boundary = m[1];
           try {
@@ -635,6 +594,7 @@ export default {
             const ext = extFromContentType(filePart.contentType) || extname(filePart.filename).toLowerCase();
             if (![".png", ".jpg", ".jpeg", ".webp"].includes(ext)) {
               sendJson(res, 415, { ok: false, error: "unsupported_image_type", contentType: filePart.contentType });
+              return true;
             }
 
             const id = `room-${Date.now()}`;
@@ -653,11 +613,15 @@ export default {
           } catch (err: any) {
             sendJson(res, 500, { ok: false, error: String(err?.message || err) });
           }
+          return true;
         }
 
         res.statusCode = 405;
         res.end("method_not_allowed");
+        return true;
       }
+
+      return false;
     });
 
     const cooldownMs = Number.parseInt((process.env.LOBSTER_ROOM_IDLE_COOLDOWN_MS || "1500").trim(), 10) || 1500;
@@ -764,178 +728,6 @@ export default {
       } catch {}
     };
 
-    const readSnapshotDisk = async (): Promise<ActivitySnapshot | null> => {
-      try {
-        const txt = await fs.readFile(snapshotPath, "utf8");
-        const obj = JSON.parse(txt);
-        if (obj && typeof obj === "object" && typeof (obj as any).buildTag === "string") return obj as any;
-      } catch {
-        return null;
-      }
-      return null;
-    };
-
-    const collectAllowedAgentIds = (snapDisk: ActivitySnapshot | null): string[] => {
-      const agentIdAllowRaw = (process.env.LOBSTER_ROOM_AGENT_IDS || "").trim();
-      let allowIds: string[] = [];
-      if (agentIdAllowRaw) {
-        allowIds = agentIdAllowRaw
-          .split(",")
-          .map((s) => s.trim())
-          .filter(Boolean);
-      } else {
-        const ids: string[] = [];
-        const seen = new Set<string>();
-        const agentListRaw = Array.isArray(api.config?.agents?.list) ? api.config.agents.list : [];
-        for (const a of agentListRaw) {
-          const id = a?.id;
-          if (typeof id === "string" && id.trim() && !seen.has(id.trim())) {
-            ids.push(id.trim());
-            seen.add(id.trim());
-          }
-        }
-        for (const id of activity.keys()) {
-          if (id && !seen.has(id)) {
-            ids.push(id);
-            seen.add(id);
-          }
-        }
-        const snapAgentIds = snapDisk && snapDisk.agents ? Object.keys(snapDisk.agents) : [];
-        for (const id of snapAgentIds) {
-          if (id && !seen.has(id)) {
-            ids.push(id);
-            seen.add(id);
-          }
-        }
-        if (!seen.has("main")) {
-          ids.push("main");
-          seen.add("main");
-        }
-        allowIds = ids.length ? ids : ["main"];
-      }
-      return allowIds;
-    };
-
-    const deriveActivitySnapshot = async (): Promise<ActivitySnapshot> => {
-      const t = nowMs();
-      const snapDisk = await readSnapshotDisk();
-      const allowIds = collectAllowedAgentIds(snapDisk);
-      for (const id of allowIds) ensure(id);
-
-      const gatewayToken: string | null = typeof api.config?.gateway?.auth?.token === "string" ? api.config.gateway.auth.token : null;
-      const invokeUrl = "http://127.0.0.1:18789/tools/invoke";
-      const invoke = async (tool: string, args: any) => {
-        const headers: Record<string, string> = { "content-type": "application/json" };
-        if (gatewayToken) headers.authorization = `Bearer ${gatewayToken}`;
-        const resp = await fetch(invokeUrl, { method: "POST", headers, body: JSON.stringify({ tool, args }) });
-        const data = await resp.json();
-        if (!data?.ok) throw new Error(String(data?.error || "invoke_failed"));
-        return data;
-      };
-
-      const skToAgentId = (sk: unknown): string | null => {
-        if (typeof sk !== "string") return null;
-        const m = sk.match(/^agent:([^:]+):/);
-        return m && m[1] ? m[1] : null;
-      };
-
-      let sessions: any[] = [];
-      try {
-        const r = await invoke("sessions_list", {});
-        const details = r?.result?.details || {};
-        sessions = Array.isArray(details.sessions) ? details.sessions : [];
-      } catch {
-        sessions = [];
-      }
-
-      const sessionsByAgent = new Map<string, any[]>();
-      for (const s of sessions) {
-        const aid = skToAgentId(s?.key);
-        if (!aid) continue;
-        const arr = sessionsByAgent.get(aid) || [];
-        arr.push(s);
-        sessionsByAgent.set(aid, arr);
-      }
-
-      const agents: ActivitySnapshot["agents"] = {};
-      let updatedAtMs = snapDisk?.updatedAtMs || 0;
-
-      for (const agentId of allowIds) {
-        const list = (sessionsByAgent.get(agentId) || []).filter((s) => typeof s?.key === "string");
-        list.sort((a, b) => (Number(b?.updatedAt || 0) - Number(a?.updatedAt || 0)));
-
-        const maxUpdatedAt = list.length ? Number(list[0]?.updatedAt || 0) : 0;
-        const recent = !!(maxUpdatedAt && (t - maxUpdatedAt) <= staleMs);
-
-        let queueDepth: number | null = null;
-        let statusText: string | null = null;
-        if (list.length) {
-          try {
-            const r2 = await invoke("session_status", { sessionKey: String(list[0].key) });
-            const det2 = r2?.result?.details || {};
-            const qd = det2.queueDepth ?? det2?.queue?.depth;
-            if (Number.isFinite(Number(qd))) queueDepth = Number(qd);
-            if (typeof det2.statusText === "string") statusText = det2.statusText;
-          } catch {}
-        }
-
-        let lastType: string | null = null;
-        let lastRole: string | null = null;
-        let historyTypes: string[] = [];
-        if (list.length) {
-          try {
-            const r3 = await invoke("sessions_history", { sessionKey: String(list[0].key), limit: 8 });
-            const msgs = r3?.result?.details?.messages || [];
-            const last = Array.isArray(msgs) && msgs.length ? msgs[0] : null;
-            lastRole = typeof last?.role === "string" ? last.role : null;
-            const c = last?.content;
-            if (Array.isArray(c)) {
-              for (const part of c) {
-                if (part && typeof part === "object" && typeof part.type === "string") historyTypes.push(part.type);
-              }
-              lastType = historyTypes[0] || null;
-            }
-          } catch {}
-        }
-
-        let activityState: ActivityState = "idle";
-        const snapRow = snapDisk?.agents?.[agentId];
-        const snapFresh = !!(snapRow && typeof snapRow.lastEventMs === "number" && (t - snapRow.lastEventMs) <= staleMs);
-        if (snapFresh) {
-          activityState = snapRow.state as ActivityState;
-        } else if (typeof queueDepth === "number" && queueDepth > 0) {
-          activityState = "thinking";
-        } else if (recent && lastType === "toolCall") {
-          activityState = "tool";
-        } else if (recent && lastType === "text" && lastRole === "assistant") {
-          activityState = "reply";
-        } else {
-          activityState = "idle";
-        }
-
-        const sinceOut = snapFresh ? (snapRow?.sinceMs || null) : (maxUpdatedAt || null);
-        const lastOut = snapFresh ? (snapRow?.lastEventMs || null) : (maxUpdatedAt || null);
-        const details = snapFresh ? (snapRow?.details || null) : { queueDepth, statusText, historyTypes, lastRole, lastType };
-
-        agents[agentId] = {
-          state: activityState,
-          sinceMs: sinceOut || t,
-          lastEventMs: lastOut || t,
-          details: details || null,
-        };
-        if (typeof lastOut === "number" && Number.isFinite(lastOut)) updatedAtMs = Math.max(updatedAtMs, lastOut);
-      }
-
-      if (!updatedAtMs) updatedAtMs = t;
-
-      return {
-        buildTag: BUILD_TAG,
-        updatedAtMs,
-        agents,
-        events: snapDisk?.events || [],
-      };
-    };
-
     const pushEvent = (kind: string, params: { agentId?: string; data?: any }) => {
       const ev = { ts: nowMs(), kind, agentId: params.agentId, data: params.data };
       eventBuf.push(ev);
@@ -945,625 +737,6 @@ export default {
       snap.events.push(ev);
       if (snap.events.length > 30) snap.events.splice(0, snap.events.length - 30);
       writeSnapshotSoon();
-    };
-
-    // --- Message Feed (recent events; ring buffer) ---
-    type FeedKind =
-      | "before_agent_start"
-      | "before_tool_call"
-      | "after_tool_call"
-      | "tool_result_persist"
-      | "message_sending"
-      | "message_sent"
-      | "agent_end"
-      | "presence";
-
-    type FeedItem = {
-      ts: number;
-      kind: FeedKind;
-      agentId?: string;
-      sessionKey?: string;
-      channelId?: string;
-      to?: string;
-      toolName?: string;
-      durationMs?: number;
-      success?: boolean;
-      error?: string;
-      // Optional extra fields; keep small and sanitized.
-      details?: Record<string, unknown>;
-    };
-
-    const FEED_MAX = Math.max(500, Number(api.config?.feedMaxItems) || 0, 600);
-    const feedBuf: FeedItem[] = [];
-    const FEED_PRESENCE_MIN_MS = Math.max(2000, Number(api.config?.feedPresenceMinMs) || 0);
-    const FEED_HEARTBEAT_MS = Math.max(5000, Number(api.config?.feedPresenceHeartbeatMs) || 0);
-    const lastPresenceByAgent = new Map<string, { state: ActivityState; ts: number; toolName?: string }>();
-    const lastFeedByAgent = new Map<string, number>();
-
-    // Synthetic feed events for spawned sub-agents (sessions_spawn).
-    // The runtime doesn't currently emit feed hooks for child agents unless they use /tools/invoke.
-    type SpawnInfo = {
-      childAgentId: string;
-      childSessionKey: string;
-      startTs: number;
-    };
-    const spawnStacksByAgent = new Map<string, SpawnInfo[]>();
-
-
-    const redactSecretsInText = (s: string): string => {
-      let out = String(s || "");
-
-      // OpenClaw tool call ids / file cache ids can appear in logs as call_*/fc_* tokens.
-      // Redact them WITHOUT leaking the prefixes (no literal 'call_' / 'fc_' should remain).
-      // Match even when embedded (e.g. JSON, markdown, stack traces).
-      out = out.replace(/(?:call|fc)_[A-Za-z0-9_-]{6,}/g, '[OC_ID_REDACTED]'); // CALL_FC_REDACTED
-
-      // URLs can leak tokens/hostnames; replace with a placeholder.
-      out = out.replace(/\bhttps?:\/\/[^\s)\]]+/gi, "[URL]");
-
-      // Common header-ish secrets
-      out = out.replace(/\b(authorization|cookie)\b\s*[:=]\s*([^\s'\"]+)/gi, "$1:[REDACTED]");
-
-      // token/apiKey style key-value pairs
-      out = out.replace(
-        /\b(token|api[-_]?key|apikey|access[_-]?token|id[_-]?token|refresh[_-]?token)\b\s*[:=]\s*([^\s'\"]+)/gi,
-        "$1=[REDACTED]",
-      );
-
-      // URL query params (when URL stripping didn't catch)
-      out = out.replace(/([?&])(token|api_key|apikey|apiKey|access_token|auth|authorization)=([^&#]+)/g, "$1$2=[REDACTED]");
-
-      // Long hex strings (often keys/hashes)
-      out = out.replace(/\b[a-f0-9]{32,}\b/gi, "[HEX_REDACTED]");
-
-      // Shell-ish patterns that often contain secrets
-      out = out.replace(/\b(BEARER|TOKEN)=([^\s]+)/gi, "$1=[REDACTED]");
-
-      return out;
-    };
-
-    const coerceStr = (v: any, maxLen = 400): string | undefined => {
-      if (typeof v !== "string") return undefined;
-      const t = v.length > maxLen ? v.slice(0, maxLen) + "…" : v;
-      return redactSecretsInText(t);
-    };
-
-    const feedPreview = (it: FeedItem): string => {
-      const agent = it.agentId ? `@${it.agentId}` : "";
-      if (it.kind === "presence") {
-        const stRaw = typeof (it.details as any)?.state === "string" ? String((it.details as any).state) : "";
-        const st = stRaw === "reply" ? "replying"
-          : stRaw === "tool" ? "tool"
-          : stRaw === "thinking" ? "thinking"
-          : stRaw === "idle" ? "idle"
-          : stRaw === "error" ? "error"
-          : stRaw;
-        const tn = typeof it.toolName === "string" ? it.toolName : (typeof (it.details as any)?.toolName === "string" ? (it.details as any).toolName : "");
-        const tail = (stRaw === "tool" && tn) ? `: ${tn}` : "";
-        return `${agent} ${st}${tail}`.trim();
-      }
-      if (it.kind === "before_agent_start") return `${agent} started`;
-      if (it.kind === "before_tool_call") {
-        const tn = it.toolName || "tool";
-        const cmd = coerceStr((it.details as any)?.command, 180);
-        const url = coerceStr((it.details as any)?.url, 180);
-        const extra = cmd ? ` — ${cmd}` : url ? ` — ${url}` : "";
-        return `${agent} ${tn}${extra}`.trim();
-      }
-      if (it.kind === "after_tool_call") {
-        const tn = it.toolName || "tool";
-        const d = typeof it.durationMs === "number" ? ` (${Math.round(it.durationMs)}ms)` : "";
-        return `${agent} ${tn} done${d}`.trim();
-      }
-      if (it.kind === "tool_result_persist") return `${agent} tool result persisted`;
-      if (it.kind === "message_sending") {
-        const to = it.to ? redactSecretsInText(it.to) : "(unknown)";
-        return `sending message → ${to}`;
-      }
-      if (it.kind === "message_sent") {
-        const to = it.to ? redactSecretsInText(it.to) : "(unknown)";
-        const ok = it.success === false ? "failed" : "sent";
-        return `message ${ok} → ${to}`;
-      }
-      if (it.kind === "agent_end") {
-        if (it.success === false) return `${agent} ended (error)`;
-        return `${agent} ended`;
-      }
-      if (it.kind === "state") {
-        const st = String((it.details as any)?.state || "");
-        return st ? `${agent} state → ${st}` : `${agent} state changed`;
-      }
-      return it.kind;
-    };
-
-    const pushFeed = (item: FeedItem) => {
-      feedBuf.push(item);
-      if (typeof item.agentId === "string" && item.agentId.trim()) {
-        lastFeedByAgent.set(item.agentId.trim(), item.ts || nowMs());
-      }
-      if (feedBuf.length > FEED_MAX) feedBuf.splice(0, feedBuf.length - FEED_MAX);
-    };
-
-    const pushPresence = (
-      agentId: string,
-      state: ActivityState,
-      details?: Record<string, unknown> | null,
-      opts?: { force?: boolean; heartbeat?: boolean },
-    ) => {
-      const t = nowMs();
-      const toolName = typeof (details as any)?.toolName === "string" ? String((details as any).toolName) : undefined;
-      const prev = lastPresenceByAgent.get(agentId);
-      const force = !!opts?.force;
-      if (!force && prev && prev.state === state && (prev.toolName || "") === (toolName || "")) return;
-      if (!force && prev && (t - prev.ts) < FEED_PRESENCE_MIN_MS) return;
-      lastPresenceByAgent.set(agentId, { state, ts: t, toolName });
-      const detailPayload: Record<string, unknown> = { state, toolName };
-      if (opts?.heartbeat) detailPayload.heartbeat = true;
-      const extra: any = details && typeof details === "object" ? details : null;
-      if (extra) {
-        if (typeof extra.command === "string" || Array.isArray(extra.command)) detailPayload.command = extra.command;
-        if (typeof extra.action === "string") detailPayload.action = extra.action;
-        if (typeof extra.targetUrl === "string") detailPayload.targetUrl = extra.targetUrl;
-        if (typeof extra.ref === "string") detailPayload.ref = extra.ref;
-        if (typeof extra.selector === "string") detailPayload.selector = extra.selector;
-        if (typeof extra.op === "string") detailPayload.op = extra.op;
-        if (typeof extra.url === "string") detailPayload.url = extra.url;
-      }
-
-      pushFeed({
-        ts: t,
-        kind: "presence",
-        agentId,
-        sessionKey: typeof (details as any)?.sessionKey === "string" ? String((details as any).sessionKey) : undefined,
-        toolName,
-        details: detailPayload,
-      });
-    };
-
-    type FeedTaskStatus = "running" | "done" | "error";
-
-    type FeedTask = {
-      id: string;
-      sessionKey?: string;
-      agentId: string;
-      startTs: number;
-      endTs?: number;
-      status: FeedTaskStatus;
-      title: string;
-      summary: string;
-      // Optional raw events for debug UI.
-      items?: FeedItem[];
-    };
-
-    const taskTitleFromItems = (items: FeedItem[]): string => {
-      // Prefer sessions_spawn label/task if present.
-      for (const it of items) {
-        if (it.kind === "before_tool_call" && it.toolName === "sessions_spawn") {
-          const label = typeof (it.details as any)?.label === "string" ? String((it.details as any).label) : "";
-          const task = typeof (it.details as any)?.task === "string" ? String((it.details as any).task) : "";
-          const t = (label || "").trim() || (task || "").trim();
-          if (t) return redactSecretsInText(t).slice(0, 120);
-          return "Spawn sub-agent";
-        }
-      }
-
-      // Otherwise infer intent from the first meaningful tool call(s).
-      const first = items.find((x) => x.kind === "before_tool_call" && x.toolName)?.toolName;
-      if (first) {
-        const tn = String(first);
-        if (tn === "browser") return "QA in browser";
-        if (tn === "read" || tn === "write" || tn === "edit") return "Update files";
-        if (tn === "exec") return "Run command";
-        if (tn === "message") return "Send message";
-        return "Tool: " + tn;
-      }
-
-      return "Agent run";
-    };
-
-    const taskSummaryFromItems = (items: FeedItem[], status: FeedTaskStatus): string => {
-      const toolCalls = items.filter((x) => x.kind === "before_tool_call").length;
-      const msgSent = items.filter((x) => x.kind === "message_sent" && x.success !== false).length;
-      const msgFail = items.filter((x) => x.kind === "message_sent" && x.success === false).length;
-      const errors = items.map((x) => (x.error ? String(x.error) : "")).filter(Boolean);
-
-      const bits: string[] = [];
-      if (toolCalls) bits.push(String(toolCalls) + " tool call" + (toolCalls === 1 ? "" : "s"));
-      if (msgSent) bits.push(String(msgSent) + " message" + (msgSent === 1 ? "" : "s") + " sent");
-      if (msgFail) bits.push(String(msgFail) + " message" + (msgFail === 1 ? "" : "s") + " failed");
-
-      if (status === "running") return bits.length ? "In progress · " + bits.join(" · ") : "In progress";
-
-      if (status === "error") {
-        const e = errors[0] ? "Error: " + redactSecretsInText(errors[0]).slice(0, 160) : "Error";
-        return bits.length ? e + " · " + bits.join(" · ") : e;
-      }
-
-      return bits.length ? "Completed · " + bits.join(" · ") : "Completed";
-    };
-
-    const groupFeedIntoTasks = (items: FeedItem[], opts?: { includeRaw?: boolean }): FeedTask[] => {
-      const includeRaw = !!opts?.includeRaw;
-      const byKey = new Map<string, FeedItem[]>();
-      const noKey: FeedItem[] = [];
-
-      for (const it of items) {
-        const sk = typeof it.sessionKey === "string" && it.sessionKey.trim() ? it.sessionKey.trim() : "";
-        if (sk) byKey.set(sk, (byKey.get(sk) || []).concat([it]));
-        else noKey.push(it);
-      }
-
-      const tasks: FeedTask[] = [];
-
-      for (const [sk, arr] of byKey.entries()) {
-        const sorted = arr.slice().sort((a, b) => a.ts - b.ts);
-        const agentId = sorted.find((x) => x.agentId)?.agentId || "unknown";
-        const startTs = sorted[0]?.ts || nowMs();
-        const end = [...sorted].reverse().find((x) => x.kind === "agent_end");
-        const status: FeedTaskStatus = end ? (end.success === false || end.error ? "error" : "done") : "running";
-        const title = taskTitleFromItems(sorted);
-        const summary = taskSummaryFromItems(sorted, status);
-        tasks.push({ id: sk, sessionKey: sk, agentId, startTs, endTs: end?.ts, status, title, summary, items: includeRaw ? sorted : undefined });
-      }
-
-      if (noKey.length) {
-        const byAgent = new Map<string, FeedItem[]>();
-        for (const it of noKey) {
-          const a = it.agentId || "unknown";
-          byAgent.set(a, (byAgent.get(a) || []).concat([it]));
-        }
-        for (const [agentId, arr] of byAgent.entries()) {
-          const sorted = arr.slice().sort((a, b) => a.ts - b.ts);
-          const startTs = sorted[0]?.ts || nowMs();
-          const end = [...sorted].reverse().find((x) => x.kind === "agent_end");
-          const status: FeedTaskStatus = end ? (end.success === false || end.error ? "error" : "done") : "running";
-          const title = taskTitleFromItems(sorted);
-          const summary = taskSummaryFromItems(sorted, status);
-          const id = "adhoc:" + agentId + ":" + String(startTs);
-          tasks.push({ id, agentId, startTs, endTs: end?.ts, status, title, summary, items: includeRaw ? sorted : undefined });
-        }
-      }
-
-      return tasks.sort((a, b) => b.startTs - a.startTs);
-    };
-
-    // --- Message Feed v3 (human-friendly rows; timeline style) ---
-    type FeedRowV3 = {
-      id: string;
-      ts: number;
-      agentId: string;
-      sessionKey?: string;
-      // Keep legacy rowType field for older clients; v3 now uses only timeline rows.
-      rowType: "timeline";
-      kind?: FeedKind | "error" | "sessions_spawn";
-
-      // v3 UX: human-friendly, single-line text.
-      // Keep legacy `action` for backwards compatibility with older frontends.
-      what: string;
-      plain?: string;
-      action?: string;
-    };
-
-    const maskUrlLite = (s: string): string => {
-      // Keep feed content-free: strip literal URLs / localhost.
-      // (We do not want clickable URLs in the default feed.)
-      return s
-        .replace(/https?:\/\/[^\s"'<>]+/gi, "[URL]")
-        .replace(/\blocalhost(?:\:\d+)?(?:\/[\w-.~%!$&'()*+,;=:@\/]*)?/gi, "[URL]")
-        .replace(/\b127\.0\.0\.1(?:\:\d+)?(?:\/[\w-.~%!$&'()*+,;=:@\/]*)?/gi, "[URL]");
-    };
-
-    const redactLine = (s: string, max = 200): string => {
-      const x = redactSecretsInText(String(s || "")).replace(/\s+/g, " ").trim();
-      return maskUrlLite(x).slice(0, max);
-    };
-
-    // (Advanced feed removed)
-
-    const safeCmdSummary = (cmd: unknown): string => {
-      if (Array.isArray(cmd)) {
-        const parts = cmd
-          .map((x) => (typeof x === "string" ? x.trim() : ""))
-          .filter(Boolean);
-        return parts.length ? parts.join(" ") : "command";
-      }
-      if (typeof cmd === "string") {
-        const s = cmd.trim();
-        if (!s) return "command";
-        return s.split(/\r?\n/)[0].trim();
-      }
-      return "command";
-    };
-
-    const basenameLite = (p: unknown): string => {
-      const s = typeof p === "string" ? p.trim() : "";
-      if (!s) return "";
-      const parts = s.split(/\\|\//g).filter(Boolean);
-      const base = parts[parts.length - 1] || "";
-      return redactLine(base, 80);
-    };
-
-    const scrubUrlForFeed = (u: unknown): string => {
-      const s = typeof u === "string" ? u.trim() : "";
-      if (!s) return "";
-      // Keep it non-clickable: drop scheme + query/hash.
-      // Also avoid leaking localhost.
-      try {
-        const uu = new URL(s);
-        const host = uu.hostname;
-        const path = uu.pathname || "/";
-        const out = `${host}${path}`;
-        if (/^(localhost|127\.0\.0\.1)$/i.test(host)) return "[URL]";
-        return redactLine(out, 80);
-      } catch {
-        // Fall back: remove protocol if present.
-        const out = s.replace(/^https?:\/\//i, "").split(/[?#]/)[0];
-        if (/\blocalhost\b|\b127\.0\.0\.1\b/i.test(out)) return "[URL]";
-        return redactLine(out, 80);
-      }
-    };
-
-    const isOpaqueRef = (s: string): boolean => {
-      const t = String(s || "").trim();
-      if (!t) return false;
-      return /^[a-z]{1,2}\d{1,6}$/i.test(t);
-    };
-
-    const browserActionLabel = (raw: string): string => {
-      const v = String(raw || "").trim().toLowerCase();
-      if (!v) return "";
-      if (v === "navigate" || v === "open") return "Open";
-      if (v === "focus") return "Switch tab";
-      if (v === "close") return "Close tab";
-      if (v === "screenshot") return "Screenshot";
-      if (v === "snapshot") return "Capture snapshot";
-      if (v === "upload") return "Upload";
-      if (v === "console") return "Console";
-      if (v === "pdf") return "Export PDF";
-      if (v === "click") return "Click";
-      if (v === "type") return "Type";
-      if (v === "press") return "Press key";
-      if (v === "hover") return "Hover";
-      if (v === "drag") return "Drag";
-      if (v === "select") return "Select";
-      if (v === "fill") return "Fill";
-      if (v === "resize") return "Resize";
-      if (v === "wait") return "Wait";
-      return raw;
-    };
-
-    const browserTarget = (d: any): string => {
-      const url = scrubUrlForFeed(d.targetUrl || d.url);
-      const selectorRaw = typeof d.selector === "string" ? d.selector : (typeof d?.request?.selector === "string" ? d.request.selector : "");
-      const selector = selectorRaw ? redactLine(selectorRaw, 120) : "";
-      const refRaw = typeof d.ref === "string" ? d.ref : (typeof d?.request?.ref === "string" ? d.request.ref : "");
-      const ref = refRaw && !isOpaqueRef(refRaw) ? redactLine(refRaw, 80) : "";
-      return url || selector || (ref ? `ref ${ref}` : "");
-    };
-
-    const toolHumanSummary = (it: FeedItem): string => {
-      const tn = (it.toolName || "tool").trim();
-      const d: any = it.details || {};
-
-      if (tn === "browser") {
-        const action = typeof d.action === "string" ? d.action
-          : (typeof d.op === "string" ? d.op
-            : (typeof d?.request?.kind === "string" ? String(d.request.kind) : ""));
-        const verb = browserActionLabel(action) || "Action";
-        const target = browserTarget(d);
-        if (target) return `Browser: ${verb} ${target}`;
-        return `Browser: ${verb}`;
-      }
-
-      if (tn === "exec") {
-        const cmd = redactLine(safeCmdSummary(d.command), 120);
-        const code = typeof d.exitCode === "number" ? d.exitCode : (typeof d.code === "number" ? d.code : null);
-        const tail = code === null ? "" : ` (exit ${code})`;
-        return cmd ? `Run: ${cmd}${tail}`.trim() : `Run${tail}`.trim();
-      }
-
-      if (tn === "read") {
-        const p = d.path ?? d.file_path;
-        const base = basenameLite(p);
-        return base ? `Read file: ${base}` : "Read file";
-      }
-      if (tn === "write") {
-        const p = d.path ?? d.file_path;
-        const base = basenameLite(p);
-        return base ? `Write file: ${base}` : "Write file";
-      }
-      if (tn === "edit") {
-        const p = d.path ?? d.file_path;
-        const base = basenameLite(p);
-        return base ? `Edit file: ${base}` : "Edit file";
-      }
-
-      if (tn === "sessions_spawn") {
-        const child = typeof d.spawnAgentId === "string" ? String(d.spawnAgentId) : "";
-        const label = typeof d.label === "string" ? String(d.label) : "";
-        const task = typeof d.task === "string" ? String(d.task) : "";
-        const desc = redactLine((label || task).trim(), 120);
-        const tail = desc ? ` — ${desc}` : "";
-        return `Spawn sub-agent${child ? ` @${child}` : ""}${tail}`.trim();
-      }
-
-      return tn;
-    };
-
-    const toolStateSummary = (details: any): string => {
-      const tn = typeof details?.toolName === "string" ? String(details.toolName).trim() : "";
-      if (tn === "browser") {
-        const action = typeof details?.action === "string" ? details.action
-          : (typeof details?.op === "string" ? details.op
-            : (typeof details?.request?.kind === "string" ? String(details.request.kind) : ""));
-        const verb = browserActionLabel(action) || "Action";
-        const target = browserTarget(details || {});
-        if (target) return `Using browser: ${verb} ${target}`;
-        return `Using browser: ${verb}`;
-      }
-      if (tn === "exec") {
-        const token = redactLine(safeCmdSummary(details?.command), 120);
-        return token ? `Running: ${token}` : "Running";
-      }
-      if (tn) return `Using tool (${redactLine(tn, 40)})`;
-      return "Using tool";
-    };
-
-    const humanStateLabel = (stRaw: string, details?: any): string => {
-      const st = stRaw === "reply" ? "replying"
-        : stRaw === "tool" ? "tool"
-        : stRaw === "thinking" ? "thinking"
-        : stRaw === "idle" ? "idle"
-        : stRaw === "error" ? "error"
-        : stRaw;
-      if (st === "thinking") return "Thinking";
-      if (st === "replying") return "Replying";
-      if (st === "idle") return "Idle";
-      if (st === "tool") return toolStateSummary(details || {});
-      if (st === "error") return "Error";
-      return st || "State update";
-    };
-
-    const rowSentenceHuman = (it: FeedItem): { kind: FeedRowV3["kind"]; what: string } | null => {
-      const tn = (it.toolName || "tool").trim();
-
-      if (it.kind === "presence") {
-        const stRaw = typeof (it.details as any)?.state === "string" ? String((it.details as any).state) : "";
-        const what = humanStateLabel(stRaw, it.details || {});
-        return { kind: stRaw === "error" ? "error" : it.kind, what };
-      }
-
-      // started/ended rows are rendered at the task level for clearer titles.
-
-      if (it.kind === "message_sending") return { kind: it.kind, what: "Sending message" };
-      if (it.kind === "message_sent") {
-        if (it.success === false) return { kind: "error", what: "Message failed" };
-        return { kind: it.kind, what: "Message sent" };
-      }
-
-      // State changes: show as "idle", "thinking", "tool", "reply", "error".
-      if (it.kind === "state") {
-        const stRaw = typeof (it.details as any)?.state === "string" ? String((it.details as any).state) : "";
-        const label = humanStateLabel(stRaw, it.details || {});
-        return { kind: it.kind, what: stRaw ? `State update: ${label}` : "State update" };
-      }
-
-      // Hide low-signal bookkeeping in default view.
-      if (it.kind === "tool_result_persist") return null;
-
-      const humanTools = new Set(["browser", "exec", "read", "write", "edit", "sessions_spawn"]);
-      if ((it.kind === "before_tool_call" || it.kind === "after_tool_call") && humanTools.has(tn)) {
-        const summary = toolHumanSummary(it);
-        if (it.kind === "before_tool_call") return { kind: it.kind, what: summary };
-        // after_tool_call
-        if (it.success === false || it.error) return { kind: "error", what: `${summary} (failed)` };
-        return { kind: it.kind, what: `${summary} (done)` };
-      }
-
-      // Fallback: omit other raw events in default feed.
-      return null;
-    };
-
-    const buildFeedV3Rows = (items: FeedItem[]): FeedRowV3[] => {
-      const tasks = groupFeedIntoTasks(items, { includeRaw: true });
-      const out: FeedRowV3[] = [];
-
-      // Default feed should be readable: de-dup short bursts of identical low-signal rows.
-      const humanDedupeWindowMs = 1500;
-      const presenceDedupeWindowMs = 12000;
-      const heartbeatDedupeWindowMs = 15000;
-      const lastHumanSigByAgent = new Map<string, { sig: string; ts: number }>();
-
-      const toolPresenceMergeWindowMs = 1200;
-
-      const shouldSkipPresenceTool = (it: FeedItem, idx: number, raw: FeedItem[], who: string): boolean => {
-        if (it.kind !== "presence") return false;
-        const stRaw = typeof (it.details as any)?.state === "string" ? String((it.details as any).state) : "";
-        if (stRaw !== "tool") return false;
-        const toolName = typeof it.toolName === "string" ? it.toolName
-          : (typeof (it.details as any)?.toolName === "string" ? String((it.details as any).toolName) : "");
-
-        const matches = (x: FeedItem): boolean => {
-          if (!x || x.kind !== "before_tool_call") return false;
-          const agent = x.agentId || who;
-          if (agent !== who) return false;
-          if (!toolName) return true;
-          return (x.toolName || "") === toolName;
-        };
-
-        for (let j = idx - 1; j >= 0; j--) {
-          const prev = raw[j];
-          if (it.ts - prev.ts > toolPresenceMergeWindowMs) break;
-          if (matches(prev)) return true;
-        }
-        for (let j = idx + 1; j < raw.length; j++) {
-          const next = raw[j];
-          if (next.ts - it.ts > toolPresenceMergeWindowMs) break;
-          if (matches(next)) return true;
-        }
-        return false;
-      };
-
-      const pushRow = (it: FeedItem, what: string, kind: FeedRowV3["kind"], agentId: string, sessionKey?: string, taskId?: string) => {
-        const base = `${sessionKey || taskId || "task"}:row:${it.ts}:${String(kind || it.kind)}:${it.toolName || ""}`;
-        const id = base;
-        out.push({
-          id,
-          ts: it.ts,
-          agentId,
-          sessionKey,
-          rowType: "timeline",
-          kind,
-          what,
-          plain: what,
-          action: what,
-        });
-      };
-
-      for (const task of tasks) {
-        const fallbackAgentId = task.agentId || "unknown";
-        const sessionKey = task.sessionKey;
-        const raw = Array.isArray(task.items) ? task.items.slice().sort((a, b) => a.ts - b.ts) : [];
-        if (!raw.length) continue;
-
-        for (let i = 0; i < raw.length; i++) {
-          const it = raw[i];
-          const who = it.agentId || fallbackAgentId;
-
-          // Task boundaries: render meaningful started/ended rows.
-          if (it.kind === "before_agent_start") {
-            const title = redactLine(task.title || "Agent run", 120);
-            pushRow(it, `started — ${title}`, it.kind, who, sessionKey, task.id);
-            continue;
-          }
-          if (it.kind === "agent_end") {
-            const title = redactLine(task.title || "Agent run", 120);
-            const ok = task.status !== "error";
-            pushRow(it, `ended — ${title} (${ok ? "ok" : "failed"})`, ok ? it.kind : "error", who, sessionKey, task.id);
-            continue;
-          }
-
-          if (shouldSkipPresenceTool(it, i, raw, who)) continue;
-
-          const h = rowSentenceHuman(it);
-          if (h) {
-            const sig = `${who}|${String(h.kind)}|${h.what}`;
-            const prev = lastHumanSigByAgent.get(who);
-            const isPresence = it.kind === "presence" || it.kind === "state";
-            const isHeartbeat = it.kind === "presence" && !!(it.details as any)?.heartbeat;
-            const dedupeWindowMs = isHeartbeat
-              ? heartbeatDedupeWindowMs
-              : (isPresence ? presenceDedupeWindowMs : humanDedupeWindowMs);
-            if (!(prev && prev.sig === sig && Math.abs(it.ts - prev.ts) < dedupeWindowMs)) {
-              lastHumanSigByAgent.set(who, { sig, ts: it.ts });
-              pushRow(it, h.what, h.kind, who, sessionKey, task.id);
-            }
-          }
-        }
-      }
-
-      // Timeline newest-first (UI shows latest at top).
-      return out.sort((a, b) => b.ts - a.ts);
     };
 
     const priority: Record<ActivityState, number> = {
@@ -1601,7 +774,6 @@ export default {
         cur.sinceMs = t;
         cur.lastEventMs = t;
         cur.details = { stale: true };
-        pushPresence(agentId, "idle", cur.details || null);
       }, staleMs + 50);
 
       // Tool-specific max duration: demote tool -> thinking -> (later) idle.
@@ -1616,7 +788,6 @@ export default {
         cur.sinceMs = t;
         cur.lastEventMs = t;
         cur.details = { ...(cur.details || {}), toolMax: true };
-        pushPresence(agentId, "thinking", cur.details || null);
         setIdleWithCooldown(agentId);
       }, toolMaxMs);
     };
@@ -1624,7 +795,6 @@ export default {
     const setState = (agentId: string, next: ActivityState, details?: Record<string, unknown> | null) => {
       const row = ensure(agentId);
       const t = nowMs();
-      const prevState = row.state;
 
       // Persist to snapshot for API consumers.
       try {
@@ -1657,8 +827,6 @@ export default {
       if (row.state !== next) {
         row.state = next;
         row.sinceMs = t;
-        // Emit state change to feed.
-        pushPresence(agentId, next, details ?? null);
       }
 
       if (next !== "idle") {
@@ -1686,23 +854,10 @@ export default {
         cur.sinceMs = t;
         cur.lastEventMs = t;
         cur.details = null;
-        pushPresence(agentId, "idle", null);
       }, waitMs);
       // Update lastEvent so API knows something just happened.
       row.lastEventMs = scheduledAt;
     };
-
-    // Feed heartbeat: keep the timeline advancing while an agent is active.
-    const feedHeartbeatPollMs = Math.max(1000, Math.floor(FEED_HEARTBEAT_MS / 2));
-    setInterval(() => {
-      const t = nowMs();
-      for (const [agentId, row] of activity.entries()) {
-        if (!row || row.state === "idle") continue;
-        const last = lastFeedByAgent.get(agentId) || 0;
-        if (t - last < FEED_HEARTBEAT_MS) continue;
-        pushPresence(agentId, row.state, row.details || null, { force: true, heartbeat: true });
-      }
-    }, feedHeartbeatPollMs);
 
     // Hooks → real runtime state
     const resolveAgentId = (ctx: any): string => {
@@ -1718,9 +873,6 @@ export default {
       const agentId = resolveAgentId(ctx);
       api.logger.info("[lobster-room] hook before_agent_start", { buildTag: BUILD_TAG, agentId, sessionKey: ctx?.sessionKey });
       pushEvent("before_agent_start", { agentId, data: { sessionKey: ctx?.sessionKey, messageProvider: ctx?.messageProvider } });
-      const startTs = nowMs();
-      pushFeed({ ts: startTs, kind: "before_agent_start", agentId, sessionKey: typeof ctx?.sessionKey === "string" ? ctx.sessionKey : undefined });
-      pushPresence(agentId, "thinking", { sessionKey: ctx?.sessionKey, messageProvider: ctx?.messageProvider }, { force: true });
       setState(agentId, "thinking", { sessionKey: ctx?.sessionKey, messageProvider: ctx?.messageProvider });
     });
 
@@ -1738,67 +890,12 @@ export default {
         toolData.command = cmd;
       }
 
-      if (toolName === "browser") {
-        // params: {action, targetUrl, targetId, request:{...}}
-        toolData.action = typeof p?.action === "string" ? p.action : undefined;
-        toolData.targetUrl = typeof p?.targetUrl === "string" ? p.targetUrl : undefined;
-        toolData.targetId = typeof p?.targetId === "string" ? p.targetId : undefined;
-        toolData.ref = typeof p?.ref === "string" ? p.ref : undefined;
-        toolData.selector = typeof p?.selector === "string" ? p.selector : undefined;
-        toolData.op = typeof p?.request?.kind === "string" ? p.request.kind : undefined;
-        // Some calls put URL inside request fields.
-        toolData.url = typeof p?.request?.url === "string" ? p.request.url : undefined;
-      }
-
-      if (toolName === "read" || toolName === "write" || toolName === "edit") {
-        toolData.path = typeof p?.path === "string" ? p.path : undefined;
-        toolData.file_path = typeof p?.file_path === "string" ? p.file_path : undefined;
-      }
-
       // Show what spawned the subagent.
       if (toolName === "sessions_spawn") {
         toolData.spawnAgentId = p?.agentId;
         toolData.label = p?.label;
         const task = typeof p?.task === "string" ? p.task : "";
         toolData.task = task ? task.slice(0, 160) : undefined;
-
-        // SYNTH_SUBAGENT_FEED_START
-        try {
-          const childAgentId = typeof p?.agentId === "string" ? String(p.agentId).trim() : "";
-          if (childAgentId) {
-            const parentSk = typeof ctx?.sessionKey === "string" ? String(ctx.sessionKey) : "";
-            const startTs = nowMs();
-            const childSessionKey = `spawn:${parentSk || agentId}:${childAgentId}:${startTs}`;
-            const st = spawnStacksByAgent.get(agentId) || [];
-            st.push({ childAgentId, childSessionKey, startTs });
-            spawnStacksByAgent.set(agentId, st);
-
-            // Start a synthetic task card for the child agent.
-            pushFeed({
-              ts: startTs,
-              kind: "before_agent_start",
-              agentId: childAgentId,
-              sessionKey: childSessionKey,
-              details: { parentSessionKey: parentSk ? redactSecretsInText(parentSk).slice(0, 120) : undefined },
-            });
-            pushFeed({
-              ts: startTs + 1,
-              kind: "before_tool_call",
-              agentId: childAgentId,
-              sessionKey: childSessionKey,
-              toolName: "sessions_spawn",
-              details: {
-                label: coerceStr(toolData.label, 120),
-                task: coerceStr(toolData.task, 180),
-                spawnAgentId: coerceStr(childAgentId, 80),
-              },
-            });
-            setState(childAgentId, "thinking", { sessionKey: childSessionKey, spawnedBy: agentId });
-          }
-        } catch {
-          // best-effort only
-        }
-        // SYNTH_SUBAGENT_FEED_END
       }
 
       // Show message preview when using the message tool.
@@ -1814,96 +911,12 @@ export default {
       }
 
       pushEvent("before_tool_call", { agentId, data: toolData });
-      pushFeed({
-        ts: nowMs(),
-        kind: "before_tool_call",
-        agentId,
-        sessionKey: typeof ctx?.sessionKey === "string" ? ctx.sessionKey : undefined,
-        toolName: typeof toolName === "string" ? toolName : undefined,
-        details: {
-          command: toolName === "exec" ? coerceStr(toolData.command, 240) : undefined,
-          url: toolName === "web_fetch" ? coerceStr(toolData.url, 240) : undefined,
-          label: toolName === "sessions_spawn" ? coerceStr(toolData.label, 120) : undefined,
-          task: toolName === "sessions_spawn" ? coerceStr(toolData.task, 180) : undefined,
-          spawnAgentId: toolName === "sessions_spawn" ? coerceStr(toolData.spawnAgentId, 80) : undefined,
-        },
-      });
-      setState(agentId, "tool", { ...toolData, sessionKey: ctx?.sessionKey });
+      setState(agentId, "tool", { toolName, sessionKey: ctx?.sessionKey });
     });
 
     api.on("after_tool_call", (event, ctx) => {
       const agentId = resolveAgentId(ctx);
       pushEvent("after_tool_call", { agentId, data: { toolName: event?.toolName, durationMs: event?.durationMs } });
-
-      // Best-effort: capture a safe preview of sessions_spawn final assistant output (if the runtime provides it).
-      // This helps surface sub-agent completions even when no message_sent hook is emitted.
-      let outputPreview: string | undefined = undefined;
-      if (event?.toolName === "sessions_spawn") {
-        const candidates = [
-          event?.result?.message,
-          event?.result?.content,
-          event?.result?.output,
-          event?.result?.final,
-          event?.result?.text,
-          event?.output,
-        ];
-        for (const c of candidates) {
-          if (typeof c === "string" && c.trim()) {
-            outputPreview = redactSecretsInText(c.trim()).slice(0, 220);
-            break;
-          }
-        }
-      }
-
-      // SYNTH_SUBAGENT_FEED_FINISH
-      if (event?.toolName === "sessions_spawn") {
-        try {
-          const st = spawnStacksByAgent.get(agentId) || [];
-          const info = st.pop();
-          if (st.length) spawnStacksByAgent.set(agentId, st);
-          else spawnStacksByAgent.delete(agentId);
-
-          if (info?.childAgentId && info.childSessionKey) {
-            const t = nowMs();
-            const rawErr = event?.error || event?.result?.error;
-            const err = typeof rawErr === "string" && rawErr.trim() ? rawErr.trim() : "";
-            const ok = !err;
-
-            pushFeed({
-              ts: t,
-              kind: "after_tool_call",
-              agentId: info.childAgentId,
-              sessionKey: info.childSessionKey,
-              toolName: "sessions_spawn",
-              durationMs: typeof event?.durationMs === "number" ? event.durationMs : undefined,
-              success: ok,
-              error: err ? redactSecretsInText(err).slice(0, 200) : undefined,
-              details: outputPreview ? { outputPreview } : undefined,
-            });
-            pushFeed({
-              ts: t + 1,
-              kind: "agent_end",
-              agentId: info.childAgentId,
-              sessionKey: info.childSessionKey,
-              success: ok,
-              error: err ? redactSecretsInText(err).slice(0, 200) : undefined,
-            });
-            setState(info.childAgentId, ok ? "idle" : "error", { sessionKey: info.childSessionKey });
-          }
-        } catch {
-          // best-effort only
-        }
-      }
-
-      pushFeed({
-        ts: nowMs(),
-        kind: "after_tool_call",
-        agentId,
-        sessionKey: typeof ctx?.sessionKey === "string" ? ctx.sessionKey : undefined,
-        toolName: typeof event?.toolName === "string" ? event.toolName : undefined,
-        durationMs: typeof event?.durationMs === "number" ? event.durationMs : undefined,
-        details: outputPreview ? { outputPreview } : undefined,
-      });
       setState(agentId, "thinking", { sessionKey: ctx?.sessionKey });
     });
 
@@ -1914,37 +927,15 @@ export default {
         agentId,
         data: { toolName: event?.toolName, toolCallId: event?.toolCallId, isSynthetic: event?.isSynthetic },
       });
-      pushFeed({
-        ts: nowMs(),
-        kind: "tool_result_persist",
-        agentId,
-        sessionKey: typeof ctx?.sessionKey === "string" ? ctx.sessionKey : undefined,
-        toolName: typeof event?.toolName === "string" ? event.toolName : undefined,
-        details: {
-          toolCallId: typeof event?.toolCallId === "string" ? event.toolCallId : undefined,
-          isSynthetic: !!event?.isSynthetic,
-        },
-      });
       setState(agentId, "thinking", { sessionKey: ctx?.sessionKey, persisted: true });
     });
 
     api.on("message_sending", (event, ctx) => {
       // Message hooks do not carry agentId in the event/ctx today.
       const agentId = "main";
-
-      const capturePreview = !!api.config?.debugCaptureMessagePreview;
-      const data: any = { to: event?.to, channelId: ctx?.channelId };
-      if (capturePreview) {
-        data.contentPreview = String(event?.content || "").slice(0, 80);
-      }
-
-      pushEvent("message_sending", { agentId, data });
-      pushFeed({
-        ts: nowMs(),
-        kind: "message_sending",
+      pushEvent("message_sending", {
         agentId,
-        channelId: typeof ctx?.channelId === "string" ? ctx.channelId : undefined,
-        to: typeof event?.to === "string" ? redactSecretsInText(event.to) : undefined,
+        data: { to: event?.to, contentPreview: String(event?.content || "").slice(0, 80), channelId: ctx?.channelId },
       });
       setState(agentId, "reply", { to: event?.to, channelId: ctx?.channelId, conversationId: ctx?.conversationId });
     });
@@ -1952,15 +943,6 @@ export default {
     api.on("message_sent", (event, ctx) => {
       const agentId = "main";
       pushEvent("message_sent", { agentId, data: { to: event?.to, success: event?.success, channelId: ctx?.channelId } });
-      pushFeed({
-        ts: nowMs(),
-        kind: "message_sent",
-        agentId,
-        channelId: typeof ctx?.channelId === "string" ? ctx.channelId : undefined,
-        to: typeof event?.to === "string" ? redactSecretsInText(event.to) : undefined,
-        success: typeof event?.success === "boolean" ? event.success : undefined,
-        error: typeof event?.error === "string" ? redactSecretsInText(event.error) : undefined,
-      });
       if (event?.success === false) {
         setState(agentId, "error", { error: event?.error || "message_sent failed", to: event?.to, channelId: ctx?.channelId });
       }
@@ -1970,14 +952,6 @@ export default {
     api.on("agent_end", (event, ctx) => {
       const agentId = resolveAgentId(ctx);
       pushEvent("agent_end", { agentId, data: { success: event?.success, error: event?.error, sessionKey: ctx?.sessionKey } });
-      pushFeed({
-        ts: nowMs(),
-        kind: "agent_end",
-        agentId,
-        sessionKey: typeof ctx?.sessionKey === "string" ? ctx.sessionKey : undefined,
-        success: typeof event?.success === "boolean" ? event.success : undefined,
-        error: typeof event?.error === "string" ? redactSecretsInText(event.error) : undefined,
-      });
 
       if (event?.success === false) {
         setState(agentId, "error", { error: event?.error || "agent_end: unsuccessful" });
@@ -2048,140 +1022,6 @@ export default {
       },
     });
 
-    // NOTE: Message Feed API is multiplexed via /lobster-room/api/lobster-room (op=feedGet/feedSummarize)
-    // because some gateway/proxy setups only reliably route this single plugin API endpoint.
-
-    api.registerHttpRoute({
-      path: "/lobster-room/api/feed/summarize",
-      handler: async (req, res) => {
-        if ((req.method || "GET").toUpperCase() !== "POST") {
-          sendJson(res, 405, { ok: false, error: "method_not_allowed" });
-          return;
-        }
-
-        // Resolve an auth token for calling the local gateway LLM endpoint.
-        // Experience-first fallback order:
-        // 1) api.config.llmToken (explicit override)
-        // 2) api.config.llmTokenEnv (explicit env)
-        // 3) process.env.OPENCLAW_GATEWAY_TOKEN / OPENCLAW_TOKEN (if present)
-        // 4) ~/.openclaw/openclaw.json gateway.auth.token (best-effort)
-        const readGatewayTokenFromConfigFile = async (): Promise<string> => {
-          try {
-            const home = (process.env.HOME || "").trim() || "/home/node";
-            const p = join(home, ".openclaw", "openclaw.json");
-            const txt = await fs.readFile(p, "utf8");
-            const obj: any = JSON.parse(txt);
-            const tok = obj?.gateway?.auth?.token;
-            return (typeof tok === "string" ? tok.trim() : "");
-          } catch {
-            return "";
-          }
-        };
-
-        let llmToken =
-          (typeof api.config?.llmToken === "string" && api.config.llmToken.trim())
-            ? api.config.llmToken.trim()
-            : (typeof api.config?.llmTokenEnv === "string" && api.config.llmTokenEnv.trim())
-              ? (process.env[api.config.llmTokenEnv.trim()] || "").trim()
-              : (process.env.OPENCLAW_GATEWAY_TOKEN || process.env.OPENCLAW_TOKEN || "").trim();
-
-        if (!llmToken) {
-          llmToken = await readGatewayTokenFromConfigFile();
-        }
-
-        if (!llmToken) {
-          sendJson(res, 200, { ok: false, error: "llm_not_configured" });
-          return;
-        }
-
-        let payload: any = null;
-        try {
-          payload = JSON.parse((await readBody(req, 512 * 1024)).toString("utf8"));
-        } catch {
-          payload = null;
-        }
-
-        const sessionKey = typeof payload?.sessionKey === "string" ? payload.sessionKey.trim() : "";
-        const agentId = typeof payload?.agentId === "string" ? payload.agentId.trim() : "";
-        const maxItems = Math.max(10, Math.min(500, Number(payload?.maxItems) || 200));
-        const windowMs = Math.max(10_000, Math.min(24 * 60 * 60 * 1000, Number(payload?.timeWindowMs) || 60 * 60 * 1000));
-        const sinceMs = typeof payload?.sinceMs === "number" && Number.isFinite(payload.sinceMs)
-          ? payload.sinceMs
-          : (nowMs() - windowMs);
-
-        let items = feedBuf.slice();
-        if (sessionKey) items = items.filter((x) => x.sessionKey === sessionKey);
-        else {
-          if (agentId) items = items.filter((x) => x.agentId === agentId);
-          items = items.filter((x) => x.ts >= sinceMs);
-        }
-        items = items.slice(-maxItems);
-
-        const lines = items
-          .sort((a, b) => a.ts - b.ts)
-          .map((it) => {
-            const iso = new Date(it.ts).toISOString();
-            const agent = it.agentId ? `@${it.agentId}` : "";
-            const extra: string[] = [];
-            if (it.toolName) extra.push(`tool=${it.toolName}`);
-            if (typeof it.durationMs === "number") extra.push(`durMs=${Math.round(it.durationMs)}`);
-            if (typeof it.success === "boolean") extra.push(`ok=${it.success}`);
-            if (it.error) extra.push(`err=${redactSecretsInText(it.error)}`);
-            return `${iso} ${agent} [${it.kind}] ${feedPreview(it)}${extra.length ? ` (${extra.join(", ")})` : ""}`.trim();
-          });
-
-        const model = (typeof api.config?.llmModel === "string" && api.config.llmModel.trim()) ? api.config.llmModel.trim() : "gpt-4o-mini";
-
-        // Call local gateway OpenAI-compatible endpoint.
-        const origin = readRequestUrl(req);
-        const llmUrl = new URL("/v1/chat/completions", origin);
-
-        try {
-          const r = await fetch(llmUrl.toString(), {
-            method: "POST",
-            headers: {
-              "content-type": "application/json",
-              authorization: `Bearer ${llmToken}`,
-            },
-            body: JSON.stringify({
-              model,
-              temperature: 0.2,
-              messages: [
-                {
-                  role: "system",
-                  content:
-                    "Summarize an internal agent event feed in plain language for a human. Be concise and factual; do not invent details. Include: what happened, outcome, any errors, and suggested next actions. Output plain text.",
-                },
-                {
-                  role: "user",
-                  content:
-                    `Summarize the following event timeline.\n\n${sessionKey ? `Session: ${sessionKey}\n` : agentId ? `Agent: ${agentId}\n` : ""}Items: ${lines.length}\n\n` +
-                    lines.join("\n"),
-                },
-              ],
-            }),
-          });
-
-          if (!r.ok) {
-            const txt = await r.text().catch(() => "");
-            sendJson(res, 200, { ok: false, error: "llm_failed", status: r.status, detail: txt.slice(0, 400) });
-            return;
-          }
-
-          const data: any = await r.json().catch(() => null);
-          const summary = data?.choices?.[0]?.message?.content;
-          if (typeof summary !== "string" || !summary.trim()) {
-            sendJson(res, 200, { ok: false, error: "llm_no_summary" });
-            return;
-          }
-
-          sendJson(res, 200, { ok: true, summary: summary.trim(), model });
-        } catch (err: any) {
-          sendJson(res, 200, { ok: false, error: "llm_unreachable", detail: String(err?.message || err) });
-        }
-      },
-    });
-
     // HTTP: API
     api.registerHttpRoute({
       path: "/lobster-room/api/lobster-room",
@@ -2245,200 +1085,6 @@ export default {
             }
             const op = String(payload?.op || "").trim();
 
-            // --- Message Feed ops (multiplexed) ---
-            if (op === "feedGet") {
-              const tNow = nowMs();
-              // Feed freeze fix: ensure latest.ts always advances while any agent is non-idle.
-              // Inject heartbeat presence events into feedBuf to prevent feed freeze.
-              // This runs on every feedGet call (not just when gap > 10s) to ensure feed keeps moving.
-              try {
-                const snapDerived = await deriveActivitySnapshot();
-                const activeAgents = Object.entries(snapDerived.agents || {}).filter(([, row]) => row && row.state !== "idle");
-                for (const [agentId, row] of activeAgents) {
-                  pushPresence(agentId as string, row.state as ActivityState, row.details || null, { force: true, heartbeat: true });
-                }
-              } catch {}
-
-              const limit = Math.max(1, Math.min(500, Number(payload?.limit) || 120));
-              const agentId = typeof payload?.agentId === "string" ? payload.agentId.trim() : "";
-              const kind = typeof payload?.kind === "string" ? payload.kind.trim() : "";
-              const includeRaw = !!payload?.includeRaw;
-
-              let items = feedBuf.slice();
-              if (agentId) items = items.filter((x) => x.agentId === agentId);
-              if (kind) items = items.filter((x) => x.kind === (kind as any));
-              items = items.slice(-limit);
-
-              const tasks = groupFeedIntoTasks(items, { includeRaw });
-
-              // Latest preview = most recent event.
-              const last = items.length ? items[items.length - 1] : null;
-
-              const version = Number(payload?.version) || 2;
-              const rows = version >= 3 ? buildFeedV3Rows(items) : undefined;
-
-              sendJson(res, 200, {
-                ok: true,
-                buildTagFeed: version >= 3 ? "feed-v3" : "feed-v2",
-                latest: last ? { ...last, preview: feedPreview(last) } : null,
-                rows,
-                tasks: tasks.map((t) => ({
-                  id: t.id,
-                  sessionKey: t.sessionKey,
-                  agentId: t.agentId,
-                  startTs: t.startTs,
-                  endTs: t.endTs,
-                  status: t.status,
-                  title: t.title,
-                  summary: t.summary,
-                  items: t.items ? t.items.map((it) => ({ ...it, preview: feedPreview(it) })) : undefined,
-                })),
-                items: includeRaw ? items.slice().reverse().map((it) => ({ ...it, preview: feedPreview(it) })) : undefined,
-              });
-              return;
-            }
-
-            if (op === "activityGet") {
-              try {
-                const snapshot = await deriveActivitySnapshot();
-                sendJson(res, 200, { ok: true, snapshot });
-              } catch (err: any) {
-                sendJson(res, 200, { ok: false, error: "activity_failed", detail: String(err?.message || err) });
-              }
-              return;
-            }
-
-            if (op === "feedSummarize") {
-              // NOTE: We re-use the same logic as /lobster-room/api/feed/summarize,
-              // but route reliability is better here.
-
-              // Resolve an auth token for calling the local gateway LLM endpoint.
-              // Experience-first fallback order:
-              // 1) api.config.llmToken (explicit override)
-              // 2) api.config.llmTokenEnv (explicit env)
-              // 3) process.env.OPENCLAW_GATEWAY_TOKEN / OPENCLAW_TOKEN (if present)
-              // 4) ~/.openclaw/openclaw.json gateway.auth.token (best-effort)
-              const readGatewayTokenFromConfigFile = async (): Promise<string> => {
-                try {
-                  const home = (process.env.HOME || "").trim() || "/home/node";
-                  const p = join(home, ".openclaw", "openclaw.json");
-                  const txt = await fs.readFile(p, "utf8");
-                  const obj: any = JSON.parse(txt);
-                  const tok = obj?.gateway?.auth?.token;
-                  return (typeof tok === "string" ? tok.trim() : "");
-                } catch {
-                  return "";
-                }
-              };
-
-              let llmToken =
-                (typeof api.config?.llmToken === "string" && api.config.llmToken.trim())
-                  ? api.config.llmToken.trim()
-                  : (typeof api.config?.llmTokenEnv === "string" && api.config.llmTokenEnv.trim())
-                    ? (process.env[api.config.llmTokenEnv.trim()] || "").trim()
-                    : (process.env.OPENCLAW_GATEWAY_TOKEN || process.env.OPENCLAW_TOKEN || "").trim();
-
-              if (!llmToken) {
-                llmToken = await readGatewayTokenFromConfigFile();
-              }
-
-              if (!llmToken) {
-                sendJson(res, 200, { ok: false, error: "llm_not_configured" });
-                return;
-              }
-
-              const sessionKey = typeof payload?.sessionKey === "string" ? payload.sessionKey.trim() : "";
-              const agentId = typeof payload?.agentId === "string" ? payload.agentId.trim() : "";
-              const maxItems = Math.max(10, Math.min(500, Number(payload?.maxItems) || 200));
-              const windowMs = Math.max(10_000, Math.min(24 * 60 * 60 * 1000, Number(payload?.timeWindowMs) || 60 * 60 * 1000));
-              const sinceMs = typeof payload?.sinceMs === "number" && Number.isFinite(payload.sinceMs)
-                ? payload.sinceMs
-                : (nowMs() - windowMs);
-
-              const startMs = typeof payload?.startMs === "number" && Number.isFinite(payload.startMs) ? payload.startMs : null;
-              const endMs = typeof payload?.endMs === "number" && Number.isFinite(payload.endMs) ? payload.endMs : null;
-
-              let items = feedBuf.slice();
-              if (sessionKey) items = items.filter((x) => x.sessionKey === sessionKey);
-              else {
-                if (agentId) items = items.filter((x) => x.agentId === agentId);
-                items = items.filter((x) => x.ts >= sinceMs);
-              }
-
-              // Optional explicit window (used by v3 "Summary: this segment")
-              if (startMs !== null || endMs !== null) {
-                const a = startMs !== null ? startMs : (nowMs() - windowMs);
-                const b = endMs !== null ? endMs : nowMs();
-                items = items.filter((x) => x.ts >= a && x.ts <= b);
-              }
-
-              items = items.slice(-maxItems);
-
-              const lines = items
-                .sort((a, b) => a.ts - b.ts)
-                .map((it) => {
-                  const iso = new Date(it.ts).toISOString();
-                  const agent = it.agentId ? `@${it.agentId}` : "";
-                  const extra: string[] = [];
-                  if (it.toolName) extra.push(`tool=${it.toolName}`);
-                  if (typeof it.durationMs === "number") extra.push(`durMs=${Math.round(it.durationMs)}`);
-                  if (typeof it.success === "boolean") extra.push(`ok=${it.success}`);
-                  if (it.error) extra.push(`err=${redactSecretsInText(it.error)}`);
-                  return `${iso} ${agent} [${it.kind}] ${feedPreview(it)}${extra.length ? ` (${extra.join(", ")})` : ""}`.trim();
-                });
-
-              const model = (typeof api.config?.llmModel === "string" && api.config.llmModel.trim()) ? api.config.llmModel.trim() : "gpt-4o-mini";
-
-              // Call local gateway OpenAI-compatible endpoint.
-              const origin = readRequestUrl(req);
-              const llmUrl = new URL("/v1/chat/completions", origin);
-
-              try {
-                const r = await fetch(llmUrl.toString(), {
-                  method: "POST",
-                  headers: {
-                    "content-type": "application/json",
-                    authorization: `Bearer ${llmToken}`,
-                  },
-                  body: JSON.stringify({
-                    model,
-                    temperature: 0.2,
-                    messages: [
-                      {
-                        role: "system",
-                        content:
-                          "Summarize an internal agent event feed in plain language for a human. Be concise and factual; do not invent details. Include: what happened, outcome, any errors, and suggested next actions. Output plain text.",
-                      },
-                      {
-                        role: "user",
-                        content:
-                          `Summarize the following event timeline.\n\n${sessionKey ? `Session: ${sessionKey}\n` : agentId ? `Agent: ${agentId}\n` : ""}Items: ${lines.length}\n\n` +
-                          lines.join("\n"),
-                      },
-                    ],
-                  }),
-                });
-
-                if (!r.ok) {
-                  const txt = await r.text().catch(() => "");
-                  sendJson(res, 200, { ok: false, error: "llm_failed", status: r.status, detail: txt.slice(0, 400) });
-                  return;
-                }
-
-                const data: any = await r.json().catch(() => null);
-                const summary = data?.choices?.[0]?.message?.content;
-                if (typeof summary !== "string" || !summary.trim()) {
-                  sendJson(res, 200, { ok: false, error: "llm_no_summary" });
-                  return;
-                }
-
-                sendJson(res, 200, { ok: true, summary: summary.trim(), model });
-              } catch (err: any) {
-                sendJson(res, 200, { ok: false, error: "llm_unreachable", detail: String(err?.message || err) });
-              }
-              return;
-            }
-
             if (op === "roomImageInfo") {
               const meta = await readRoomMeta();
               sendJson(res, 200, { ok: true, exists: !!meta?.file, file: meta?.file || null, updatedAt: meta?.updatedAt || null });
@@ -2475,15 +1121,10 @@ export default {
                   try { await fs.unlink(join(rootUserDir, meta.file)); } catch {}
                 }
                 try { await fs.unlink(roomMetaPath); } catch {}
-                sendJson(res, 200, { ok: true, debug: { opReceived: op } });
+                sendJson(res, 200, { ok: true });
               } catch (err: any) {
-                sendJson(res, 500, { ok: false, error: String(err?.message || err), debug: { opReceived: op } });
+                sendJson(res, 500, { ok: false, error: String(err?.message || err) });
               }
-              return;
-            }
-            // Debug support: echo opReceived for unknown POST+JSON payloads.
-            if (op) {
-              sendJson(res, 400, { ok: false, error: "unknown_op", debug: { opReceived: op } });
               return;
             }
           }
