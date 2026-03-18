@@ -9,6 +9,7 @@ type PluginApi = {
   logger: { info: (msg: string, meta?: any) => void; warn: (msg: string, meta?: any) => void };
   registerHttpRoute: (params: {
     path: string;
+    match?: "exact" | "prefix";
     handler: (req: IncomingMessage, res: ServerResponse) => void | Promise<void>;
   }) => void;
   on: (hookName: string, handler: (event: any, ctx: any) => any, opts?: { priority?: number }) => void;
@@ -272,12 +273,15 @@ export default {
     };
 
     // --- HTTP: dynamic handler (prefix routing) ---
-    // OpenClaw plugin httpRoutes are exact-path matches; use httpHandler for prefix routes like static assets.
-    api.registerHttpHandler(async (req, res) => {
-      const url = readRequestUrl(req);
-      // Normalize trailing slashes so routes work with or without a final '/'
-      const pRaw = url.pathname || "/";
-      const p = (pRaw !== "/") ? pRaw.replace(/\/+$/, "") : "/";
+    // Use registerHttpRoute with match: "prefix" for routes like /lobster-room/**
+    api.registerHttpRoute({
+      path: "/lobster-room/",
+      match: "prefix",
+      handler: async (req, res) => {
+        const url = readRequestUrl(req);
+        // Normalize trailing slashes so routes work with or without a final '/'
+        const pRaw = url.pathname || "/";
+        const p = (pRaw !== "/") ? pRaw.replace(/\/+$/, "") : "/";
 
       // Static assets: /lobster-room/assets/** → <pluginDir>/assets/**
       const assetsPrefix = "/lobster-room/assets/";
@@ -288,13 +292,11 @@ export default {
         if (!rel || rel.includes("..") || rel.includes("\\")) {
           res.statusCode = 400;
           res.end("bad_request");
-          return true;
         }
         const ct = contentTypeByExt(extname(rel));
         if (!ct) {
           res.statusCode = 415;
           res.end("unsupported_media_type");
-          return true;
         }
         try {
           const buf = await fs.readFile(join(pluginDir, "assets", rel));
@@ -320,7 +322,6 @@ export default {
             res.end("not_found");
           }
         }
-        return true;
       }
 
       // Agent label mapping API
@@ -328,7 +329,6 @@ export default {
         if ((req.method || "GET").toUpperCase() === "GET") {
           const m = await readAgentLabels();
           sendJson(res, 200, { ok: true, labels: m });
-          return true;
         }
         if ((req.method || "GET").toUpperCase() === "POST") {
           try {
@@ -350,11 +350,9 @@ export default {
           } catch (err: any) {
             sendJson(res, 400, { ok: false, error: String(err?.message || err) });
           }
-          return true;
         }
         res.statusCode = 405;
         res.end("method_not_allowed");
-        return true;
       }
 
       // Rooms API
@@ -362,7 +360,6 @@ export default {
         if ((req.method || "GET").toUpperCase() === "GET") {
           const idx = (await readRoomsIndex()) || { activeRoomId: defaultRoomId, rooms: [{ id: defaultRoomId, name: "Default", createdAt: 0, updatedAt: 0 }] };
           sendJson(res, 200, { ok: true, ...idx });
-          return true;
         }
         if ((req.method || "GET").toUpperCase() === "POST" && p.endsWith("/active")) {
           try {
@@ -378,7 +375,6 @@ export default {
           } catch (err: any) {
             sendJson(res, 400, { ok: false, error: String(err?.message || err) });
           }
-          return true;
         }
 
         if ((req.method || "GET").toUpperCase() === "POST" && p.endsWith("/delete")) {
@@ -406,12 +402,10 @@ export default {
           } catch (err: any) {
             sendJson(res, 400, { ok: false, error: String(err?.message || err) });
           }
-          return true;
         }
 
         res.statusCode = 405;
         res.end("method_not_allowed");
-        return true;
       }
 
       // Manual map API (user painted walkable zones) (per-active-room)
@@ -423,7 +417,6 @@ export default {
           if ((req.method || "GET").toUpperCase() !== "POST") {
             res.statusCode = 405;
             res.end("method_not_allowed");
-            return true;
           }
           try {
             await fs.unlink(mapPath).catch(() => undefined);
@@ -431,7 +424,6 @@ export default {
           } catch (err: any) {
             sendJson(res, 500, { ok: false, error: String(err?.message || err) });
           }
-          return true;
         }
 
         if ((req.method || "GET").toUpperCase() === "GET") {
@@ -467,7 +459,6 @@ export default {
               } catch {}
             }
           }
-          return true;
         }
 
         if ((req.method || "GET").toUpperCase() === "POST") {
@@ -493,12 +484,10 @@ export default {
           } catch (err: any) {
             sendJson(res, 400, { ok: false, error: String(err?.message || err) });
           }
-          return true;
         }
 
         res.statusCode = 405;
         res.end("method_not_allowed");
-        return true;
       }
 
       // Room layout API (inferred regions)
@@ -509,7 +498,6 @@ export default {
           if ((req.method || "GET").toUpperCase() !== "POST") {
             res.statusCode = 405;
             res.end("method_not_allowed");
-            return true;
           }
           try {
             await fs.unlink(layoutPath).catch(() => undefined);
@@ -517,7 +505,6 @@ export default {
           } catch (err: any) {
             sendJson(res, 500, { ok: false, error: String(err?.message || err) });
           }
-          return true;
         }
 
         if ((req.method || "GET").toUpperCase() === "GET") {
@@ -531,7 +518,6 @@ export default {
             res.statusCode = 404;
             res.end("not_found");
           }
-          return true;
         }
 
         if ((req.method || "GET").toUpperCase() === "POST") {
@@ -547,12 +533,10 @@ export default {
           } catch (err: any) {
             sendJson(res, 400, { ok: false, error: String(err?.message || err) });
           }
-          return true;
         }
 
         res.statusCode = 405;
         res.end("method_not_allowed");
-        return true;
       }
 
       // Room image API (per-active-room)
@@ -565,7 +549,6 @@ export default {
           const idx = await readRoomsIndex();
           const room = idx?.rooms?.find((r) => r.id === roomId) || { id: roomId, name: roomId, createdAt: 0, updatedAt: 0 };
           sendJson(res, 200, { ok: true, exists: true, roomId, roomName: room.name, updatedAt: room.updatedAt || null });
-          return true;
         }
 
         // reset = switch to default (do not delete)
@@ -573,7 +556,6 @@ export default {
           if ((req.method || "GET").toUpperCase() !== "POST") {
             res.statusCode = 405;
             res.end("method_not_allowed");
-            return true;
           }
           try {
             const idx = (await readRoomsIndex()) || { activeRoomId: defaultRoomId, rooms: [{ id: defaultRoomId, name: "Default", createdAt: 0, updatedAt: 0 }] };
@@ -583,7 +565,6 @@ export default {
           } catch (err: any) {
             sendJson(res, 500, { ok: false, error: String(err?.message || err) });
           }
-          return true;
         }
 
         // GET image bytes
@@ -604,7 +585,6 @@ export default {
             if (inm && inm === etag) {
               res.statusCode = 304;
               res.end();
-              return true;
             }
 
             const buf = await fs.readFile(imgPath);
@@ -624,7 +604,6 @@ export default {
               if (inm && inm === etag) {
                 res.statusCode = 304;
                 res.end();
-                return true;
               }
 
               const buf = await fs.readFile(bundledRoomImgPath);
@@ -640,7 +619,6 @@ export default {
               res.end("not_found");
             }
           }
-          return true;
         }
 
         // POST upload multipart: create new room, set active, create empty manual map
@@ -649,7 +627,6 @@ export default {
           const m = ct.match(/multipart\/form-data;\s*boundary=([^;]+)/i);
           if (!m) {
             sendJson(res, 400, { ok: false, error: "expected_multipart" });
-            return true;
           }
           const boundary = m[1];
           try {
@@ -658,7 +635,6 @@ export default {
             const ext = extFromContentType(filePart.contentType) || extname(filePart.filename).toLowerCase();
             if (![".png", ".jpg", ".jpeg", ".webp"].includes(ext)) {
               sendJson(res, 415, { ok: false, error: "unsupported_image_type", contentType: filePart.contentType });
-              return true;
             }
 
             const id = `room-${Date.now()}`;
@@ -677,15 +653,11 @@ export default {
           } catch (err: any) {
             sendJson(res, 500, { ok: false, error: String(err?.message || err) });
           }
-          return true;
         }
 
         res.statusCode = 405;
         res.end("method_not_allowed");
-        return true;
       }
-
-      return false;
     });
 
     const cooldownMs = Number.parseInt((process.env.LOBSTER_ROOM_IDLE_COOLDOWN_MS || "1500").trim(), 10) || 1500;
