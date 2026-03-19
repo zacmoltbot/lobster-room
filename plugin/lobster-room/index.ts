@@ -1408,8 +1408,9 @@ export default {
       if (v === "navigate" || v === "open") return "Open";
       if (v === "focus") return "Switch tab";
       if (v === "close") return "Close tab";
-      if (v === "screenshot") return "Screenshot";
-      if (v === "snapshot") return "Capture snapshot";
+      if (v === "screenshot") return "Take screenshot";
+      if (v === "snapshot") return "Inspect page";
+      if (v === "act") return "Interact";
       if (v === "upload") return "Upload";
       if (v === "console") return "Console";
       if (v === "pdf") return "Export PDF";
@@ -1442,17 +1443,15 @@ export default {
         const action = typeof d.action === "string" ? d.action
           : (typeof d.op === "string" ? d.op
             : (typeof d?.request?.kind === "string" ? String(d.request.kind) : ""));
-        const verb = browserActionLabel(action) || "Action";
+        const verb = browserActionLabel(action) || "Browser step";
         const target = browserTarget(d);
-        if (target) return `Browser: ${verb} ${target}`;
-        return `Browser: ${verb}`;
+        return target ? `Browser — ${verb} ${target}` : `Browser — ${verb}`;
       }
 
       if (tn === "exec") {
-        const cmd = redactLine(safeCmdSummary(d.command), 120);
         const code = typeof d.exitCode === "number" ? d.exitCode : (typeof d.code === "number" ? d.code : null);
         const tail = code === null ? "" : ` (exit ${code})`;
-        return cmd ? `Run: ${cmd}${tail}`.trim() : `Run${tail}`.trim();
+        return `Run command${tail}`.trim();
       }
 
       if (tn === "read") {
@@ -1489,17 +1488,19 @@ export default {
         const action = typeof details?.action === "string" ? details.action
           : (typeof details?.op === "string" ? details.op
             : (typeof details?.request?.kind === "string" ? String(details.request.kind) : ""));
-        const verb = browserActionLabel(action) || "Action";
+        const verb = browserActionLabel(action) || "browser step";
         const target = browserTarget(details || {});
-        if (target) return `Using browser: ${verb} ${target}`;
-        return `Using browser: ${verb}`;
+        return target ? `Using browser — ${verb} ${target}` : `Using browser — ${verb}`;
       }
-      if (tn === "exec") {
-        const token = redactLine(safeCmdSummary(details?.command), 120);
-        return token ? `Running: ${token}` : "Running";
-      }
-      if (tn) return `Using tool (${redactLine(tn, 40)})`;
-      return "Using tool";
+      if (tn === "exec") return "Running a command";
+      if (tn === "read") return "Reading a file";
+      if (tn === "write") return "Saving a file";
+      if (tn === "edit") return "Updating a file";
+      if (tn === "message") return "Preparing a message";
+      if (tn === "web_fetch") return "Checking a page";
+      if (tn === "sessions_spawn") return "Starting a helper";
+      if (tn) return "Working";
+      return "Working";
     };
 
     const humanStateLabel = (stRaw: string, details?: any): string => {

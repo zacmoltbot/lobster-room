@@ -1849,26 +1849,27 @@
           let txt = '';
 
           if(show){
-            // Prefer statusText from backend (session_status), if present.
-            const st = a && a.meta && typeof a.meta.statusText === 'string' ? a.meta.statusText : '';
-            if(st) txt = st;
-
-            // Otherwise, try to infer from most recent event.
-            if(!txt){
-              const evs = a && a.debug && a.debug.decision && Array.isArray(a.debug.decision.recentEvents) ? a.debug.decision.recentEvents : [];
-              const last = evs && evs.length ? evs[evs.length-1] : null;
-              const kind = last && last.kind ? String(last.kind) : '';
-              const d = last && last.data ? last.data : null;
-              if(kind === 'message_sending' && d && (d.contentPreview||d.content)){
-                const pv = String(d.contentPreview||d.content||'').trim();
-                txt = pv ? ('send: ' + pv.slice(0, 60)) : '';
-              }else if(kind === 'before_tool_call' && d && d.toolName){
-                txt = 'tool: ' + d.toolName;
-                if(d.toolName==='exec' && d.command) txt += ' · ' + String(d.command).slice(0, 60);
-                if(d.toolName==='sessions_spawn' && d.task) txt += ' · ' + String(d.task).slice(0, 60);
-                if(d.toolName==='message' && d.message) txt += ' · ' + String(d.message).slice(0, 60);
-                if(d.toolName==='web_fetch' && d.url) txt += ' · ' + String(d.url).slice(0, 60);
-              }else if(stNorm==='tool'){
+            // Do not surface raw backend/debug tool strings in the footer/detail area.
+            // Build a short end-user-readable status from the latest event instead.
+            const evs = a && a.debug && a.debug.decision && Array.isArray(a.debug.decision.recentEvents) ? a.debug.decision.recentEvents : [];
+            const last = evs && evs.length ? evs[evs.length-1] : null;
+            const kind = last && last.kind ? String(last.kind) : '';
+            const d = last && last.data ? last.data : null;
+            if(kind === 'message_sending' && d && (d.contentPreview||d.content)){
+              const pv = String(d.contentPreview||d.content||'').trim();
+              txt = pv ? ('Sending message — ' + pv.slice(0, 60)) : 'Sending message';
+            }else if(kind === 'before_tool_call' && d && d.toolName){
+              const tool = String(d.toolName || '').trim();
+              if(tool === 'browser') txt = 'Using browser';
+              else if(tool === 'exec') txt = 'Running a command';
+              else if(tool === 'read') txt = 'Reading a file';
+              else if(tool === 'write') txt = 'Saving a file';
+              else if(tool === 'edit') txt = 'Updating a file';
+              else if(tool === 'sessions_spawn') txt = 'Starting a helper';
+              else if(tool === 'message') txt = 'Preparing a message';
+              else if(tool === 'web_fetch') txt = 'Checking a page';
+              else txt = 'Working';
+            }else if(stNorm==='tool'){
                 // avoid redundant detail; state bubble already shows tool
                 txt = '';
               }else if(stNorm==='thinking'){
@@ -1883,7 +1884,6 @@
               }else if(stNorm==='error'){
                 txt = 'error';
               }
-            }
           }
 
           txt = (txt||'').replace(/\s+/g,' ').trim();
@@ -2420,6 +2420,19 @@
       return (t && Array.isArray(t.items)) ? t.items : [];
     }
 
+    function feedNormalizeAgentId(v){
+      const id0 = String(v || '').trim();
+      if(!id0) return '';
+      const m = id0.match(/^[^@]+@(.+)$/);
+      return m ? m[1] : id0;
+    }
+
+    function feedMatchesAgentFilter(v){
+      const want = feedNormalizeAgentId(FEED._agentFilter || '');
+      if(!want) return true;
+      return feedNormalizeAgentId(v) === want;
+    }
+
     function feedRender(){
       const listEl = document.getElementById('feed-list');
       const detailEl = document.getElementById('feed-detail');
@@ -2430,7 +2443,7 @@
       const nowEl = document.getElementById('feed-now');
       if(!listEl) return;
 
-      const rows = Array.isArray(FEED.rows) ? FEED.rows : [];
+      const rows = (Array.isArray(FEED.rows) ? FEED.rows : []).filter(r=> feedMatchesAgentFilter(r && r.agentId));
 
       if(statusEl){
         const base = rows.length ? (String(rows.length) + ' rows') : '—';
@@ -2448,10 +2461,8 @@
         for(const a of agents){
           const id0 = String(a && a.id || '').trim();
           if(!id0) continue;
-          // Strip any prefix like "resident@" to show clean agent names (@main, @qa_agent, etc)
-          const m = id0.match(/^[^@]+@(.+)$/);
-          const id = m ? m[1] : id0;
-          if(FEED._agentFilter && FEED._agentFilter !== id) continue;
+          const id = feedNormalizeAgentId(id0);
+          if(!feedMatchesAgentFilter(id)) continue;
           const st = (a && a.debug && a.debug.decision) ? String(a.debug.decision.activityState||'idle') : 'idle';
           const tn = (a && a.debug && a.debug.decision && a.debug.decision.details && a.debug.decision.details.toolName)
             ? String(a.debug.decision.details.toolName)
@@ -2731,7 +2742,11 @@
 
       if(btnOpen) btnOpen.addEventListener('click', ()=> setShow(!FEED.show));
       if(btnToggle) btnToggle.addEventListener('click', ()=> setShow(false));
-      if(agentSel) agentSel.addEventListener('change', ()=> feedPollOnce());
+      if(agentSel) agentSel.addEventListener('change', ()=> {
+        FEED._agentFilter = agentSel.value || '';
+        feedRender();
+        feedPollOnce();
+      });
 
       setShow(false);
     }
