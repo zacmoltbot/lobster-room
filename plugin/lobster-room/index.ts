@@ -146,6 +146,16 @@ function mapActivityToUiState(s: ActivityState): "think" | "wait" | "tool" | "re
   return s;
 }
 
+const LOW_SIGNAL_OBSERVATION_TOOLS = new Set(["sessions_history", "sessions_list", "session_status"]);
+
+function isLowSignalObservationTool(toolName: unknown): boolean {
+  return typeof toolName === "string" && LOW_SIGNAL_OBSERVATION_TOOLS.has(toolName.trim());
+}
+
+function isMeaningfulActivityDetails(details: unknown): boolean {
+  return !(details && typeof details === "object" && (details as any).meaningful === false);
+}
+
 function contentTypeByExt(ext: string): string | null {
   const e = ext.toLowerCase();
   if (e === ".svg") return "image/svg+xml; charset=utf-8";
@@ -999,7 +1009,9 @@ export default {
         const snapRow = snapDisk?.agents?.[agentId];
         const snapFresh = !!(snapRow && typeof snapRow.lastEventMs === "number" && (t - snapRow.lastEventMs) <= staleMs);
         if (snapFresh) {
-          activityState = snapRow.state as ActivityState;
+          activityState = isMeaningfulActivityDetails(snapRow?.details)
+            ? (snapRow.state as ActivityState)
+            : "idle";
         } else if (typeof queueDepth === "number" && queueDepth > 0) {
           activityState = "thinking";
         } else if (recent && lastType === "toolCall") {
@@ -1217,6 +1229,8 @@ export default {
         if (typeof extra.op === "string") detailPayload.op = extra.op;
         if (typeof extra.url === "string") detailPayload.url = extra.url;
       }
+
+      if (opts?.heartbeat) return;
 
       pushFeed({
         ts: t,
@@ -1811,7 +1825,7 @@ export default {
     setInterval(() => {
       const t = nowMs();
       for (const [agentId, row] of activity.entries()) {
-        if (!row || row.state === "idle") continue;
+        if (!row || row.state === "idle" || !isMeaningfulActivityDetails(row.details)) continue;
         const last = lastFeedByAgent.get(agentId) || 0;
         if (t - last < FEED_HEARTBEAT_MS) continue;
         pushPresence(agentId, row.state, row.details || null, { force: true, heartbeat: true });
@@ -1840,6 +1854,7 @@ export default {
     api.on("before_tool_call", (event, ctx) => {
       const agentId = resolveAgentId(ctx);
       const toolName = event?.toolName || event?.tool || event?.name;
+      const isLowSignalObservation = isLowSignalObservationTool(toolName);
 
       // Capture high-value params for debugging (truncate aggressively).
       let toolData: any = { toolName, sessionKey: ctx?.sessionKey };
@@ -1947,11 +1962,17 @@ export default {
           spawnAgentId: toolName === "sessions_spawn" ? coerceStr(toolData.spawnAgentId, 80) : undefined,
         },
       });
-      setState(agentId, "tool", { ...toolData, sessionKey: ctx?.sessionKey });
+      setState(agentId, isLowSignalObservation ? "thinking" : "tool", {
+        ...toolData,
+        sessionKey: ctx?.sessionKey,
+        meaningful: !isLowSignalObservation,
+        observationOnly: isLowSignalObservation || undefined,
+      });
     });
 
     api.on("after_tool_call", (event, ctx) => {
       const agentId = resolveAgentId(ctx);
+      const isLowSignalObservation = isLowSignalObservationTool(event?.toolName);
       pushEvent("after_tool_call", { agentId, data: { toolName: event?.toolName, durationMs: event?.durationMs } });
 
       // Best-effort: capture a safe preview of sessions_spawn final assistant output (if the runtime provides it).
@@ -2023,12 +2044,17 @@ export default {
         durationMs: typeof event?.durationMs === "number" ? event.durationMs : undefined,
         details: outputPreview ? { outputPreview } : undefined,
       });
-      setState(agentId, "thinking", { sessionKey: ctx?.sessionKey });
+      if (isLowSignalObservation) {
+        setIdleWithCooldown(agentId, 0);
+      } else {
+        setState(agentId, "thinking", { sessionKey: ctx?.sessionKey });
+      }
     });
 
     // Some tools may not reliably fire after_tool_call in all paths; use persist as a backup.
     api.on("tool_result_persist", (event, ctx) => {
       const agentId = resolveAgentId(ctx);
+      const isLowSignalObservation = isLowSignalObservationTool(event?.toolName);
       pushEvent("tool_result_persist", {
         agentId,
         data: { toolName: event?.toolName, toolCallId: event?.toolCallId, isSynthetic: event?.isSynthetic },
@@ -2044,7 +2070,11 @@ export default {
           isSynthetic: !!event?.isSynthetic,
         },
       });
-      setState(agentId, "thinking", { sessionKey: ctx?.sessionKey, persisted: true });
+      if (isLowSignalObservation) {
+        setIdleWithCooldown(agentId, 0);
+      } else {
+        setState(agentId, "thinking", { sessionKey: ctx?.sessionKey, persisted: true });
+      }
     });
 
     api.on("message_sending", (event, ctx) => {
@@ -2370,18 +2400,6 @@ export default {
 
             // --- Message Feed ops (multiplexed) ---
             if (op === "feedGet") {
-              const tNow = nowMs();
-              // Feed freeze fix: ensure latest.ts always advances while any agent is non-idle.
-              // Inject heartbeat presence events into feedBuf to prevent feed freeze.
-              // This runs on every feedGet call (not just when gap > 10s) to ensure feed keeps moving.
-              try {
-                const snapDerived = await deriveActivitySnapshot();
-                const activeAgents = Object.entries(snapDerived.agents || {}).filter(([, row]) => row && row.state !== "idle");
-                for (const [agentId, row] of activeAgents) {
-                  pushPresence(agentId as string, row.state as ActivityState, row.details || null, { force: true, heartbeat: true });
-                }
-              } catch {}
-
               const limit = Math.max(1, Math.min(500, Number(payload?.limit) || 120));
               const agentId = typeof payload?.agentId === "string" ? payload.agentId.trim() : "";
               const kind = typeof payload?.kind === "string" ? payload.kind.trim() : "";
