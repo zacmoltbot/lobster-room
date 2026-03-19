@@ -1236,7 +1236,7 @@ export default {
           const task = typeof (it.details as any)?.task === "string" ? String((it.details as any).task) : "";
           const t = (label || "").trim() || (task || "").trim();
           if (t) return redactSecretsInText(t).slice(0, 120);
-          return "Spawn sub-agent";
+          return "Starting helper task";
         }
       }
 
@@ -1245,9 +1245,10 @@ export default {
       if (first) {
         const tn = String(first);
         if (tn === "browser") return "QA in browser";
-        if (tn === "read" || tn === "write" || tn === "edit") return "Update files";
-        if (tn === "exec") return "Run command";
-        if (tn === "message") return "Send message";
+        if (tn === "read") return "Review project files";
+        if (tn === "write" || tn === "edit") return "Update project files";
+        if (tn === "exec") return "Run a command";
+        if (tn === "message") return "Prepare a reply";
         return "Tool: " + tn;
       }
 
@@ -1451,23 +1452,23 @@ export default {
       if (tn === "exec") {
         const code = typeof d.exitCode === "number" ? d.exitCode : (typeof d.code === "number" ? d.code : null);
         const tail = code === null ? "" : ` (exit ${code})`;
-        return `Run command${tail}`.trim();
+        return `Running a command${tail}`.trim();
       }
 
       if (tn === "read") {
         const p = d.path ?? d.file_path;
         const base = basenameLite(p);
-        return base ? `Read file: ${base}` : "Read file";
+        return base ? `Reading project file: ${base}` : "Reading project files";
       }
       if (tn === "write") {
         const p = d.path ?? d.file_path;
         const base = basenameLite(p);
-        return base ? `Write file: ${base}` : "Write file";
+        return base ? `Updating project file: ${base}` : "Updating project files";
       }
       if (tn === "edit") {
         const p = d.path ?? d.file_path;
         const base = basenameLite(p);
-        return base ? `Edit file: ${base}` : "Edit file";
+        return base ? `Updating project file: ${base}` : "Updating project files";
       }
 
       if (tn === "sessions_spawn") {
@@ -1476,7 +1477,7 @@ export default {
         const task = typeof d.task === "string" ? String(d.task) : "";
         const desc = redactLine((label || task).trim(), 120);
         const tail = desc ? ` — ${desc}` : "";
-        return `Spawn sub-agent${child ? ` @${child}` : ""}${tail}`.trim();
+        return `Starting a helper task${child ? ` @${child}` : ""}${tail}`.trim();
       }
 
       return tn;
@@ -1490,15 +1491,15 @@ export default {
             : (typeof details?.request?.kind === "string" ? String(details.request.kind) : ""));
         const verb = browserActionLabel(action) || "browser step";
         const target = browserTarget(details || {});
-        return target ? `Using browser — ${verb} ${target}` : `Using browser — ${verb}`;
+        return target ? `Inspecting in browser — ${verb} ${target}` : `Inspecting in browser — ${verb}`;
       }
       if (tn === "exec") return "Running a command";
-      if (tn === "read") return "Reading a file";
-      if (tn === "write") return "Saving a file";
-      if (tn === "edit") return "Updating a file";
-      if (tn === "message") return "Preparing a message";
+      if (tn === "read") return "Reading project files";
+      if (tn === "write") return "Updating project files";
+      if (tn === "edit") return "Updating project files";
+      if (tn === "message") return "Preparing a reply";
       if (tn === "web_fetch") return "Checking a page";
-      if (tn === "sessions_spawn") return "Starting a helper";
+      if (tn === "sessions_spawn") return "Starting a helper task";
       if (tn) return "Working";
       return "Working";
     };

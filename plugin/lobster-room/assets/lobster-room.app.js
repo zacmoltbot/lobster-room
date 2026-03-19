@@ -1860,13 +1860,13 @@
               txt = pv ? ('Sending message — ' + pv.slice(0, 60)) : 'Sending message';
             }else if(kind === 'before_tool_call' && d && d.toolName){
               const tool = String(d.toolName || '').trim();
-              if(tool === 'browser') txt = 'Using browser';
+              if(tool === 'browser') txt = 'Inspecting in browser';
               else if(tool === 'exec') txt = 'Running a command';
-              else if(tool === 'read') txt = 'Reading a file';
-              else if(tool === 'write') txt = 'Saving a file';
-              else if(tool === 'edit') txt = 'Updating a file';
-              else if(tool === 'sessions_spawn') txt = 'Starting a helper';
-              else if(tool === 'message') txt = 'Preparing a message';
+              else if(tool === 'read') txt = 'Reading project files';
+              else if(tool === 'write') txt = 'Updating project files';
+              else if(tool === 'edit') txt = 'Updating project files';
+              else if(tool === 'sessions_spawn') txt = 'Starting a helper task';
+              else if(tool === 'message') txt = 'Preparing a reply';
               else if(tool === 'web_fetch') txt = 'Checking a page';
               else txt = 'Working';
             }else if(stNorm==='tool'){
@@ -2077,9 +2077,7 @@
     }
 
     async function refreshActivity(){
-      // Lightweight build/activity monitor. If file exists, show it; otherwise keep blank.
-      const el = document.getElementById('activity');
-      if(!el) return;
+      // Lightweight build/activity monitor. Keep MODEL.activity fresh, but do not render agent status in the footer.
       if(MODEL.activityPollDisabled) return;
       try{
         const r = await fetch('./api/lobster-room', {
@@ -2090,12 +2088,11 @@
         });
         if(!r.ok){
           if(r.status === 404){ MODEL.activityPollDisabled = true; }
-          el.textContent = '';
           return;
         }
         const data = await r.json();
         const snap = (data && data.snapshot) ? data.snapshot : null;
-        if(!data || !data.ok || !snap || !snap.agents){ el.textContent=''; MODEL.activity=null; return; }
+        if(!data || !data.ok || !snap || !snap.agents){ MODEL.activity=null; return; }
 
         const agents = snap.agents || {};
         let agentId = 'main';
@@ -2104,7 +2101,7 @@
           agentId = ids[0] || '';
         }
         const row = agentId ? agents[agentId] : null;
-        if(!row || !row.state){ el.textContent=''; MODEL.activity=null; return; }
+        if(!row || !row.state){ MODEL.activity=null; return; }
 
         const updatedAt = (typeof snap.updatedAtMs === 'number') ? snap.updatedAtMs : null;
         const ageMs = (updatedAt!=null) ? (Date.now() - updatedAt) : null;
@@ -2124,7 +2121,6 @@
           msg = `${who}: PAUSED${ageTxt}`;
         }
 
-        el.textContent = msg.replace(/\s+/g,' ').trim();
         MODEL.activity = {
           status: effectiveStatus,
           task: null,
@@ -2133,7 +2129,7 @@
           updatedAt,
           fresh,
         };
-      }catch{ el.textContent=''; MODEL.activity = null; }
+      }catch{ MODEL.activity = null; }
     }
 
     async function tick(){
@@ -2312,13 +2308,13 @@
       const st = String(state || '').trim().toLowerCase();
       const tn = String(toolName || '').trim().toLowerCase();
       if(st === 'tool'){
-        if(tn === 'browser') return 'using browser';
-        if(tn === 'exec') return 'running command';
-        if(tn === 'read') return 'reading files';
-        if(tn === 'write' || tn === 'edit') return 'updating files';
-        if(tn === 'message') return 'sending message';
-        if(tn === 'web_fetch') return 'fetching page';
-        if(tn === 'sessions_spawn') return 'starting sub-agent';
+        if(tn === 'browser') return 'inspecting in browser';
+        if(tn === 'exec') return 'running a command';
+        if(tn === 'read') return 'reading project files';
+        if(tn === 'write' || tn === 'edit') return 'updating project files';
+        if(tn === 'message') return 'preparing a reply';
+        if(tn === 'web_fetch') return 'checking a page';
+        if(tn === 'sessions_spawn') return 'starting a helper task';
         return 'using tool';
       }
       if(st === 'reply') return 'replying';
