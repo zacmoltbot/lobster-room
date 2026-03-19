@@ -834,6 +834,21 @@ export default {
       } catch {}
     };
 
+    const syncSnapshotAgent = (agentId: string, state: ActivityState, details?: Record<string, unknown> | null, ts?: number) => {
+      try {
+        const t = typeof ts === "number" && Number.isFinite(ts) ? ts : nowMs();
+        const prev = snap.agents[agentId];
+        snap.agents[agentId] = {
+          state,
+          sinceMs: prev?.state === state && typeof prev?.sinceMs === "number" ? prev.sinceMs : t,
+          lastEventMs: t,
+          details: details ?? null,
+        };
+        snap.updatedAtMs = t;
+        writeSnapshotSoon();
+      } catch {}
+    };
+
     const readSnapshotDisk = async (): Promise<ActivitySnapshot | null> => {
       try {
         const txt = await fs.readFile(snapshotPath, "utf8");
@@ -1436,6 +1451,20 @@ export default {
       return url || selector || (ref ? `ref ${ref}` : "");
     };
 
+    const genericToolLabel = (toolName: unknown): string => {
+      const tn = typeof toolName === "string" ? toolName.trim() : "";
+      if (!tn) return "Working";
+      if (tn === "message") return "Preparing a reply";
+      if (tn === "web_fetch") return "Checking a page";
+      if (tn === "web_search") return "Searching the web";
+      if (tn === "image") return "Analyzing an image";
+      if (tn === "pdf") return "Reading a PDF";
+      if (tn === "read") return "Reading project files";
+      if (tn === "write" || tn === "edit") return "Updating project files";
+      if (tn === "sessions_yield") return "Waiting for helper results";
+      return `Using ${tn}`;
+    };
+
     const toolHumanSummary = (it: FeedItem): string => {
       const tn = (it.toolName || "tool").trim();
       const d: any = it.details || {};
@@ -1480,7 +1509,7 @@ export default {
         return `Starting a helper task${child ? ` @${child}` : ""}${tail}`.trim();
       }
 
-      return tn;
+      return genericToolLabel(tn);
     };
 
     const toolStateSummary = (details: any): string => {
@@ -1494,14 +1523,8 @@ export default {
         return target ? `Inspecting in browser — ${verb} ${target}` : `Inspecting in browser — ${verb}`;
       }
       if (tn === "exec") return "Running a command";
-      if (tn === "read") return "Reading project files";
-      if (tn === "write") return "Updating project files";
-      if (tn === "edit") return "Updating project files";
-      if (tn === "message") return "Preparing a reply";
-      if (tn === "web_fetch") return "Checking a page";
       if (tn === "sessions_spawn") return "Starting a helper task";
-      if (tn) return "Working";
-      return "Working";
+      return genericToolLabel(tn);
     };
 
     const humanStateLabel = (stRaw: string, details?: any): string => {
@@ -1524,6 +1547,8 @@ export default {
 
       if (it.kind === "presence") {
         const stRaw = typeof (it.details as any)?.state === "string" ? String((it.details as any).state) : "";
+        const isHeartbeat = !!(it.details as any)?.heartbeat;
+        if (isHeartbeat && stRaw && stRaw !== "idle" && stRaw !== "error") return null;
         const what = humanStateLabel(stRaw, it.details || {});
         return { kind: stRaw === "error" ? "error" : it.kind, what };
       }
@@ -1696,6 +1721,7 @@ export default {
         cur.sinceMs = t;
         cur.lastEventMs = t;
         cur.details = { stale: true };
+        syncSnapshotAgent(agentId, "idle", cur.details || null, t);
         pushPresence(agentId, "idle", cur.details || null);
       }, staleMs + 50);
 
@@ -1711,6 +1737,7 @@ export default {
         cur.sinceMs = t;
         cur.lastEventMs = t;
         cur.details = { ...(cur.details || {}), toolMax: true };
+        syncSnapshotAgent(agentId, "thinking", cur.details || null, t);
         pushPresence(agentId, "thinking", cur.details || null);
         setIdleWithCooldown(agentId);
       }, toolMaxMs);
@@ -1722,16 +1749,7 @@ export default {
       const prevState = row.state;
 
       // Persist to snapshot for API consumers.
-      try {
-        const prev = snap.agents[agentId];
-        if (!prev || prev.state !== next) {
-          snap.agents[agentId] = { state: next, sinceMs: t, lastEventMs: t, details: details ?? null };
-        } else {
-          snap.agents[agentId] = { ...prev, lastEventMs: t, details: details ?? prev.details };
-        }
-        snap.updatedAtMs = t;
-        writeSnapshotSoon();
-      } catch {}
+      syncSnapshotAgent(agentId, next, details ?? null, t);
 
       // Min-dwell: don't let fast transitions to idle hide states between polls.
       // Also enforce priority so high-signal states override lower ones.
@@ -1781,6 +1799,7 @@ export default {
         cur.sinceMs = t;
         cur.lastEventMs = t;
         cur.details = null;
+        syncSnapshotAgent(agentId, "idle", null, t);
         pushPresence(agentId, "idle", null);
       }, waitMs);
       // Update lastEvent so API knows something just happened.
@@ -1916,6 +1935,13 @@ export default {
         details: {
           command: toolName === "exec" ? coerceStr(toolData.command, 240) : undefined,
           url: toolName === "web_fetch" ? coerceStr(toolData.url, 240) : undefined,
+          action: toolName === "browser" ? coerceStr(toolData.action, 80) : undefined,
+          targetUrl: toolName === "browser" ? coerceStr(toolData.targetUrl, 240) : undefined,
+          ref: toolName === "browser" ? coerceStr(toolData.ref, 80) : undefined,
+          selector: toolName === "browser" ? coerceStr(toolData.selector, 160) : undefined,
+          op: toolName === "browser" ? coerceStr(toolData.op, 80) : undefined,
+          path: (toolName === "read" || toolName === "write" || toolName === "edit") ? coerceStr(toolData.path, 240) : undefined,
+          file_path: (toolName === "read" || toolName === "write" || toolName === "edit") ? coerceStr(toolData.file_path, 240) : undefined,
           label: toolName === "sessions_spawn" ? coerceStr(toolData.label, 120) : undefined,
           task: toolName === "sessions_spawn" ? coerceStr(toolData.task, 180) : undefined,
           spawnAgentId: toolName === "sessions_spawn" ? coerceStr(toolData.spawnAgentId, 80) : undefined,
