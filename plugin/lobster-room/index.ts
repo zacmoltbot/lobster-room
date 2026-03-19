@@ -886,7 +886,19 @@ export default {
       return allowIds;
     };
 
+    const activitySnapshotCacheMs = Math.max(1000, Math.min(10000, Number.parseInt((process.env.LOBSTER_ROOM_ACTIVITY_CACHE_MS || "3000").trim(), 10) || 3000));
+    let activitySnapshotCache: { at: number; value: ActivitySnapshot | null; inFlight: Promise<ActivitySnapshot> | null } = {
+      at: 0,
+      value: null,
+      inFlight: null,
+    };
+
     const deriveActivitySnapshot = async (): Promise<ActivitySnapshot> => {
+      const cachedAge = nowMs() - activitySnapshotCache.at;
+      if (activitySnapshotCache.value && cachedAge >= 0 && cachedAge < activitySnapshotCacheMs) return activitySnapshotCache.value;
+      if (activitySnapshotCache.inFlight) return activitySnapshotCache.inFlight;
+
+      const run = async (): Promise<ActivitySnapshot> => {
       const t = nowMs();
       const snapDisk = await readSnapshotDisk();
       const allowIds = collectAllowedAgentIds(snapDisk);
@@ -1004,6 +1016,17 @@ export default {
         agents,
         events: snapDisk?.events || [],
       };
+      };
+
+      activitySnapshotCache.inFlight = run();
+      try {
+        const snapshot = await activitySnapshotCache.inFlight;
+        activitySnapshotCache = { at: nowMs(), value: snapshot, inFlight: null };
+        return snapshot;
+      } catch (err) {
+        activitySnapshotCache.inFlight = null;
+        throw err;
+      }
     };
 
     const pushEvent = (kind: string, params: { agentId?: string; data?: any }) => {
@@ -1786,7 +1809,6 @@ export default {
 
     api.on("before_agent_start", (_event, ctx) => {
       const agentId = resolveAgentId(ctx);
-      api.logger.info("[lobster-room] hook before_agent_start", { buildTag: BUILD_TAG, agentId, sessionKey: ctx?.sessionKey });
       pushEvent("before_agent_start", { agentId, data: { sessionKey: ctx?.sessionKey, messageProvider: ctx?.messageProvider } });
       const startTs = nowMs();
       pushFeed({ ts: startTs, kind: "before_agent_start", agentId, sessionKey: typeof ctx?.sessionKey === "string" ? ctx.sessionKey : undefined });
@@ -1797,7 +1819,6 @@ export default {
     api.on("before_tool_call", (event, ctx) => {
       const agentId = resolveAgentId(ctx);
       const toolName = event?.toolName || event?.tool || event?.name;
-      api.logger.info("[lobster-room] hook before_tool_call", { buildTag: BUILD_TAG, agentId, toolName, sessionKey: ctx?.sessionKey });
 
       // Capture high-value params for debugging (truncate aggressively).
       let toolData: any = { toolName, sessionKey: ctx?.sessionKey };
@@ -2650,111 +2671,14 @@ export default {
           }
         }
 
-        // Derive activity by polling gateway session stores.
-        // (Hook-based signals are unreliable in some deployments / behind proxies.)
-        const gatewayToken: string | null = typeof api.config?.gateway?.auth?.token === "string" ? api.config.gateway.auth.token : null;
-        const invokeUrl = "http://127.0.0.1:18789/tools/invoke";
-        const invoke = async (tool: string, args: any) => {
-          const headers: Record<string, string> = { "content-type": "application/json" };
-          if (gatewayToken) headers.authorization = `Bearer ${gatewayToken}`;
-          const resp = await fetch(invokeUrl, { method: "POST", headers, body: JSON.stringify({ tool, args }) });
-          const data = await resp.json();
-          if (!data?.ok) throw new Error(String(data?.error || "invoke_failed"));
-          return data;
-        };
-
-        const skToAgentId = (sk: unknown): string | null => {
-          if (typeof sk !== "string") return null;
-          const m = sk.match(/^agent:([^:]+):/);
-          return m && m[1] ? m[1] : null;
-        };
-
-        let sessions: any[] = [];
-        try {
-          const r = await invoke("sessions_list", {});
-          const details = r?.result?.details || {};
-          sessions = Array.isArray(details.sessions) ? details.sessions : [];
-        } catch {
-          sessions = [];
-        }
-
-        const sessionsByAgent = new Map<string, any[]>();
-        for (const s of sessions) {
-          const aid = skToAgentId(s?.key);
-          if (!aid) continue;
-          const arr = sessionsByAgent.get(aid) || [];
-          arr.push(s);
-          sessionsByAgent.set(aid, arr);
-        }
-
-        const agentsPayload = [] as any[];
-        for (const agentId of allowIds) {
+        const snapshot = await deriveActivitySnapshot();
+        const agentsPayload = allowIds.map((agentId) => {
           const displayName = agentNameOverrides[agentId] || identityNameByAgentId.get(agentId) || agentId;
-          const list = (sessionsByAgent.get(agentId) || []).filter((s) => typeof s?.key === "string");
-          list.sort((a, b) => (Number(b?.updatedAt || 0) - Number(a?.updatedAt || 0)));
-
-          const maxUpdatedAt = list.length ? Number(list[0]?.updatedAt || 0) : 0;
-          const recent = !!(maxUpdatedAt && (t - maxUpdatedAt) <= staleMs);
-
-          // session_status on the most recent session (best-effort)
-          let queueDepth: number | null = null;
-          let statusText: string | null = null;
-          if (list.length) {
-            try {
-              const r2 = await invoke("session_status", { sessionKey: String(list[0].key) });
-              const det2 = r2?.result?.details || {};
-              const qd = det2.queueDepth ?? det2?.queue?.depth;
-              if (Number.isFinite(Number(qd))) queueDepth = Number(qd);
-              if (typeof det2.statusText === "string") statusText = det2.statusText;
-            } catch {}
-          }
-
-          // sessions_history for last message type (best-effort)
-          let lastType: string | null = null;
-          let lastRole: string | null = null;
-          let historyTypes: string[] = [];
-          if (list.length) {
-            try {
-              const r3 = await invoke("sessions_history", { sessionKey: String(list[0].key), limit: 8 });
-              const msgs = r3?.result?.details?.messages || [];
-              const last = Array.isArray(msgs) && msgs.length ? msgs[0] : null;
-              lastRole = typeof last?.role === "string" ? last.role : null;
-              const c = last?.content;
-              if (Array.isArray(c)) {
-                for (const part of c) {
-                  if (part && typeof part === "object" && typeof part.type === "string") historyTypes.push(part.type);
-                }
-                lastType = historyTypes[0] || null;
-              }
-            } catch {}
-          }
-
-          let activityState: ActivityState = "idle";
-          let uiState: "think" | "wait" | "tool" | "reply" | "error" = "wait";
-
-          // Prefer hook-derived snapshot (more real-time, no polling lag).
-          const snapRow = snapDisk?.agents?.[agentId];
-          const snapFresh = !!(snapRow && typeof snapRow.lastEventMs === "number" && (t - snapRow.lastEventMs) <= staleMs);
-          if (snapFresh) {
-            activityState = snapRow.state as ActivityState;
-            uiState = mapActivityToUiState(activityState);
-          } else if (typeof queueDepth === "number" && queueDepth > 0) {
-            activityState = "thinking";
-            uiState = "think";
-          } else if (recent && lastType === "toolCall") {
-            activityState = "tool";
-            uiState = "tool";
-          } else if (recent && lastType === "text" && lastRole === "assistant") {
-            activityState = "reply";
-            uiState = "reply";
-          } else {
-            activityState = "idle";
-            uiState = "wait";
-          }
-
-          const sinceOut = snapFresh ? (snapRow?.sinceMs || null) : (maxUpdatedAt || null);
-          const lastOut = snapFresh ? (snapRow?.lastEventMs || null) : (maxUpdatedAt || null);
-          agentsPayload.push({
+          const snapRow = snapshot.agents?.[agentId];
+          const activityState = (snapRow?.state || "idle") as ActivityState;
+          const uiState = mapActivityToUiState(activityState);
+          const details = (snapRow?.details || {}) as any;
+          return {
             id: `resident@${agentId}`,
             hostId: "local",
             hostLabel: "OpenClaw",
@@ -2762,36 +2686,28 @@ export default {
             state: uiState,
             meta: {
               active: uiState !== "wait",
-              sinceMs: sinceOut,
-              maxUpdatedAt: maxUpdatedAt || null,
-              queueDepth,
-              statusText,
+              sinceMs: snapRow?.sinceMs || null,
+              maxUpdatedAt: snapRow?.lastEventMs || null,
+              queueDepth: Number.isFinite(Number(details?.queueDepth)) ? Number(details.queueDepth) : null,
+              statusText: typeof details?.statusText === "string" ? details.statusText : null,
             },
             debug: {
               decision: {
                 agentId,
                 displayName,
                 activityState,
-                sinceMs: sinceOut,
-                lastEventMs: lastOut,
+                sinceMs: snapRow?.sinceMs || null,
+                lastEventMs: snapRow?.lastEventMs || null,
                 cooldownMs,
                 staleMs,
                 toolMaxMs,
                 finalState: uiState,
-                details: {
-                  queueDepth,
-                  statusText,
-                  historyTypes,
-                  lastRole,
-                  lastType,
-                  snapFresh,
-                  snapState: snapRow?.state || null,
-                } as any,
-                recentEvents: (snapDisk?.events || eventBuf),
+                details,
+                recentEvents: snapshot.events || (snapDisk?.events || eventBuf),
               },
             },
-          });
-        }
+          };
+        });
 
         sendJson(res, 200, {
           ok: true,

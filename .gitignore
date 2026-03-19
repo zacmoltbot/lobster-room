@@ -9,3 +9,7 @@ package.json
 # Playwright artifacts
 /playwright-report/
 /test-results/
+
+# Local/runtime Lobster Room artifacts
+/index.ts
+/plugin/lobster-room/assets/user/rooms/

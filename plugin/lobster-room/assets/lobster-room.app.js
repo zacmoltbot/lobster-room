@@ -2115,14 +2115,13 @@
         const ageTxt = (ageSec==null) ? '' : (' · ' + ageSec + 's ago');
 
         const who = MODEL.selfName || 'Zac';
-        const detail = (row.details && (row.details.toolName || row.details.statusText)) ? (row.details.toolName || row.details.statusText) : '';
         let msg = '';
         if(effectiveStatus === 'working'){
-          msg = `${who}: WORKING ${detail||''}${ageTxt}`;
+          msg = `${who}: WORKING${ageTxt}`;
         }else if(effectiveStatus === 'blocked'){
-          msg = `${who}: BLOCKED ${detail||''}${ageTxt}`;
+          msg = `${who}: BLOCKED${ageTxt}`;
         }else{
-          msg = `${who}: PAUSED ${detail||''}${ageTxt}`;
+          msg = `${who}: PAUSED${ageTxt}`;
         }
 
         el.textContent = msg.replace(/\s+/g,' ').trim();
@@ -2130,7 +2129,7 @@
           status: effectiveStatus,
           task: null,
           step: null,
-          detail: detail || null,
+          detail: null,
           updatedAt,
           fresh,
         };
@@ -2268,6 +2267,7 @@
       _pollInFlightAt: 0,
       _pollTimer: null,
       _lastOkMs: 0,
+      _knownAgents: [],
 
       // "since last viewed" anchor (set when panel opens; persisted when panel closes)
       lastViewedMs: null,
@@ -2305,6 +2305,27 @@
         const day = Math.round(hr/24);
         return day + 'd ago';
       }catch{return ''}
+    }
+
+
+    function feedHumanState(state, toolName){
+      const st = String(state || '').trim().toLowerCase();
+      const tn = String(toolName || '').trim().toLowerCase();
+      if(st === 'tool'){
+        if(tn === 'browser') return 'using browser';
+        if(tn === 'exec') return 'running command';
+        if(tn === 'read') return 'reading files';
+        if(tn === 'write' || tn === 'edit') return 'updating files';
+        if(tn === 'message') return 'sending message';
+        if(tn === 'web_fetch') return 'fetching page';
+        if(tn === 'sessions_spawn') return 'starting sub-agent';
+        return 'using tool';
+      }
+      if(st === 'reply') return 'replying';
+      if(st === 'thinking') return 'thinking';
+      if(st === 'error') return 'error';
+      if(st === 'idle' || st === 'wait') return 'idle';
+      return st || 'idle';
     }
 
     function feedMaskUrls(s){
@@ -2415,7 +2436,8 @@
         const base = rows.length ? (String(rows.length) + ' rows') : '—';
         const age = FEED.latest && FEED.latest.ts ? feedAge(FEED.latest.ts) : '';
         const ageText = age ? ' · last event: ' + age : '';
-        const extra = [(FEED.pollStatus||'').trim(), (FEED.devSpawnStatus||'').trim()].filter(Boolean).join(' · ');
+        const agentLabel = FEED._agentFilter ? ('filter: @' + FEED._agentFilter) : 'filter: all agents';
+        const extra = [agentLabel, (FEED.pollStatus||'').trim(), (FEED.devSpawnStatus||'').trim()].filter(Boolean).join(' · ');
         statusEl.textContent = extra ? (base + ageText + ' · ' + extra) : (base + ageText);
       }
 
@@ -2429,8 +2451,8 @@
           // Strip any prefix like "resident@" to show clean agent names (@main, @qa_agent, etc)
           const m = id0.match(/^[^@]+@(.+)$/);
           const id = m ? m[1] : id0;
+          if(FEED._agentFilter && FEED._agentFilter !== id) continue;
           const st = (a && a.debug && a.debug.decision) ? String(a.debug.decision.activityState||'idle') : 'idle';
-          // Optional detail: current tool name
           const tn = (a && a.debug && a.debug.decision && a.debug.decision.details && a.debug.decision.details.toolName)
             ? String(a.debug.decision.details.toolName)
             : '';
@@ -2438,7 +2460,7 @@
             ? a.debug.decision.lastEventMs
             : ((a && a.meta && typeof a.meta.maxUpdatedAt === 'number') ? a.meta.maxUpdatedAt : null);
           const age = lastMs ? feedAge(lastMs) : '';
-          lines.push({ agent: '@' + id, state: st, tool: tn, age });
+          lines.push({ agent: '@' + id, state: feedHumanState(st, tn), age });
         }
         lines.sort((a, b)=> String(a.agent).localeCompare(String(b.agent)));
         if(lines.length){
@@ -2457,7 +2479,6 @@
             const state = document.createElement('span');
             state.className = 'feed-now-state';
             const bits = [line.state];
-            if(line.tool) bits.push(line.tool);
             if(line.age) bits.push(line.age);
             state.textContent = bits.join(' · ');
             row.appendChild(agent);
@@ -2586,8 +2607,20 @@
           FEED.tasks = Array.isArray(data.tasks) ? data.tasks : [];
           FEED.items = [];
 
-          // Build filter list from tasks; always include current selection.
-          const agents = [...new Set((FEED.tasks||[]).map(x=>x.agentId).filter(Boolean))].sort();
+          // Build filter list from known agent ids so selecting one agent doesn't hide the others.
+          const agents = [...new Set(
+            ([]).concat(
+              FEED._knownAgents || [],
+              (FEED.tasks||[]).map(x=>x.agentId),
+              (MODEL.agents||[]).map(x=> {
+                const id0 = String(x && x.id || '').trim();
+                const m = id0.match(/^[^@]+@(.+)$/);
+                return m ? m[1] : id0;
+              }),
+              agentId || ''
+            ).filter(Boolean)
+          )].sort();
+          FEED._knownAgents = agents.slice();
           if(agentSel){
             const cur = agentSel.value;
             const opts = [''].concat(agents);
@@ -2595,7 +2628,7 @@
             for(const a of opts){
               const o = document.createElement('option');
               o.value = a;
-              o.textContent = a ? a : 'All agents';
+              o.textContent = a ? ('@' + a) : 'All agents';
               agentSel.appendChild(o);
             }
             agentSel.value = opts.includes(cur) ? cur : '';
