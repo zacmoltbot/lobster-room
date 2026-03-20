@@ -146,6 +146,7 @@ This project monitors OpenClaw **in-process** via plugin lifecycle hooks.
 - `tool` comes from: `before_tool_call` (with `toolName`)
 - Tool completion is inferred from: `tool_result_persist` and/or `after_tool_call`
 - `idle` is entered after a short cooldown, and watchdogs prevent “stuck” states
+`replying` shows when an agent is sending a message back to the user.
 
 ## Settings (features)
 
