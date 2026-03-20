@@ -2246,7 +2246,7 @@
 
     // --- Message Feed ---
     const FEED = {
-      show: false,
+      show: true, // feed always visible
 
       // v3: human-friendly rows (newest-first) with folded low-level ops.
       rows: [],
