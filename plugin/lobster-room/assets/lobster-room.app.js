@@ -1,5 +1,16 @@
     // UI build stamp (bump this when you deploy so we can confirm which frontend is running).
-    const UI_VERSION = 'feed-v3-20260316.2';
+    const UI_VERSION = 'feed-v3-20260316.3';
+
+    // Soft muted color palette for agent name coloring (deterministic, dark-background friendly).
+    const AGENT_COLORS = ['#7eb8da','#b4a7d6','#8dd49e','#e6b89c','#d4a5c9','#8ecfc9','#d4c88a'];
+
+    // Deterministic hash → color index (same agent name always gets same color).
+    function agentColor(name){
+      if(!name) return '';
+      let h = 0;
+      for(let i=0;i<name.length;i++) h = (h*31 + name.charCodeAt(i)) >>> 0;
+      return AGENT_COLORS[h % AGENT_COLORS.length];
+    }
 
     const STATES = [
       {key:'reply', cls:'b-reply', label:'💬 replying'},
@@ -2495,6 +2506,7 @@
             const agent = document.createElement('span');
             agent.className = 'feed-now-agent';
             agent.textContent = line.agent;
+            agent.style.color = agentColor(line.agent);
             const state = document.createElement('span');
             state.className = 'feed-now-state';
             const bits = [line.state];
@@ -2544,6 +2556,7 @@
         const agent = document.createElement('span');
         agent.className = 'feed-v3-agent';
         agent.textContent = r.agentId ? ('@' + r.agentId) : '—';
+        if(r.agentId) agent.style.color = agentColor('@' + r.agentId);
 
         const what = document.createElement('span');
         what.className = 'feed-v3-what';
