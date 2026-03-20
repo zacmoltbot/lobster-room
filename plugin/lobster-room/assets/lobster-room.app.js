@@ -3312,8 +3312,8 @@
         if(!f){ statusEl.textContent = 'Choose an image first.'; return; }
         if(f.size > 8*1024*1024){ statusEl.textContent = 'File too large (max 8MB).'; return; }
 
-        // Aspect ratio guard: require landscape-ish images.
-        // This room view expects wide backgrounds; portrait images look odd.
+        // Aspect ratio guard: enforce 4:3 (1.33) with tolerance band 1.25–1.45.
+        // The manualMap / cell grid (32×20) expects ~4:3 backgrounds.
         try{
           const bmp = await createImageBitmap(f);
           const w = bmp.width || 0;
@@ -3321,8 +3321,9 @@
           bmp.close && bmp.close();
           if(w>0 && h>0){
             const ratio = w / h;
-            if(ratio < 1.15){
-              statusEl.textContent = `Upload rejected: image is too portrait (w/h=${ratio.toFixed(2)}). Please use a wider image.`;
+            const MIN = 1.25, MAX = 1.45;
+            if(ratio < MIN || ratio > MAX){
+              statusEl.textContent = `⚠️ This room image is not 4:3 (w/h=${ratio.toFixed(2)}). The manualMap may not align correctly. Upload a 4:3 image for best results.`;
               return;
             }
           }
