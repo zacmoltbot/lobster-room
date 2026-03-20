@@ -2458,7 +2458,7 @@
           ).filter(Boolean).map(id=> '@' + id)
         )];
         const longestAgentLabel = knownAgentLabels.reduce((max, label)=> Math.max(max, String(label || '').length), 0);
-        const agentColCh = Math.min(Math.max(longestAgentLabel + 2, 8), 16);
+        const agentColCh = Math.min(Math.max(longestAgentLabel + 1, 7), 12);
         feedPanelEl.style.setProperty('--feed-agent-col-ch', String(agentColCh) + 'ch');
       }
 
