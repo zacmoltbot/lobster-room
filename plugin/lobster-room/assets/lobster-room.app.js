@@ -2769,7 +2769,7 @@
         feedPollOnce();
       });
 
-      setShow(false);
+      setShow(true);
     }
 
     function init(){
