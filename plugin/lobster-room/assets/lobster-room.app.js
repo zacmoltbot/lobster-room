@@ -2443,11 +2443,23 @@
 
       if(statusEl){
         const base = rows.length ? (String(rows.length) + ' rows') : '—';
-        const age = FEED.latest && FEED.latest.ts ? feedAge(FEED.latest.ts) : '';
-        const ageText = age ? ' · last event: ' + age : '';
         const agentLabel = FEED._agentFilter ? ('filter: @' + FEED._agentFilter) : 'filter: all agents';
         const extra = [agentLabel, (FEED.pollStatus||'').trim(), (FEED.devSpawnStatus||'').trim()].filter(Boolean).join(' · ');
-        statusEl.textContent = extra ? (base + ageText + ' · ' + extra) : (base + ageText);
+        statusEl.textContent = extra ? (base + ' · ' + extra) : base;
+      }
+
+      const feedPanelEl = document.getElementById('feed-panel');
+      if(feedPanelEl){
+        const knownAgentLabels = [...new Set(
+          ([]).concat(
+            FEED._knownAgents || [],
+            rows.map(r=> feedNormalizeAgentId(r && r.agentId)),
+            (MODEL.agents||[]).map(a=> feedNormalizeAgentId(a && a.id))
+          ).filter(Boolean).map(id=> '@' + id)
+        )];
+        const longestAgentLabel = knownAgentLabels.reduce((max, label)=> Math.max(max, String(label || '').length), 0);
+        const agentColCh = Math.min(Math.max(longestAgentLabel + 2, 8), 16);
+        feedPanelEl.style.setProperty('--feed-agent-col-ch', String(agentColCh) + 'ch');
       }
 
       // "Now" section (per-agent activity snapshot)
