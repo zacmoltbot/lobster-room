@@ -147,14 +147,6 @@ This project monitors OpenClaw **in-process** via plugin lifecycle hooks.
 - Tool completion is inferred from: `tool_result_persist` and/or `after_tool_call`
 - `idle` is entered after a short cooldown, and watchdogs prevent “stuck” states
 
-### Replying
-
-`replying` is driven by outbound message hooks (`message_sending` / `message_sent`) **when available**.
-
-Some OpenClaw builds/environments may not emit these hooks; in that case we fall back to a **synthetic** `replying` blip on successful `agent_end` so the UI matches user-perceived behavior.
-
-Privacy note: by default we **do not** store outbound message previews in debug traces. If you really need that for debugging, set plugin config `debugCaptureMessagePreview=true`.
-
 ## Settings (features)
 
 Lobster Room ships with a small Settings UI so you can tweak behavior without redeploying.
