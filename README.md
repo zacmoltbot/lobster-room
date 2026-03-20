@@ -6,6 +6,15 @@ A cute, practical dashboard that visualizes your OpenClaw **agents & sessions** 
 
 ![Demo (animated)](docs/screenshots/demo.gif)
 
+## What's New in v0.2.0
+
+- **Permanent Message Feed**: Feed panel is always visible (no toggle needed)
+- **Softer agent colors**: Agent names in feed and Now block are color-coded with muted palette
+- **4:3 room backgrounds**: Upload validation enforces 4:3 aspect ratio for correct zone alignment
+- **Better room/zone alignment**: Room background uses `contain` sizing so zones always match
+- **Removed Move Debug from Settings**: Developer tool hidden from end-user UI, accessible via `?moveDebug=1`
+- **Improved feed UX**: Tighter agent column, reduced row gaps, stable header without jumping "last event" text
+
 **Links**
 - Portal: `https://<openclaw-host>/lobster-room/`
 - API: `https://<openclaw-host>/lobster-room/api/lobster-room`
@@ -127,7 +136,7 @@ This is an OpenClaw **plugin**. After updating, you must restart/redeploy the Op
 
 ### UI version stamp
 
-Open the Move Debug panel (Settings → *Show Move Debug panel*) and check the `ui=<hash>` stamp. It’s the fastest way to confirm which frontend build is being served.
+Check the `ui=<hash>` stamp shown in the Move Debug panel, or the `?v=` cache-bust in the script tag. It’s the fastest way to confirm which frontend build is being served.
 
 ## How status works (truth + evidence)
 
@@ -170,9 +179,9 @@ Lobster Room ships with a small Settings UI so you can tweak behavior without re
 
 ### HUD / debug
 
-- **Move Debug panel** (HUD + log) for screenshots and collaboration
-- Options like **Freeze roaming** (only move on zone change)
-- Optional overlays/debug toggles
+The Move Debug panel is a developer tool, hidden from Settings by default.
+Use `?moveDebug=1` in the URL or run `MVDBG.visible=true` in the browser console to show it.
+It provides movement HUD, log, and overlay controls.
 
 ### Background opacity
 
@@ -180,9 +189,13 @@ Lobster Room ships with a small Settings UI so you can tweak behavior without re
 
 ## Debug
 
-### Move Debug panel
+### Move Debug panel (developer tool)
 
-The Move Debug panel is **hidden by default**. Enable it in Settings when needed.
+The Move Debug panel is **hidden from Settings by default**. To enable it:
+- URL: append `?moveDebug=1` to the Lobster Room URL
+- Console: run `MVDBG.visible=true`
+
+The panel shows movement HUD, log, and overlay controls for debugging agent roaming.
 
 ### Activity traces
 
