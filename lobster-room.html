@@ -21,12 +21,12 @@
     .btn{background:var(--surface);border:1px solid var(--border);padding:7px 12px;border-radius:10px;color:var(--muted);font-size:12px;cursor:pointer;transition:all .15s;text-decoration:none;display:inline-flex;align-items:center;gap:8px}
     .btn:hover{background:var(--surfaceHover);color:var(--textStrong)}
 
-    .room{position:relative;border:1px solid var(--border);background:var(--surface);border-radius:18px;min-height:720px;aspect-ratio:4/3;overflow:hidden;max-width:960px;margin:0 auto}
+    .room{position:relative;border:1px solid var(--border);background:var(--surface);border-radius:18px;aspect-ratio:4/3;overflow:hidden;max-width:960px;margin:0 auto;flex:0 0 auto}
 
     /* Room + Feed dock layout */
     .room-row{display:flex;gap:12px;align-items:stretch;width:100%;flex-wrap:wrap}
     .room-col{flex:1 1 0;min-width:0;display:flex}
-    .room-col > .room{flex:1 1 auto}
+    .room-col > .room{flex:0 0 auto}
 
     /* Feed is a true right-docked panel on desktop (sibling of .room-col inside .room-row). */
     .feed-panel{position:relative;left:auto;right:auto;top:auto;bottom:auto;margin-left:auto;
