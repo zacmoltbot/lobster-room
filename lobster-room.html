@@ -53,7 +53,7 @@
     .roommap{position:absolute;inset:0;width:100%;height:100%;pointer-events:none;opacity:.98}
 
     /* Room background image (user uploaded) */
-    .room-bg{position:absolute;inset:0;width:100%;height:100%;object-fit:cover;z-index:0;opacity:var(--bgOpacity,1);display:none;}
+    .room-bg{position:absolute;inset:0;width:100%;height:100%;object-fit:contain;z-index:0;opacity:var(--bgOpacity,1);display:none;background-color:var(--bg);}
     .room.has-bg .room-bg{display:block;}
     .room.has-bg .roommap{opacity:0;}
     .room.has-bg .zone-label{opacity:0;}
