@@ -2773,6 +2773,8 @@
     }
 
     function init(){
+      // Support ?moveDebug=1 URL param to show the move debug panel
+      try{ if(/(?:\?|&)moveDebug=1\b/.test(location.search || '') || localStorage.getItem('lobsterRoom.mvdbg.visible')==='1'){ MVDBG.visible = true; } }catch{}
       feedInit();
       renderLegend();
       bindZoneHover();
