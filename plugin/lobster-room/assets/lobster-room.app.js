@@ -1866,13 +1866,12 @@
             const last = evs && evs.length ? evs[evs.length-1] : null;
             const kind = last && last.kind ? String(last.kind) : '';
             const d = last && last.data ? last.data : null;
-            if(kind === 'message_sending' && d && (d.contentPreview||d.content)){
-              const pv = String(d.contentPreview||d.content||'').trim();
-              txt = pv ? ('Sending message — ' + pv.slice(0, 60)) : 'Sending message';
+            if(kind === 'message_sending' && d){
+              txt = feedReplyingText(d);
             }else if(kind === 'before_tool_call' && d && d.toolName){
               const tool = String(d.toolName || '').trim();
               if(tool === 'browser') txt = 'Inspecting in browser';
-              else if(tool === 'exec') txt = 'Running a command';
+              else if(tool === 'exec') txt = feedCommandIntent(d.command||'');
               else if(tool === 'read') txt = 'Reading project files';
               else if(tool === 'write') txt = 'Updating project files';
               else if(tool === 'edit') txt = 'Updating project files';
@@ -1887,8 +1886,7 @@
                 // avoid redundant detail; state bubble already shows thinking
                 txt = '';
               }else if(stNorm==='replying'){
-                // avoid redundant detail; state bubble already shows replying
-                txt = '';
+                txt = feedReplyingText((a && a.debug && a.debug.decision && a.debug.decision.details) || {});
               }else if(stNorm==='building'){
                 // avoid redundant detail; state bubble already shows building
                 txt = '';
@@ -2120,7 +2118,7 @@
         const fresh = (ageMs!=null && isFinite(ageMs) && ageMs < 45*1000);
         const rawState = String(row.state||'');
         const effectiveStatus = (rawState === 'idle') ? 'paused' : (rawState === 'error' ? 'blocked' : 'working');
-        const ageTxt = (ageSec==null) ? '' : (' · ' + ageSec + 's ago');
+        const ageTxt = (ageSec==null) ? '' : (' · updated ' + ageSec + 's ago');
 
         const who = MODEL.selfName || 'Zac';
         let msg = '';
@@ -2315,12 +2313,57 @@
     }
 
 
-    function feedHumanState(state, toolName){
+    function feedScrubReplyPreview(raw, maxLen){
+      try{
+        if(typeof raw !== 'string') return '';
+        let out = feedRedact(raw).replace(/[\r\n\t]+/g, ' ').replace(/\s+/g, ' ').trim();
+        if(!out) return '';
+        out = out
+          .replace(/\b[\w.+-]+@[\w.-]+\.[A-Za-z]{2,}\b/g, '[redacted email]')
+          .replace(/\b(?:\+?\d[\d\s().-]{6,}\d)\b/g, '[redacted number]')
+          .replace(/\b\d{4,}\b/g, '[redacted]');
+        if(!out || /^\[(?:redacted|hex_redacted|url|session)\]$/i.test(out)) return '';
+        const lim = Math.max(8, Number(maxLen||48));
+        if(out.length > lim) out = out.slice(0, lim - 1).trimEnd() + '…';
+        return '"' + out + '"';
+      }catch{return ''}
+    }
+
+    function feedReplyingText(details){
+      const d = details || {};
+      const pv = feedScrubReplyPreview(d.contentPreview || d.message || d.content, 48);
+      return pv ? ('replying — ' + pv) : 'replying';
+    }
+
+    function feedCommandIntent(raw){
+      try{
+        const cmd = String(raw || '').replace(/\s+/g, ' ').trim();
+        if(!cmd) return 'running a command';
+        const tests = [
+          [/\bgit\s+status\b/i, 'running a command — check repo status'],
+          [/\bgit\s+diff\b/i, 'running a command — inspect code changes'],
+          [/\bgit\s+log\b/i, 'running a command — review commit history'],
+          [/\bgit\s+(branch|checkout|switch)\b/i, 'running a command — manage git branches'],
+          [/\b(npm|pnpm|yarn|bun)\s+(test|run\s+test)\b/i, 'running a command — run tests'],
+          [/\b(pytest|jest|vitest|mocha|go\s+test|cargo\s+test)\b/i, 'running a command — run tests'],
+          [/\b(npm|pnpm|yarn|bun)\s+(install|add)\b/i, 'running a command — install dependencies'],
+          [/\b(npm|pnpm|yarn|bun)\s+run\s+build\b|\b(make|cargo|go|python)\b.*\bbuild\b/i, 'running a command — build the project'],
+          [/\b(npm|pnpm|yarn|bun)\s+run\s+dev\b|\b(npm|pnpm|yarn|bun)\s+start\b/i, 'running a command — start the app'],
+          [/\b(ls|find|tree)\b/i, 'running a command — inspect project files'],
+          [/\b(cat|sed|awk|head|tail|grep)\b/i, 'running a command — inspect file contents'],
+        ];
+        for(const [re, label] of tests){ if(re.test(cmd)) return label; }
+        const safe = feedRedact(cmd).slice(0, 80).trim();
+        return safe ? ('running a command — ' + safe) : 'running a command';
+      }catch{return 'running a command'}
+    }
+
+    function feedHumanState(state, toolName, details){
       const st = String(state || '').trim().toLowerCase();
       const tn = String(toolName || '').trim().toLowerCase();
       if(st === 'tool'){
         if(tn === 'browser') return 'inspecting in browser';
-        if(tn === 'exec') return 'running a command';
+        if(tn === 'exec') return feedCommandIntent(details && details.command);
         if(tn === 'read') return 'reading project files';
         if(tn === 'write' || tn === 'edit') return 'updating project files';
         if(tn === 'message') return 'preparing a reply';
@@ -2328,7 +2371,7 @@
         if(tn === 'sessions_spawn') return 'starting a helper task';
         return 'using tool';
       }
-      if(st === 'reply') return 'replying';
+      if(st === 'reply') return feedReplyingText(details);
       if(st === 'thinking') return 'thinking';
       if(st === 'error') return 'error';
       if(st === 'idle' || st === 'wait') return 'idle';
@@ -2483,14 +2526,15 @@
           const id = feedNormalizeAgentId(id0);
           if(!feedMatchesAgentFilter(id)) continue;
           const st = (a && a.debug && a.debug.decision) ? String(a.debug.decision.activityState||'idle') : 'idle';
-          const tn = (a && a.debug && a.debug.decision && a.debug.decision.details && a.debug.decision.details.toolName)
-            ? String(a.debug.decision.details.toolName)
+          const details = (a && a.debug && a.debug.decision && a.debug.decision.details) ? a.debug.decision.details : null;
+          const tn = (details && details.toolName)
+            ? String(details.toolName)
             : '';
           const lastMs = (a && a.debug && a.debug.decision && typeof a.debug.decision.lastEventMs === 'number')
             ? a.debug.decision.lastEventMs
             : ((a && a.meta && typeof a.meta.maxUpdatedAt === 'number') ? a.meta.maxUpdatedAt : null);
           const age = lastMs ? feedAge(lastMs) : '';
-          lines.push({ agent: '@' + id, state: feedHumanState(st, tn), age });
+          lines.push({ agent: '@' + id, state: feedHumanState(st, tn, details), age });
         }
         lines.sort((a, b)=> String(a.agent).localeCompare(String(b.agent)));
         if(lines.length){

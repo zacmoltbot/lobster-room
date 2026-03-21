@@ -1479,6 +1479,53 @@ export default {
       return `Using ${tn}`;
     };
 
+    const scrubReplyPreview = (raw: unknown, maxLen = 48): string => {
+      if (typeof raw !== "string") return "";
+      let out = redactSecretsInText(raw)
+        .replace(/[\r\n\t]+/g, " ")
+        .replace(/\s+/g, " ")
+        .trim();
+      if (!out) return "";
+
+      out = out
+        .replace(/\b[\w.+-]+@[\w.-]+\.[A-Za-z]{2,}\b/g, "[redacted email]")
+        .replace(/\b(?:\+?\d[\d\s().-]{6,}\d)\b/g, "[redacted number]")
+        .replace(/\b\d{4,}\b/g, "[redacted]");
+
+      if (!out || /^\[(?:redacted|hex_redacted|url|session)\]$/i.test(out)) return "";
+      if (out.length > maxLen) out = out.slice(0, Math.max(0, maxLen - 1)).trimEnd() + "…";
+      return `"${out}"`;
+    };
+
+    const replyingSummary = (details: any): string => {
+      const preview = scrubReplyPreview(details?.contentPreview ?? details?.message ?? details?.content, 48);
+      return preview ? `Replying — ${preview}` : "Replying";
+    };
+
+    const commandIntentSummary = (raw: unknown): string => {
+      const cmd = typeof raw === "string" ? raw.replace(/\s+/g, " ").trim() : "";
+      if (!cmd) return "Running a command";
+      const lower = cmd.toLowerCase();
+      const tests: Array<[RegExp, string]> = [
+        [/\bgit\s+status\b/, "Running a command — check repo status"],
+        [/\bgit\s+diff\b/, "Running a command — inspect code changes"],
+        [/\bgit\s+log\b/, "Running a command — review commit history"],
+        [/\bgit\s+(branch|checkout|switch)\b/, "Running a command — manage git branches"],
+        [/\b(npm|pnpm|yarn|bun)\s+(test|run\s+test)\b/, "Running a command — run tests"],
+        [/\b(pytest|jest|vitest|mocha|go\s+test|cargo\s+test)\b/, "Running a command — run tests"],
+        [/\b(npm|pnpm|yarn|bun)\s+(install|add)\b/, "Running a command — install dependencies"],
+        [/\b(npm|pnpm|yarn|bun)\s+run\s+build\b|\b(make|cargo|go|python)\b.*\bbuild\b/, "Running a command — build the project"],
+        [/\b(npm|pnpm|yarn|bun)\s+run\s+dev\b|\b(npm|pnpm|yarn|bun)\s+start\b/, "Running a command — start the app"],
+        [/\b(ls|find|tree)\b/, "Running a command — inspect project files"],
+        [/\b(cat|sed|awk|head|tail|grep)\b/, "Running a command — inspect file contents"],
+      ];
+      for (const [re, label] of tests) {
+        if (re.test(lower)) return label;
+      }
+      const safe = redactLine(cmd, 80);
+      return safe ? `Running a command — ${safe}` : "Running a command";
+    };
+
     const toolHumanSummary = (it: FeedItem): string => {
       const tn = (it.toolName || "tool").trim();
       const d: any = it.details || {};
@@ -1495,7 +1542,7 @@ export default {
       if (tn === "exec") {
         const code = typeof d.exitCode === "number" ? d.exitCode : (typeof d.code === "number" ? d.code : null);
         const tail = code === null ? "" : ` (exit ${code})`;
-        return `Running a command${tail}`.trim();
+        return `${commandIntentSummary(d.command)}${tail}`.trim();
       }
 
       if (tn === "read") {
@@ -1536,7 +1583,7 @@ export default {
         const target = browserTarget(details || {});
         return target ? `Inspecting in browser — ${verb} ${target}` : `Inspecting in browser — ${verb}`;
       }
-      if (tn === "exec") return "Running a command";
+      if (tn === "exec") return commandIntentSummary(details?.command);
       if (tn === "sessions_spawn") return "Starting a helper task";
       return genericToolLabel(tn);
     };
@@ -1549,7 +1596,7 @@ export default {
         : stRaw === "error" ? "error"
         : stRaw;
       if (st === "thinking") return "Thinking";
-      if (st === "replying") return "Replying";
+      if (st === "replying") return replyingSummary(details || {});
       if (st === "idle") return "Idle";
       if (st === "tool") return toolStateSummary(details || {});
       if (st === "error") return "Error";
@@ -1569,7 +1616,7 @@ export default {
 
       // started/ended rows are rendered at the task level for clearer titles.
 
-      if (it.kind === "message_sending") return { kind: it.kind, what: "Sending message" };
+      if (it.kind === "message_sending") return { kind: it.kind, what: replyingSummary(it.details || {}) };
       if (it.kind === "message_sent") {
         if (it.success === false) return { kind: "error", what: "Message failed" };
         return { kind: it.kind, what: "Message sent" };
@@ -2082,9 +2129,10 @@ export default {
       const agentId = "main";
 
       const capturePreview = !!api.config?.debugCaptureMessagePreview;
-      const data: any = { to: event?.to, channelId: ctx?.channelId };
-      if (capturePreview) {
-        data.contentPreview = String(event?.content || "").slice(0, 80);
+      const replyPreview = scrubReplyPreview(event?.content, 48);
+      const data: any = { to: event?.to, channelId: ctx?.channelId, contentPreview: replyPreview || undefined };
+      if (capturePreview && !data.contentPreview) {
+        data.contentPreview = scrubReplyPreview(String(event?.content || "").slice(0, 80), 48) || undefined;
       }
 
       pushEvent("message_sending", { agentId, data });
@@ -2094,8 +2142,9 @@ export default {
         agentId,
         channelId: typeof ctx?.channelId === "string" ? ctx.channelId : undefined,
         to: typeof event?.to === "string" ? redactSecretsInText(event.to) : undefined,
+        details: { contentPreview: data.contentPreview },
       });
-      setState(agentId, "reply", { to: event?.to, channelId: ctx?.channelId, conversationId: ctx?.conversationId });
+      setState(agentId, "reply", { to: event?.to, channelId: ctx?.channelId, conversationId: ctx?.conversationId, contentPreview: data.contentPreview });
     });
 
     api.on("message_sent", (event, ctx) => {
