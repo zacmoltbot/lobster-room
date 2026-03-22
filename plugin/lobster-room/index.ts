@@ -1670,6 +1670,26 @@ export default {
       const heartbeatDedupeWindowMs = 15000;
       const lastHumanSigByAgent = new Map<string, { sig: string; ts: number }>();
 
+      // 2A-2: Short-window aggregation — collapse rapid sequences into a single semantic row.
+      const AGGREGATION_WINDOW_MS = 8000;
+
+      // Kinds that are safe to collapse within the aggregation window.
+      // Never aggregate across errors, explicit boundaries, or sent confirmations.
+      const isCollapsibleKind = (kind: FeedRowV3["kind"] | undefined, it: FeedItem): boolean => {
+        if (!kind) return false;
+        if (kind === "error") return false;
+        if (kind === "message_sent") return false;
+        if (kind === "before_agent_start" || kind === "agent_end") return false;
+        // Collapse sequences: thinking → tool → done, read → read → read, reply → sent, etc.
+        if (kind === "presence" || kind === "state") return true;
+        if (kind === "before_tool_call" || kind === "after_tool_call") return true;
+        if (kind === "message_sending") return true;
+        return false;
+      };
+
+      // Track the last aggregated row per agent for short-window collapsing.
+      const lastAggByAgent = new Map<string, { outIdx: number; ts: number }>();
+
       const toolPresenceMergeWindowMs = 1200;
 
       const shouldSkipPresenceTool = (it: FeedItem, idx: number, raw: FeedItem[], who: string): boolean => {
@@ -1700,10 +1720,30 @@ export default {
         return false;
       };
 
+      // Short-window aggregation: collapse rapid sequences (within 8s) into one semantic row.
+      // The newer event's label wins since it carries more context (e.g. "Thinking" → "Run a command").
       const pushRow = (it: FeedItem, what: string, kind: FeedRowV3["kind"], agentId: string, sessionKey?: string, taskId?: string) => {
+        const agentKey = agentId.trim();
+        const agg = lastAggByAgent.get(agentKey);
+
+        if (agg && isCollapsibleKind(kind, it)) {
+          const prevRow = out[agg.outIdx];
+          const withinWindow = Math.abs(it.ts - agg.ts) <= AGGREGATION_WINDOW_MS;
+          if (withinWindow) {
+            // Collapse: update the existing row's label with the more semantic version.
+            prevRow.what = what;
+            prevRow.plain = what;
+            prevRow.action = what;
+            prevRow.ts = it.ts; // refresh to newest event time
+            agg.ts = it.ts;
+            return;
+          }
+        }
+
+        // Not collapsible or outside window — push a new row.
         const base = `${sessionKey || taskId || "task"}:row:${it.ts}:${String(kind || it.kind)}:${it.toolName || ""}`;
         const id = base;
-        out.push({
+        const row: FeedRowV3 = {
           id,
           ts: it.ts,
           agentId,
@@ -1713,7 +1753,9 @@ export default {
           what,
           plain: what,
           action: what,
-        });
+        };
+        out.push(row);
+        lastAggByAgent.set(agentKey, { outIdx: out.length - 1, ts: it.ts });
       };
 
       for (const task of tasks) {
