@@ -1,5 +1,5 @@
     // UI build stamp (bump this when you deploy so we can confirm which frontend is running).
-    const UI_VERSION = 'feed-v3-20260322.2';
+    const UI_VERSION = 'feed-v3-20260322.3';
 
     // Soft muted color palette for agent name coloring (deterministic, dark-background friendly).
     const AGENT_COLORS = ['#7eb8da','#b4a7d6','#8dd49e','#e6b89c','#d4a5c9','#8ecfc9','#d4c88a'];
@@ -2358,9 +2358,47 @@
       }catch{return ''}
     }
 
+    function feedReplyTarget(details, recentEvents){
+      const pick = (v)=> (typeof v === 'string' && v.trim()) ? v.trim() : '';
+      const candidates = [
+        pick(details && details.to),
+        pick(details && details.target),
+        pick(details && details.user),
+        pick(details && details.name),
+      ];
+      const evs = Array.isArray(recentEvents) ? recentEvents : [];
+      for(let i=evs.length-1;i>=0 && candidates.length < 8;i--){
+        const ev = evs[i];
+        if(!ev || String(ev.kind||'') !== 'message_sending') continue;
+        const data = ev.data && typeof ev.data === 'object' ? ev.data : null;
+        const details2 = ev.details && typeof ev.details === 'object' ? ev.details : null;
+        candidates.push(pick(data && data.to), pick(details2 && details2.to));
+      }
+      for(const raw of candidates){
+        if(!raw) continue;
+        const cleaned = raw
+          .replace(/^[@#]+/, '')
+          .replace(/^[^A-Za-z\u00C0-\u024F\u4E00-\u9FFF\u3400-\u4DBF]+/, '')
+          .replace(/[^A-Za-z0-9\u00C0-\u024F\u4E00-\u9FFF\u3400-\u4DBF._ -]+$/g, '')
+          .trim();
+        if(!cleaned) continue;
+        if(/^(discord|slack|telegram|whatsapp|channel)$/i.test(cleaned)) continue;
+        if(/^[-_a-f0-9]{8,}$/i.test(cleaned)) continue;
+        if(/^\d+$/.test(cleaned)) continue;
+        if(cleaned.length > 32) continue;
+        return cleaned;
+      }
+      return '';
+    }
+
     function feedReplyingText(details, recentEvents){
       const pv = feedScrubReplyPreview(feedReplyPreviewValue(details, recentEvents), 48);
       return pv ? ('replying — ' + pv) : 'replying';
+    }
+
+    function feedReplyingNow(details, recentEvents){
+      const target = feedReplyTarget(details, recentEvents);
+      return target ? ('replying to ' + target) : 'replying';
     }
 
     function feedCommandIntent(raw){
@@ -2386,21 +2424,66 @@
       }catch{return 'running a command'}
     }
 
+    function feedCommandActivity(raw){
+      try{
+        const cmd = String(raw || '').replace(/\s+/g, ' ').trim();
+        if(!cmd) return 'running a command';
+        const tests = [
+          [/\bgit\s+status\b/i, 'checking repo status'],
+          [/\bgit\s+diff\b/i, 'reviewing code changes'],
+          [/\bgit\s+log\b/i, 'reviewing commit history'],
+          [/\bgit\s+(branch|checkout|switch)\b/i, 'switching git branches'],
+          [/\b(npm|pnpm|yarn|bun)\s+(test|run\s+test)\b/i, 'running tests'],
+          [/\b(pytest|jest|vitest|mocha|go\s+test|cargo\s+test)\b/i, 'running tests'],
+          [/\b(npm|pnpm|yarn|bun)\s+(install|add)\b/i, 'installing dependencies'],
+          [/\b(npm|pnpm|yarn|bun)\s+run\s+build\b|\b(make|cargo|go|python)\b.*\bbuild\b/i, 'building the project'],
+          [/\b(npm|pnpm|yarn|bun)\s+run\s+dev\b|\b(npm|pnpm|yarn|bun)\s+start\b/i, 'starting the app'],
+          [/\b(ls|find|tree)\b/i, 'reviewing project files'],
+          [/\b(cat|sed|awk|head|tail)\b/i, 'reviewing file contents'],
+          [/\bgrep\b/i, 'searching project files'],
+        ];
+        for(const [re, label] of tests){ if(re.test(cmd)) return label; }
+        return 'running a command';
+      }catch{return 'running a command'}
+    }
+
+    function feedActivityFromTool(toolName, details, recentEvents, opts){
+      const compact = !!(opts && opts.compact);
+      const tn = String(toolName || '').trim().toLowerCase();
+      if(tn === 'browser') return compact ? 'checking in browser' : 'inspecting in browser';
+      if(tn === 'exec') return compact ? feedCommandActivity(details && details.command) : feedCommandIntent(details && details.command);
+      if(tn === 'read') return compact ? 'reviewing project files' : 'reading project files';
+      if(tn === 'write' || tn === 'edit') return compact ? 'updating project files' : 'updating project files';
+      if(tn === 'message') return compact ? feedReplyingNow(details, recentEvents) : 'preparing a reply';
+      if(tn === 'web_fetch') return compact ? 'checking a page' : 'checking a page';
+      if(tn === 'sessions_spawn') return 'starting a helper task';
+      return compact ? 'using tools' : 'using tool';
+    }
+
+    function feedInferRecentActivity(details, recentEvents){
+      const directTool = details && details.toolName;
+      if(directTool) return feedActivityFromTool(directTool, details, recentEvents, {compact:true});
+      const evs = Array.isArray(recentEvents) ? recentEvents : [];
+      for(let i=evs.length-1;i>=0;i--){
+        const ev = evs[i];
+        if(!ev) continue;
+        const kind = String(ev.kind || '').trim().toLowerCase();
+        const data = ev.data && typeof ev.data === 'object' ? ev.data : (ev.details && typeof ev.details === 'object' ? ev.details : {});
+        if(kind === 'message_sending') return feedReplyingNow(data, recentEvents);
+        if(kind === 'before_tool_call' || kind === 'after_tool_call' || kind === 'tool_result_persist'){
+          const evTool = String((ev.toolName || data.toolName || '')).trim();
+          if(evTool) return feedActivityFromTool(evTool, data, recentEvents, {compact:true});
+        }
+      }
+      return '';
+    }
+
     function feedHumanState(state, toolName, details, recentEvents){
       const st = String(state || '').trim().toLowerCase();
       const tn = String(toolName || '').trim().toLowerCase();
-      if(st === 'tool'){
-        if(tn === 'browser') return 'inspecting in browser';
-        if(tn === 'exec') return feedCommandIntent(details && details.command);
-        if(tn === 'read') return 'reading project files';
-        if(tn === 'write' || tn === 'edit') return 'updating project files';
-        if(tn === 'message') return 'preparing a reply';
-        if(tn === 'web_fetch') return 'checking a page';
-        if(tn === 'sessions_spawn') return 'starting a helper task';
-        return 'using tool';
-      }
-      if(st === 'reply') return feedReplyingText(details, recentEvents);
-      if(st === 'thinking') return 'thinking';
+      if(st === 'tool') return feedActivityFromTool(tn, details, recentEvents, {compact:true});
+      if(st === 'reply') return feedReplyingNow(details, recentEvents);
+      if(st === 'thinking') return feedInferRecentActivity(details, recentEvents) || 'thinking';
       if(st === 'error') return 'error';
       if(st === 'idle' || st === 'wait') return 'idle';
       return st || 'idle';
