@@ -1497,8 +1497,23 @@ export default {
       return `"${out}"`;
     };
 
-    const replyingSummary = (details: any): string => {
-      const preview = scrubReplyPreview(details?.contentPreview ?? details?.message ?? details?.content, 48);
+    const replyPreviewValue = (details: any, recentEvents?: any[]): string => {
+      const pick = (v: unknown): string => (typeof v === "string" && v.trim() ? v : "");
+      const from = (obj: any): string => pick(obj?.contentPreview) || pick(obj?.preview) || pick(obj?.message) || pick(obj?.content) || pick(obj?.text) || pick(obj?.outputPreview) || "";
+      const direct = from(details);
+      if (direct) return direct;
+      const evs = Array.isArray(recentEvents) ? recentEvents : [];
+      for (let i = evs.length - 1; i >= 0; i -= 1) {
+        const ev = evs[i];
+        if (String(ev?.kind || "") !== "message_sending") continue;
+        const value = from(ev?.data) || from(ev?.details);
+        if (value) return value;
+      }
+      return "";
+    };
+
+    const replyingSummary = (details: any, recentEvents?: any[]): string => {
+      const preview = scrubReplyPreview(replyPreviewValue(details, recentEvents), 48);
       return preview ? `Replying — ${preview}` : "Replying";
     };
 

@@ -1,5 +1,5 @@
     // UI build stamp (bump this when you deploy so we can confirm which frontend is running).
-    const UI_VERSION = 'feed-v3-20260316.3';
+    const UI_VERSION = 'feed-v3-20260322.2';
 
     // Soft muted color palette for agent name coloring (deterministic, dark-background friendly).
     const AGENT_COLORS = ['#7eb8da','#b4a7d6','#8dd49e','#e6b89c','#d4a5c9','#8ecfc9','#d4c88a'];
@@ -1867,7 +1867,7 @@
             const kind = last && last.kind ? String(last.kind) : '';
             const d = last && last.data ? last.data : null;
             if(kind === 'message_sending' && d){
-              txt = feedReplyingText(d);
+              txt = feedReplyingText(d, evs);
             }else if(kind === 'before_tool_call' && d && d.toolName){
               const tool = String(d.toolName || '').trim();
               if(tool === 'browser') txt = 'Inspecting in browser';
@@ -1886,7 +1886,7 @@
                 // avoid redundant detail; state bubble already shows thinking
                 txt = '';
               }else if(stNorm==='replying'){
-                txt = feedReplyingText((a && a.debug && a.debug.decision && a.debug.decision.details) || {});
+                txt = feedReplyingText((a && a.debug && a.debug.decision && a.debug.decision.details) || {}, evs);
               }else if(stNorm==='building'){
                 // avoid redundant detail; state bubble already shows building
                 txt = '';
@@ -2312,6 +2312,35 @@
       }catch{return ''}
     }
 
+    function feedUpdatedAge(ts){
+      const age = feedAge(ts);
+      return age ? ('updated ' + age) : '';
+    }
+
+    function feedReplyPreviewValue(details, recentEvents){
+      const pick = (v)=> (typeof v === 'string' && v.trim()) ? v : '';
+      const from = (obj)=>{
+        if(!obj || typeof obj !== 'object') return '';
+        return pick(obj.contentPreview)
+          || pick(obj.preview)
+          || pick(obj.message)
+          || pick(obj.content)
+          || pick(obj.text)
+          || pick(obj.outputPreview)
+          || '';
+      };
+      const direct = from(details);
+      if(direct) return direct;
+      const evs = Array.isArray(recentEvents) ? recentEvents : [];
+      for(let i=evs.length-1;i>=0;i--){
+        const ev = evs[i];
+        if(!ev || String(ev.kind||'') !== 'message_sending') continue;
+        const data = ev.data && typeof ev.data === 'object' ? ev.data : null;
+        const val = from(data) || from(ev.details);
+        if(val) return val;
+      }
+      return '';
+    }
 
     function feedScrubReplyPreview(raw, maxLen){
       try{
@@ -2329,9 +2358,8 @@
       }catch{return ''}
     }
 
-    function feedReplyingText(details){
-      const d = details || {};
-      const pv = feedScrubReplyPreview(d.contentPreview || d.message || d.content, 48);
+    function feedReplyingText(details, recentEvents){
+      const pv = feedScrubReplyPreview(feedReplyPreviewValue(details, recentEvents), 48);
       return pv ? ('replying — ' + pv) : 'replying';
     }
 
@@ -2358,7 +2386,7 @@
       }catch{return 'running a command'}
     }
 
-    function feedHumanState(state, toolName, details){
+    function feedHumanState(state, toolName, details, recentEvents){
       const st = String(state || '').trim().toLowerCase();
       const tn = String(toolName || '').trim().toLowerCase();
       if(st === 'tool'){
@@ -2371,7 +2399,7 @@
         if(tn === 'sessions_spawn') return 'starting a helper task';
         return 'using tool';
       }
-      if(st === 'reply') return feedReplyingText(details);
+      if(st === 'reply') return feedReplyingText(details, recentEvents);
       if(st === 'thinking') return 'thinking';
       if(st === 'error') return 'error';
       if(st === 'idle' || st === 'wait') return 'idle';
@@ -2527,14 +2555,17 @@
           if(!feedMatchesAgentFilter(id)) continue;
           const st = (a && a.debug && a.debug.decision) ? String(a.debug.decision.activityState||'idle') : 'idle';
           const details = (a && a.debug && a.debug.decision && a.debug.decision.details) ? a.debug.decision.details : null;
+          const recentEvents = (a && a.debug && a.debug.decision && Array.isArray(a.debug.decision.recentEvents))
+            ? a.debug.decision.recentEvents
+            : [];
           const tn = (details && details.toolName)
             ? String(details.toolName)
             : '';
           const lastMs = (a && a.debug && a.debug.decision && typeof a.debug.decision.lastEventMs === 'number')
             ? a.debug.decision.lastEventMs
             : ((a && a.meta && typeof a.meta.maxUpdatedAt === 'number') ? a.meta.maxUpdatedAt : null);
-          const age = lastMs ? feedAge(lastMs) : '';
-          lines.push({ agent: '@' + id, state: feedHumanState(st, tn, details), age });
+          const age = lastMs ? feedUpdatedAge(lastMs) : '';
+          lines.push({ agent: '@' + id, state: feedHumanState(st, tn, details, recentEvents), age });
         }
         lines.sort((a, b)=> String(a.agent).localeCompare(String(b.agent)));
         if(lines.length){
