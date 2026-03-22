@@ -3472,8 +3472,8 @@
         if(!f){ statusEl.textContent = 'Choose an image first.'; return; }
         if(f.size > 8*1024*1024){ statusEl.textContent = 'File too large (max 8MB).'; return; }
 
-        // Aspect ratio guard: enforce 4:3 (1.33) with tolerance band 1.25–1.45.
-        // The manualMap / cell grid (32×20) expects ~4:3 backgrounds.
+        // Aspect ratio guard: 4:3 is recommended, but slightly wider/taller images are still allowed.
+        // The manualMap / cell grid (32×20) aligns best with ~4:3 backgrounds.
         try{
           const bmp = await createImageBitmap(f);
           const w = bmp.width || 0;
@@ -3481,15 +3481,20 @@
           bmp.close && bmp.close();
           if(w>0 && h>0){
             const ratio = w / h;
-            const MIN = 1.25, MAX = 1.45;
-            if(ratio < MIN || ratio > MAX){
-              statusEl.textContent = `⚠️ This room image is not 4:3 (w/h=${ratio.toFixed(2)}). The manualMap may not align correctly. Upload a 4:3 image for best results.`;
+            const RECOMMENDED_MIN = 1.25, RECOMMENDED_MAX = 1.45;
+            const ALLOWED_MIN = 1.15, ALLOWED_MAX = 1.55;
+            if(ratio < ALLOWED_MIN || ratio > ALLOWED_MAX){
+              statusEl.textContent = `⚠️ This image is too far from the recommended 4:3 ratio (w/h=${ratio.toFixed(2)}). Please upload an image closer to 4:3 for accurate zone alignment.`;
               return;
+            }
+            if(ratio < RECOMMENDED_MIN || ratio > RECOMMENDED_MAX){
+              statusEl.textContent = `⚠️ This image isn't the recommended 4:3 ratio, but you can still use it (w/h=${ratio.toFixed(2)}). Zone alignment may be less accurate.`;
             }
           }
         }catch{}
 
-        statusEl.textContent = 'Uploading…';
+        if(!statusEl.textContent || statusEl.textContent === 'Choose an image first.') statusEl.textContent = 'Uploading…';
+        else if(!statusEl.textContent.includes("isn't the recommended 4:3 ratio")) statusEl.textContent = 'Uploading…';
         const fd = new FormData();
         fd.append('file', f, f.name);
         try{

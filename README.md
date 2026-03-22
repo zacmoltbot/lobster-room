@@ -10,7 +10,7 @@ A cute, practical dashboard that visualizes your OpenClaw **agents & sessions** 
 
 - **Permanent Message Feed**: Feed panel is always visible (no toggle needed)
 - **Softer agent colors**: Agent names in feed and Now block are color-coded with muted palette
-- **4:3 room backgrounds**: Upload validation enforces 4:3 aspect ratio for correct zone alignment
+- **4:3 room backgrounds**: 4:3 is recommended for best zone alignment; 3:2-ish images are allowed with a warning
 - **Better room/zone alignment**: Room background uses `contain` sizing so zones always match
 - **Removed Move Debug from Settings**: Developer tool hidden from end-user UI, accessible via `?moveDebug=1`
 - **Improved feed UX**: Tighter agent column, reduced row gaps, stable header without jumping "last event" text
