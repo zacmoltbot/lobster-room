@@ -1228,6 +1228,11 @@ export default {
         if (typeof extra.selector === "string") detailPayload.selector = extra.selector;
         if (typeof extra.op === "string") detailPayload.op = extra.op;
         if (typeof extra.url === "string") detailPayload.url = extra.url;
+        if (typeof extra.sessionKey === "string") detailPayload.sessionKey = extra.sessionKey;
+        if (typeof extra.messageProvider === "string") detailPayload.messageProvider = extra.messageProvider;
+        if (typeof extra.spawnedBy === "string") detailPayload.spawnedBy = extra.spawnedBy;
+        if (typeof extra.to === "string") detailPayload.to = extra.to;
+        if (typeof extra.target === "string") detailPayload.target = extra.target;
       }
 
       if (opts?.heartbeat) return;
@@ -1268,6 +1273,11 @@ export default {
           return "Starting helper task";
         }
       }
+
+      // Scheduled/background sessions: keep title generic but useful.
+      const firstCtx = items.find((x) => x.kind === "before_agent_start" || x.kind === "presence" || x.kind === "state");
+      if (inferWorkContext(firstCtx?.details || { sessionKey: firstCtx?.sessionKey }) === "scheduled") return "Scheduled task";
+      if (inferWorkContext(firstCtx?.details || { sessionKey: firstCtx?.sessionKey }) === "helper") return "Helper task";
 
       // Otherwise infer intent from the first meaningful tool call(s).
       const first = items.find((x) => x.kind === "before_tool_call" && x.toolName)?.toolName;
@@ -1497,6 +1507,32 @@ export default {
       return `"${out}"`;
     };
 
+    const safeReplyTarget = (raw: unknown): string => {
+      if (typeof raw !== "string") return "";
+      let out = redactSecretsInText(raw)
+        .replace(/[\r\n\t]+/g, " ")
+        .replace(/\s+/g, " ")
+        .replace(/^[@#]+/, "")
+        .trim();
+      if (!out) return "";
+      if (/^agent:[^:]+:/i.test(out) || /^spawn:/i.test(out)) return "";
+      if (/^(channel|conversation|thread|session)[:=]/i.test(out)) return "";
+      if (/^discord$/i.test(out) || /^slack$/i.test(out) || /^telegram$/i.test(out) || /^whatsapp$/i.test(out)) return "";
+      if (/^\d{5,}$/.test(out)) return "";
+      if (/https?:\/\//i.test(out) || /[<>]/.test(out)) return "";
+      if (out.length > 40) return "";
+      return out;
+    };
+
+    const inferWorkContext = (details: any): "helper" | "scheduled" | null => {
+      const sk = typeof details?.sessionKey === "string" ? String(details.sessionKey).toLowerCase() : "";
+      const mp = typeof details?.messageProvider === "string" ? String(details.messageProvider).toLowerCase() : "";
+      if (typeof details?.spawnedBy === "string" && String(details.spawnedBy).trim()) return "helper";
+      if (sk.startsWith("spawn:")) return "helper";
+      if (/\bcron\b|\bschedule\b|\bscheduled\b/.test(sk) || /\bcron\b|\bschedule\b|\bscheduled\b/.test(mp)) return "scheduled";
+      return null;
+    };
+
     const replyPreviewValue = (details: any, recentEvents?: any[]): string => {
       const pick = (v: unknown): string => (typeof v === "string" && v.trim() ? v : "");
       const from = (obj: any): string => pick(obj?.contentPreview) || pick(obj?.preview) || pick(obj?.message) || pick(obj?.content) || pick(obj?.text) || pick(obj?.outputPreview) || "";
@@ -1513,8 +1549,10 @@ export default {
     };
 
     const replyingSummary = (details: any, recentEvents?: any[]): string => {
+      const target = safeReplyTarget(details?.to || details?.target);
       const preview = scrubReplyPreview(replyPreviewValue(details, recentEvents), 48);
-      return preview ? `Replying — ${preview}` : "Replying";
+      const head = target ? `Replying to ${target}` : "Replying";
+      return preview ? `${head} — ${preview}` : head;
     };
 
     const commandIntentSummary = (raw: unknown): string => {
@@ -1522,17 +1560,17 @@ export default {
       if (!cmd) return "Running a command";
       const lower = cmd.toLowerCase();
       const tests: Array<[RegExp, string]> = [
-        [/\bgit\s+status\b/, "Running a command — check repo status"],
-        [/\bgit\s+diff\b/, "Running a command — inspect code changes"],
-        [/\bgit\s+log\b/, "Running a command — review commit history"],
-        [/\bgit\s+(branch|checkout|switch)\b/, "Running a command — manage git branches"],
-        [/\b(npm|pnpm|yarn|bun)\s+(test|run\s+test)\b/, "Running a command — run tests"],
-        [/\b(pytest|jest|vitest|mocha|go\s+test|cargo\s+test)\b/, "Running a command — run tests"],
-        [/\b(npm|pnpm|yarn|bun)\s+(install|add)\b/, "Running a command — install dependencies"],
-        [/\b(npm|pnpm|yarn|bun)\s+run\s+build\b|\b(make|cargo|go|python)\b.*\bbuild\b/, "Running a command — build the project"],
-        [/\b(npm|pnpm|yarn|bun)\s+run\s+dev\b|\b(npm|pnpm|yarn|bun)\s+start\b/, "Running a command — start the app"],
-        [/\b(ls|find|tree)\b/, "Running a command — inspect project files"],
-        [/\b(cat|sed|awk|head|tail|grep)\b/, "Running a command — inspect file contents"],
+        [/\bgit\s+status\b/, "Checking repo status for current task"],
+        [/\bgit\s+diff\b/, "Reviewing code changes for current task"],
+        [/\bgit\s+log\b/, "Reviewing commit history for current task"],
+        [/\bgit\s+(branch|checkout|switch)\b/, "Managing git branches for current task"],
+        [/\b(npm|pnpm|yarn|bun)\s+(test|run\s+test)\b/, "Running tests for current task"],
+        [/\b(pytest|jest|vitest|mocha|go\s+test|cargo\s+test)\b/, "Running tests for current task"],
+        [/\b(npm|pnpm|yarn|bun)\s+(install|add)\b/, "Installing dependencies for current task"],
+        [/\b(npm|pnpm|yarn|bun)\s+run\s+build\b|\b(make|cargo|go|python)\b.*\bbuild\b/, "Building the project for current task"],
+        [/\b(npm|pnpm|yarn|bun)\s+run\s+dev\b|\b(npm|pnpm|yarn|bun)\s+start\b/, "Starting the app for current task"],
+        [/\b(ls|find|tree)\b/, "Reviewing project files for current task"],
+        [/\b(cat|sed|awk|head|tail|grep)\b/, "Reviewing file contents for current task"],
       ];
       for (const [re, label] of tests) {
         if (re.test(lower)) return label;
@@ -1563,17 +1601,17 @@ export default {
       if (tn === "read") {
         const p = d.path ?? d.file_path;
         const base = basenameLite(p);
-        return base ? `Reading project file: ${base}` : "Reading project files";
+        return base ? `Reviewing project file — ${base}` : "Reviewing project files for current task";
       }
       if (tn === "write") {
         const p = d.path ?? d.file_path;
         const base = basenameLite(p);
-        return base ? `Updating project file: ${base}` : "Updating project files";
+        return base ? `Updating project file — ${base}` : "Updating project files for current task";
       }
       if (tn === "edit") {
         const p = d.path ?? d.file_path;
         const base = basenameLite(p);
-        return base ? `Updating project file: ${base}` : "Updating project files";
+        return base ? `Updating project file — ${base}` : "Updating project files for current task";
       }
 
       if (tn === "sessions_spawn") {
@@ -1603,6 +1641,13 @@ export default {
       return genericToolLabel(tn);
     };
 
+    const thinkingSummary = (details: any): string => {
+      const ctx = inferWorkContext(details || {});
+      if (ctx === "helper") return "Working on helper task";
+      if (ctx === "scheduled") return "Running scheduled task";
+      return "Thinking";
+    };
+
     const humanStateLabel = (stRaw: string, details?: any): string => {
       const st = stRaw === "reply" ? "replying"
         : stRaw === "tool" ? "tool"
@@ -1610,7 +1655,7 @@ export default {
         : stRaw === "idle" ? "idle"
         : stRaw === "error" ? "error"
         : stRaw;
-      if (st === "thinking") return "Thinking";
+      if (st === "thinking") return thinkingSummary(details || {});
       if (st === "replying") return replyingSummary(details || {});
       if (st === "idle") return "Idle";
       if (st === "tool") return toolStateSummary(details || {});
@@ -1631,10 +1676,11 @@ export default {
 
       // started/ended rows are rendered at the task level for clearer titles.
 
-      if (it.kind === "message_sending") return { kind: it.kind, what: replyingSummary(it.details || {}) };
+      if (it.kind === "message_sending") return { kind: it.kind, what: replyingSummary({ ...(it.details || {}), to: it.to }) };
       if (it.kind === "message_sent") {
-        if (it.success === false) return { kind: "error", what: "Message failed" };
-        return { kind: it.kind, what: "Message sent" };
+        const target = safeReplyTarget(it.to);
+        if (it.success === false) return { kind: "error", what: target ? `Message to ${target} failed` : "Message failed" };
+        return { kind: it.kind, what: target ? `Reply sent to ${target}` : "Message sent" };
       }
 
       // State changes: show as "idle", "thinking", "tool", "reply", "error".
@@ -1950,7 +1996,15 @@ export default {
       const agentId = resolveAgentId(ctx);
       pushEvent("before_agent_start", { agentId, data: { sessionKey: ctx?.sessionKey, messageProvider: ctx?.messageProvider } });
       const startTs = nowMs();
-      pushFeed({ ts: startTs, kind: "before_agent_start", agentId, sessionKey: typeof ctx?.sessionKey === "string" ? ctx.sessionKey : undefined });
+      pushFeed({
+        ts: startTs,
+        kind: "before_agent_start",
+        agentId,
+        sessionKey: typeof ctx?.sessionKey === "string" ? ctx.sessionKey : undefined,
+        details: {
+          messageProvider: typeof ctx?.messageProvider === "string" ? ctx.messageProvider : undefined,
+        },
+      });
       pushPresence(agentId, "thinking", { sessionKey: ctx?.sessionKey, messageProvider: ctx?.messageProvider }, { force: true });
       setState(agentId, "thinking", { sessionKey: ctx?.sessionKey, messageProvider: ctx?.messageProvider });
     });
