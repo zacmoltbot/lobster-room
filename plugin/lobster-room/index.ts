@@ -1847,15 +1847,36 @@ export default {
       return st || "State update";
     };
 
+    const FEED_CANONICAL_TOOLS = new Set(["browser", "exec", "read", "write", "edit", "sessions_spawn", "web_search", "web_fetch", "image", "pdf"]);
+    const isCanonicalToolForFeed = (toolName: unknown): boolean => {
+      const tn = typeof toolName === "string" ? toolName.trim() : "";
+      if (!tn) return false;
+      if (isLowSignalObservationTool(tn)) return false;
+      if (["message", "channel", "conversation", "thread", "session", "sessions_yield"].includes(tn)) return false;
+      return FEED_CANONICAL_TOOLS.has(tn);
+    };
+
+    const shouldRenderPresenceRow = (it: FeedItem): boolean => {
+      if (it.kind !== "presence") return false;
+      const stRaw = typeof (it.details as any)?.state === "string" ? String((it.details as any).state) : "";
+      if (!stRaw) return false;
+      if (/^(channel|conversation|thread|session)$/i.test(stRaw)) return false;
+      if ((it.details as any)?.synthetic && stRaw === "reply") return false;
+      if (stRaw === "reply" || stRaw === "tool" || stRaw === "idle") return false;
+      if (stRaw === "thinking") {
+        const ctx = inferWorkContext(it.details || {});
+        const label = detailTaskLabel(it.details || {}, (it.details as any)?.recentEvents);
+        return !!(ctx || label);
+      }
+      return stRaw === "error";
+    };
+
     const rowSentenceHuman = (it: FeedItem): { kind: FeedRowV3["kind"]; what: string } | null => {
       const tn = (it.toolName || "tool").trim();
 
       if (it.kind === "presence") {
+        if (!shouldRenderPresenceRow(it)) return null;
         const stRaw = typeof (it.details as any)?.state === "string" ? String((it.details as any).state) : "";
-        const isHeartbeat = !!(it.details as any)?.heartbeat;
-        if (isHeartbeat && stRaw && stRaw !== "idle" && stRaw !== "error") return null;
-        if (/^(channel|conversation|thread|session)$/i.test(stRaw)) return null;
-        if ((it.details as any)?.synthetic && stRaw === "reply") return null;
         const what = humanStateLabel(stRaw, it.details || {});
         if (!what) return null;
         return { kind: stRaw === "error" ? "error" : it.kind, what };
@@ -1870,18 +1891,10 @@ export default {
         return { kind: it.kind, what: target ? `Reply sent to ${target}` : "Message sent" };
       }
 
-      // State changes: show as "idle", "thinking", "tool", "reply", "error".
-      if (it.kind === "state") {
-        const stRaw = typeof (it.details as any)?.state === "string" ? String((it.details as any).state) : "";
-        const label = humanStateLabel(stRaw, it.details || {});
-        return { kind: it.kind, what: stRaw ? `State update: ${label}` : "State update" };
-      }
+      // Feed should stay event-driven; current state belongs in Now.
+      if (it.kind === "state" || it.kind === "tool_result_persist") return null;
 
-      // Hide low-signal bookkeeping in default view.
-      if (it.kind === "tool_result_persist") return null;
-
-      const humanTools = new Set(["browser", "exec", "read", "write", "edit", "sessions_spawn"]);
-      if ((it.kind === "before_tool_call" || it.kind === "after_tool_call") && humanTools.has(tn)) {
+      if ((it.kind === "before_tool_call" || it.kind === "after_tool_call") && isCanonicalToolForFeed(tn)) {
         const summary = toolHumanSummary(it);
         if (it.kind === "before_tool_call") return { kind: it.kind, what: summary };
         if (it.success === false || it.error) return { kind: "error", what: `${summary} (failed)` };
@@ -1975,12 +1988,13 @@ export default {
       const shouldSkipGenericPresence = (it: FeedItem, idx: number, raw: FeedItem[], who: string): boolean => {
         if (it.kind !== "presence") return false;
         const stRaw = typeof (it.details as any)?.state === "string" ? String((it.details as any).state) : "";
-        if (stRaw === "reply") return hasConcreteNeighbor(it, idx, raw, who, "reply");
-        if (stRaw === "idle") return hasConcreteNeighbor(it, idx, raw, who, "idle");
-        if (stRaw !== "thinking") return false;
-        const what = humanStateLabel(stRaw, { ...((it.details as any) || {}), recentEvents: raw });
-        if (what && what !== "Thinking") return false;
-        return hasConcreteNeighbor(it, idx, raw, who, "thinking");
+        if (!shouldRenderPresenceRow({ ...it, details: { ...((it.details as any) || {}), recentEvents: raw } } as FeedItem)) return true;
+        if (stRaw === "thinking") {
+          const what = humanStateLabel(stRaw, { ...((it.details as any) || {}), recentEvents: raw });
+          if (what && what !== "Thinking") return false;
+          return hasConcreteNeighbor(it, idx, raw, who, "thinking");
+        }
+        return false;
       };
 
       const shouldSkipPresenceTool = (it: FeedItem, idx: number, raw: FeedItem[], who: string): boolean => {
