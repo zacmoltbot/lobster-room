@@ -1875,7 +1875,7 @@
               else if(tool === 'read') txt = 'Reading project files';
               else if(tool === 'write') txt = 'Updating project files';
               else if(tool === 'edit') txt = 'Updating project files';
-              else if(tool === 'sessions_spawn') txt = 'Starting a helper task';
+              else if(tool === 'sessions_spawn') { const label = feedDetailTaskLabel(d, evs); txt = label ? ('Starting a helper task — ' + label) : 'Starting a helper task'; }
               else if(tool === 'message') txt = 'Preparing a reply';
               else if(tool === 'web_fetch') txt = 'Checking a page';
               else txt = 'Working';
@@ -2401,6 +2401,75 @@
       return target ? ('replying to ' + target) : 'replying';
     }
 
+    function feedSpecificLabel(raw, maxLen){
+      try{
+        if(typeof raw !== 'string') return '';
+        let out = feedRedact(raw).replace(/\s+/g, ' ').trim();
+        if(!out) return '';
+        out = out.replace(/^[\s:;,.\-–—]+/, '').replace(/[\s:;,.\-–—]+$/, '').trim();
+        if(!out) return '';
+        if(/^(tool|command|task|session|agent|cron|scheduled|schedule|spawn)$/i.test(out)) return '';
+        const lim = Math.max(12, Number(maxLen||96));
+        if(out.length > lim) out = out.slice(0, lim - 1).trimEnd() + '…';
+        return out;
+      }catch{return ''}
+    }
+
+    function feedSessionTaskLabel(raw){
+      try{
+        const sk = String(raw || '').trim();
+        if(!sk) return '';
+        const parts = sk.split(':').map(s=>String(s||'').trim()).filter(Boolean);
+        for(let i=parts.length-1;i>=0;i--){
+          const part = parts[i];
+          if(/^(agent|spawn|cron|scheduled|schedule|main)$/i.test(part)) continue;
+          if(/^[a-f0-9-]{8,}$/i.test(part) || /^\d+$/.test(part)) continue;
+          if(part.length < 3) continue;
+          const label = feedSpecificLabel(part.replace(/[_-]+/g, ' '), 80);
+          if(label) return label;
+        }
+      }catch{}
+      return '';
+    }
+
+    function feedDetailTaskLabel(details, recentEvents){
+      const d = details && typeof details === 'object' ? details : {};
+      const candidates = [d.label, d.task, d.title, d.summary, d.purpose, d.name, d.prompt, feedSessionTaskLabel(d.sessionKey), feedSessionTaskLabel(d.parentSessionKey)];
+      for(const value of candidates){
+        const label = feedSpecificLabel(value, 96);
+        if(label) return label;
+      }
+      const evs = Array.isArray(recentEvents) ? recentEvents : [];
+      for(let i=evs.length-1;i>=0;i--){
+        const ev = evs[i];
+        const data = ev && ev.data && typeof ev.data === 'object' ? ev.data : (ev && ev.details && typeof ev.details === 'object' ? ev.details : null);
+        if(!data) continue;
+        for(const value of [data.label, data.task, data.title, data.summary, data.purpose, data.name, feedSessionTaskLabel(data.sessionKey)]){
+          const label = feedSpecificLabel(value, 96);
+          if(label) return label;
+        }
+      }
+      return '';
+    }
+
+    function feedInferWorkContext(details){
+      const d = details && typeof details === 'object' ? details : {};
+      const sk = String(d.sessionKey || '').toLowerCase();
+      const mp = String(d.messageProvider || '').toLowerCase();
+      if(d.spawnedBy) return 'helper';
+      if(sk.startsWith('spawn:')) return 'helper';
+      if(/cron|schedule|scheduled/.test(sk) || /cron|schedule|scheduled/.test(mp)) return 'scheduled';
+      return '';
+    }
+
+    function feedThinkingText(details, recentEvents){
+      const ctx = feedInferWorkContext(details);
+      const label = feedDetailTaskLabel(details, recentEvents);
+      if(ctx === 'helper') return label ? ('working on helper task — ' + label) : 'working on helper task';
+      if(ctx === 'scheduled') return label ? ('running scheduled task — ' + label) : 'running scheduled task';
+      return label || '';
+    }
+
     function feedCommandIntent(raw){
       try{
         const cmd = String(raw || '').replace(/\s+/g, ' ').trim();
@@ -2456,7 +2525,7 @@
       if(tn === 'write' || tn === 'edit') return compact ? 'updating project files' : 'updating project files';
       if(tn === 'message') return compact ? feedReplyingNow(details, recentEvents) : 'preparing a reply';
       if(tn === 'web_fetch') return compact ? 'checking a page' : 'checking a page';
-      if(tn === 'sessions_spawn') return 'starting a helper task';
+      if(tn === 'sessions_spawn'){ const label = feedDetailTaskLabel(details, recentEvents); return label ? ('starting a helper task — ' + label) : 'starting a helper task'; }
       return compact ? 'using tools' : 'using tool';
     }
 
@@ -2483,7 +2552,7 @@
       const tn = String(toolName || '').trim().toLowerCase();
       if(st === 'tool') return feedActivityFromTool(tn, details, recentEvents, {compact:true});
       if(st === 'reply') return feedReplyingNow(details, recentEvents);
-      if(st === 'thinking') return feedInferRecentActivity(details, recentEvents) || 'thinking';
+      if(st === 'thinking') return feedThinkingText(details, recentEvents) || feedInferRecentActivity(details, recentEvents) || 'thinking';
       if(st === 'error') return 'error';
       if(st === 'idle' || st === 'wait') return 'idle';
       return st || 'idle';

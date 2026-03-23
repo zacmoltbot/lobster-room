@@ -1274,10 +1274,18 @@ export default {
         }
       }
 
-      // Scheduled/background sessions: keep title generic but useful.
+      // Scheduled/background sessions: prefer concrete labels when we can infer them.
       const firstCtx = items.find((x) => x.kind === "before_agent_start" || x.kind === "presence" || x.kind === "state");
-      if (inferWorkContext(firstCtx?.details || { sessionKey: firstCtx?.sessionKey }) === "scheduled") return "Scheduled task";
-      if (inferWorkContext(firstCtx?.details || { sessionKey: firstCtx?.sessionKey }) === "helper") return "Helper task";
+      const ctxDetails = firstCtx?.details || { sessionKey: firstCtx?.sessionKey };
+      const ctxKind = inferWorkContext(ctxDetails);
+      if (ctxKind === "scheduled") {
+        const label = detailTaskLabel(ctxDetails, items);
+        return label ? `Scheduled task — ${label}` : "Scheduled task";
+      }
+      if (ctxKind === "helper") {
+        const label = detailTaskLabel(ctxDetails, items);
+        return label ? `Helper task — ${label}` : "Helper task";
+      }
 
       // Otherwise infer intent from the first meaningful tool call(s).
       const first = items.find((x) => x.kind === "before_tool_call" && x.toolName)?.toolName;
@@ -1533,6 +1541,62 @@ export default {
       return null;
     };
 
+    const cleanSpecificLabel = (raw: unknown, max = 120): string => {
+      if (typeof raw !== "string") return "";
+      const out = redactLine(raw, max)
+        .replace(/^[\s:;,.\-–—]+/, "")
+        .replace(/[\s:;,.\-–—]+$/, "")
+        .trim();
+      if (!out) return "";
+      if (/^(tool|command|task|session|agent|cron|scheduled|schedule|spawn)$/i.test(out)) return "";
+      return out;
+    };
+
+    const sessionKeyTaskLabel = (raw: unknown): string => {
+      const sk = typeof raw === "string" ? String(raw).trim() : "";
+      if (!sk) return "";
+      const parts = sk.split(":").map((x) => x.trim()).filter(Boolean);
+      for (let i = parts.length - 1; i >= 0; i -= 1) {
+        const part = parts[i];
+        if (!part) continue;
+        if (/^(agent|spawn|cron|scheduled|schedule|main)$/i.test(part)) continue;
+        if (/^[a-f0-9-]{8,}$/i.test(part) || /^\d+$/.test(part)) continue;
+        if (part.length < 3) continue;
+        const label = cleanSpecificLabel(part.replace(/[_-]+/g, " "), 80);
+        if (label) return label;
+      }
+      return "";
+    };
+
+    const detailTaskLabel = (details: any, recentEvents?: any[]): string => {
+      const candidates: unknown[] = [
+        details?.label,
+        details?.task,
+        details?.title,
+        details?.summary,
+        details?.purpose,
+        details?.name,
+        details?.prompt,
+        sessionKeyTaskLabel(details?.sessionKey),
+        sessionKeyTaskLabel(details?.parentSessionKey),
+      ];
+      for (const value of candidates) {
+        const label = cleanSpecificLabel(value, 120);
+        if (label) return label;
+      }
+      const evs = Array.isArray(recentEvents) ? recentEvents : [];
+      for (let i = evs.length - 1; i >= 0; i -= 1) {
+        const ev = evs[i];
+        const data = ev?.data && typeof ev.data === "object" ? ev.data : (ev?.details && typeof ev.details === "object" ? ev.details : null);
+        if (!data) continue;
+        for (const value of [data.label, data.task, data.title, data.summary, data.purpose, data.name, sessionKeyTaskLabel(data.sessionKey)]) {
+          const label = cleanSpecificLabel(value, 120);
+          if (label) return label;
+        }
+      }
+      return "";
+    };
+
     const replyPreviewValue = (details: any, recentEvents?: any[]): string => {
       const pick = (v: unknown): string => (typeof v === "string" && v.trim() ? v : "");
       const from = (obj: any): string => pick(obj?.contentPreview) || pick(obj?.preview) || pick(obj?.message) || pick(obj?.content) || pick(obj?.text) || pick(obj?.outputPreview) || "";
@@ -1553,6 +1617,14 @@ export default {
       const preview = scrubReplyPreview(replyPreviewValue(details, recentEvents), 48);
       const head = target ? `Replying to ${target}` : "Replying";
       return preview ? `${head} — ${preview}` : head;
+    };
+
+    const workContextSummary = (details: any, recentEvents?: any[]): string => {
+      const ctx = inferWorkContext(details || {});
+      const label = detailTaskLabel(details || {}, recentEvents);
+      if (ctx === "helper") return label ? `Working on helper task — ${label}` : "Working on helper task";
+      if (ctx === "scheduled") return label ? `Running scheduled task — ${label}` : "Running scheduled task";
+      return label || "Thinking";
     };
 
     const commandIntentSummary = (raw: unknown): string => {
@@ -1577,6 +1649,30 @@ export default {
       }
       const safe = redactLine(cmd, 80);
       return safe ? `Running a command — ${safe}` : "Running a command";
+    };
+
+    const commandCompletedSummary = (raw: unknown): string => {
+      const cmd = typeof raw === "string" ? raw.replace(/\s+/g, " ").trim() : "";
+      if (!cmd) return "Completed command";
+      const lower = cmd.toLowerCase();
+      const tests: Array<[RegExp, string]> = [
+        [/\bgit\s+status\b/, "Checked repo status"],
+        [/\bgit\s+diff\b/, "Reviewed code changes"],
+        [/\bgit\s+log\b/, "Reviewed commit history"],
+        [/\bgit\s+(branch|checkout|switch)\b/, "Updated git branch state"],
+        [/\b(npm|pnpm|yarn|bun)\s+(test|run\s+test)\b/, "Ran tests"],
+        [/\b(pytest|jest|vitest|mocha|go\s+test|cargo\s+test)\b/, "Ran tests"],
+        [/\b(npm|pnpm|yarn|bun)\s+(install|add)\b/, "Installed dependencies"],
+        [/\b(npm|pnpm|yarn|bun)\s+run\s+build\b|\b(make|cargo|go|python)\b.*\bbuild\b/, "Built the project"],
+        [/\b(npm|pnpm|yarn|bun)\s+run\s+dev\b|\b(npm|pnpm|yarn|bun)\s+start\b/, "Started the app"],
+        [/\b(ls|find|tree)\b/, "Reviewed project files"],
+        [/\b(cat|sed|awk|head|tail|grep)\b/, "Reviewed project files"],
+      ];
+      for (const [re, label] of tests) {
+        if (re.test(lower)) return label;
+      }
+      const safe = redactLine(cmd, 80);
+      return safe ? `Completed command — ${safe}` : "Completed command";
     };
 
     const toolHumanSummary = (it: FeedItem): string => {
@@ -1616,9 +1712,7 @@ export default {
 
       if (tn === "sessions_spawn") {
         const child = typeof d.spawnAgentId === "string" ? String(d.spawnAgentId) : "";
-        const label = typeof d.label === "string" ? String(d.label) : "";
-        const task = typeof d.task === "string" ? String(d.task) : "";
-        const desc = redactLine((label || task).trim(), 120);
+        const desc = detailTaskLabel(d);
         const tail = desc ? ` — ${desc}` : "";
         return `Starting a helper task${child ? ` @${child}` : ""}${tail}`.trim();
       }
@@ -1637,16 +1731,14 @@ export default {
         return target ? `Inspecting in browser — ${verb} ${target}` : `Inspecting in browser — ${verb}`;
       }
       if (tn === "exec") return commandIntentSummary(details?.command);
-      if (tn === "sessions_spawn") return "Starting a helper task";
+      if (tn === "sessions_spawn") {
+        const label = detailTaskLabel(details);
+        return label ? `Starting a helper task — ${label}` : "Starting a helper task";
+      }
       return genericToolLabel(tn);
     };
 
-    const thinkingSummary = (details: any): string => {
-      const ctx = inferWorkContext(details || {});
-      if (ctx === "helper") return "Working on helper task";
-      if (ctx === "scheduled") return "Running scheduled task";
-      return "Thinking";
-    };
+    const thinkingSummary = (details: any, recentEvents?: any[]): string => workContextSummary(details, recentEvents);
 
     const humanStateLabel = (stRaw: string, details?: any): string => {
       const st = stRaw === "reply" ? "replying"
@@ -1655,8 +1747,8 @@ export default {
         : stRaw === "idle" ? "idle"
         : stRaw === "error" ? "error"
         : stRaw;
-      if (st === "thinking") return thinkingSummary(details || {});
-      if (st === "replying") return replyingSummary(details || {});
+      if (st === "thinking") return thinkingSummary(details || {}, details?.recentEvents);
+      if (st === "replying") return replyingSummary(details || {}, details?.recentEvents);
       if (st === "idle") return "Idle";
       if (st === "tool") return toolStateSummary(details || {});
       if (st === "error") return "Error";
@@ -1697,8 +1789,12 @@ export default {
       if ((it.kind === "before_tool_call" || it.kind === "after_tool_call") && humanTools.has(tn)) {
         const summary = toolHumanSummary(it);
         if (it.kind === "before_tool_call") return { kind: it.kind, what: summary };
-        // after_tool_call
         if (it.success === false || it.error) return { kind: "error", what: `${summary} (failed)` };
+        if (tn === "exec") return { kind: it.kind, what: commandCompletedSummary((it.details as any)?.command) };
+        if (tn === "sessions_spawn") {
+          const label = detailTaskLabel(it.details || {});
+          return { kind: it.kind, what: label ? `Helper task finished — ${label}` : "Helper task finished" };
+        }
         return { kind: it.kind, what: `${summary} (done)` };
       }
 
@@ -1829,7 +1925,10 @@ export default {
 
           if (shouldSkipPresenceTool(it, i, raw, who)) continue;
 
-          const h = rowSentenceHuman(it);
+          const rowItem = (it.kind === "presence" || it.kind === "state")
+            ? { ...it, details: { ...((it.details as any) || {}), recentEvents: raw } }
+            : it;
+          const h = rowSentenceHuman(rowItem as FeedItem);
           if (h) {
             const sig = `${who}|${String(h.kind)}|${h.what}`;
             const prev = lastHumanSigByAgent.get(who);
