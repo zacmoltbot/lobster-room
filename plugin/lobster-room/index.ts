@@ -1786,6 +1786,21 @@ export default {
 
     const thinkingSummary = (details: any, recentEvents?: any[]): string => workContextSummary(details, recentEvents);
 
+    const shouldRenderTaskBoundary = (task: any, phase: "start" | "end", status?: FeedTaskStatus): boolean => {
+      const details = {
+        title: task?.title,
+        sessionKey: task?.sessionKey,
+        parentSessionKey: task?.parentSessionKey,
+        spawnedBy: task?.spawnedBy,
+      };
+      const label = detailTaskLabel(details);
+      const ctx = inferWorkContext(details);
+      if (ctx === "helper" || ctx === "scheduled") return true;
+      if (label) return true;
+      if (phase === "end" && status === "error") return true;
+      return false;
+    };
+
     const taskBoundarySummary = (task: any, phase: "start" | "end"): string => {
       const details = {
         title: task?.title,
@@ -1991,14 +2006,18 @@ export default {
 
           // Task boundaries: render meaningful started/ended rows.
           if (it.kind === "before_agent_start") {
-            pushRow(it, taskBoundarySummary(task, "start"), it.kind, who, sessionKey, task.id);
+            if (shouldRenderTaskBoundary(task, "start", task.status)) {
+              pushRow(it, taskBoundarySummary(task, "start"), it.kind, who, sessionKey, task.id);
+            }
             continue;
           }
           if (it.kind === "agent_end") {
             const ok = task.status !== "error";
-            let what = taskBoundarySummary(task, "end");
-            if (!ok) what = `${what} (failed)`;
-            pushRow(it, what, ok ? it.kind : "error", who, sessionKey, task.id);
+            if (shouldRenderTaskBoundary(task, "end", task.status)) {
+              let what = taskBoundarySummary(task, "end");
+              if (!ok) what = `${what} (failed)`;
+              pushRow(it, what, ok ? it.kind : "error", who, sessionKey, task.id);
+            }
             continue;
           }
 
