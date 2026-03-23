@@ -2334,7 +2334,8 @@
       const evs = Array.isArray(recentEvents) ? recentEvents : [];
       for(let i=evs.length-1;i>=0;i--){
         const ev = evs[i];
-        if(!ev || String(ev.kind||'') !== 'message_sending') continue;
+        const kind = String((ev && ev.kind) || '');
+        if(kind !== 'message_sending' && kind !== 'message_sent') continue;
         const data = ev.data && typeof ev.data === 'object' ? ev.data : null;
         const val = from(data) || from(ev.details);
         if(val) return val;
@@ -2363,7 +2364,21 @@
 
     function feedIsInternalTransportToken(raw){
       const out = String(raw || '').trim().toLowerCase();
+      if(!out) return false;
+      if(/^(discord|slack|telegram|whatsapp)(?:[:/._-]|$)/i.test(out)) return true;
       return ['discord','slack','telegram','whatsapp','channel','conversation','thread','session','provider','transport','messageprovider'].includes(out);
+    }
+
+    function feedLooksInternalSlugLabel(raw){
+      const s = String(raw || '').trim();
+      if(!s) return false;
+      const lower = s.toLowerCase();
+      if(feedIsInternalTransportToken(lower)) return true;
+      if(/^(agent|spawn|cron|scheduled|schedule|session|provider|transport|messageprovider)([:/_-]|$)/i.test(lower)) return true;
+      if(/^agent:[^:]+:/i.test(s) || /^spawn:/i.test(s)) return true;
+      if(/^[a-z0-9]+(?:[-_][a-z0-9]+){3,}$/i.test(s)) return true;
+      if(/\bcanonical\b|\bcleanup\b|\bfinal\b|\bpass\b/.test(lower) && /[-_]/.test(s) && !/\s/.test(s)) return true;
+      return false;
     }
 
     function feedReplyTarget(details, recentEvents){
@@ -2423,12 +2438,14 @@
     function feedSpecificLabel(raw, maxLen){
       try{
         if(typeof raw !== 'string') return '';
+        if(feedLooksInternalSlugLabel(raw)) return '';
         let out = feedRedact(raw).replace(/\s+/g, ' ').trim();
         if(!out) return '';
         out = out.replace(/^[\s:;,.\-–—]+/, '').replace(/[\s:;,.\-–—]+$/, '').trim();
         if(!out) return '';
         if(/^(tool|command|task|session|agent|cron|scheduled|schedule|spawn|channel|conversation|thread|provider|transport|messageprovider)$/i.test(out)) return '';
         if(feedIsInternalTransportToken(out)) return '';
+        if(feedLooksInternalSlugLabel(out)) return '';
         const lim = Math.max(12, Number(maxLen||96));
         if(out.length > lim) out = out.slice(0, lim - 1).trimEnd() + '…';
         return out;

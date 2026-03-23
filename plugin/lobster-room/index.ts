@@ -1526,6 +1526,8 @@ export default {
     const isInternalTransportToken = (raw: unknown): boolean => {
       if (typeof raw !== "string") return false;
       const out = raw.trim().toLowerCase();
+      if (!out) return false;
+      if (/^(discord|slack|telegram|whatsapp)(?:[:/._-]|$)/i.test(out)) return true;
       return [
         "discord",
         "slack",
@@ -1539,6 +1541,19 @@ export default {
         "transport",
         "messageprovider",
       ].includes(out);
+    };
+
+    const looksInternalSlugLabel = (raw: unknown): boolean => {
+      if (typeof raw !== "string") return false;
+      const s = raw.trim();
+      if (!s) return false;
+      const lower = s.toLowerCase();
+      if (isInternalTransportToken(lower)) return true;
+      if (/^(agent|spawn|cron|scheduled|schedule|session|provider|transport|messageprovider)([:/_-]|$)/i.test(lower)) return true;
+      if (/^agent:[^:]+:/i.test(s) || /^spawn:/i.test(s)) return true;
+      if (/^[a-z0-9]+(?:[-_][a-z0-9]+){3,}$/i.test(s)) return true;
+      if (/\bcanonical\b|\bcleanup\b|\bfinal\b|\bpass\b/.test(lower) && /[-_]/.test(s) && !/\s/.test(s)) return true;
+      return false;
     };
 
     const safeReplyTarget = (raw: unknown): string => {
@@ -1569,6 +1584,7 @@ export default {
 
     const cleanSpecificLabel = (raw: unknown, max = 120): string => {
       if (typeof raw !== "string") return "";
+      if (looksInternalSlugLabel(raw)) return "";
       const out = redactLine(raw, max)
         .replace(/^[\s:;,.\-–—]+/, "")
         .replace(/[\s:;,.\-–—]+$/, "")
@@ -1576,6 +1592,7 @@ export default {
       if (!out) return "";
       if (/^(tool|command|task|session|agent|cron|scheduled|schedule|spawn|channel|conversation|thread|provider|transport|messageprovider)$/i.test(out)) return "";
       if (isInternalTransportToken(out)) return "";
+      if (looksInternalSlugLabel(out)) return "";
       return out;
     };
 
@@ -1632,7 +1649,8 @@ export default {
       const evs = Array.isArray(recentEvents) ? recentEvents : [];
       for (let i = evs.length - 1; i >= 0; i -= 1) {
         const ev = evs[i];
-        if (String(ev?.kind || "") !== "message_sending") continue;
+        const kind = String(ev?.kind || "");
+        if (kind !== "message_sending" && kind !== "message_sent") continue;
         const value = from(ev?.data) || from(ev?.details);
         if (value) return value;
       }
@@ -1854,6 +1872,7 @@ export default {
     const taskBoundarySummary = (task: any, phase: "start" | "end"): string => {
       const details = {
         title: task?.title,
+        summary: task?.summary,
         sessionKey: task?.sessionKey,
         parentSessionKey: task?.parentSessionKey,
         spawnedBy: task?.spawnedBy,
@@ -1868,7 +1887,7 @@ export default {
         return naturalLabel ? `Starting task — ${naturalLabel}` : "Starting task";
       }
       if (ctx === "helper") return naturalLabel ? `Helper task finished — ${naturalLabel}` : "Helper task finished";
-      if (ctx === "scheduled") return naturalLabel ? `Scheduled task finished` : "Scheduled task finished";
+      if (ctx === "scheduled") return naturalLabel ? `Scheduled task finished — ${naturalLabel}` : "Scheduled task finished";
       if (isCommandishLabel(label)) return "Completed command";
       return naturalLabel ? `Task finished — ${naturalLabel}` : "Task finished";
     };
@@ -2071,6 +2090,27 @@ export default {
         return false;
       };
 
+      const shouldSkipHelperCompletionBoundary = (task: FeedTask, phase: "start" | "end"): boolean => {
+        if (phase !== "end") return false;
+        const details = {
+          title: task?.title,
+          summary: task?.summary,
+          sessionKey: task?.sessionKey,
+          parentSessionKey: task?.parentSessionKey,
+          spawnedBy: task?.spawnedBy,
+        };
+        if (inferWorkContext(details) !== "helper") return false;
+        const raw = Array.isArray(task?.items) ? task.items : [];
+        if (!raw.length) return false;
+        const hasReplyTerminal = raw.some((x) => x.kind === "message_sent" && x.success !== false);
+        if (hasReplyTerminal) return true;
+        let completionRows = 0;
+        for (const x of raw) {
+          if (x.kind === "after_tool_call" && isCanonicalToolForFeed(x.toolName) && x.toolName !== "sessions_spawn") completionRows += 1;
+        }
+        return completionRows > 0;
+      };
+
       // Short-window aggregation: collapse rapid sequences (within 8s) into one semantic row.
       // The newer event only wins when it is at least as meaningful as the row already kept.
       const pushRow = (it: FeedItem, what: string, kind: FeedRowV3["kind"], agentId: string, sessionKey?: string, taskId?: string) => {
@@ -2132,7 +2172,7 @@ export default {
           }
           if (it.kind === "agent_end") {
             const ok = task.status !== "error";
-            if (shouldRenderTaskBoundary(task, "end", task.status)) {
+            if (!shouldSkipHelperCompletionBoundary(task, "end") && shouldRenderTaskBoundary(task, "end", task.status)) {
               let what = taskBoundarySummary(task, "end");
               if (!ok) what = `${what} (failed)`;
               pushRow(it, what, ok ? it.kind : "error", who, sessionKey, task.id);
@@ -2577,7 +2617,8 @@ export default {
 
     api.on("message_sent", (event, ctx) => {
       const agentId = "main";
-      pushEvent("message_sent", { agentId, data: { to: event?.to, success: event?.success, channelId: ctx?.channelId } });
+      const replyPreview = scrubReplyPreview(event?.content, 48);
+      pushEvent("message_sent", { agentId, data: { to: event?.to, success: event?.success, channelId: ctx?.channelId, contentPreview: replyPreview || undefined } });
       pushFeed({
         ts: nowMs(),
         kind: "message_sent",
@@ -2586,6 +2627,7 @@ export default {
         to: typeof event?.to === "string" ? redactSecretsInText(event.to) : undefined,
         success: typeof event?.success === "boolean" ? event.success : undefined,
         error: typeof event?.error === "string" ? redactSecretsInText(event.error) : undefined,
+        details: { contentPreview: replyPreview || undefined },
       });
       if (event?.success === false) {
         setState(agentId, "error", { error: event?.error || "message_sent failed", to: event?.to, channelId: ctx?.channelId });
