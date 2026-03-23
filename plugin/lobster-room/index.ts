@@ -1287,8 +1287,12 @@ export default {
         return label ? `Helper task — ${label}` : "Helper task";
       }
 
-      // Otherwise infer intent from the first meaningful tool call(s).
-      const first = items.find((x) => x.kind === "before_tool_call" && x.toolName)?.toolName;
+      // Otherwise infer intent from the first meaningful user-facing tool call(s).
+      const first = items.find((x) => {
+        if (x.kind !== "before_tool_call" || !x.toolName) return false;
+        const tn = String(x.toolName).trim();
+        return !!genericToolLabel(tn);
+      })?.toolName;
       if (first) {
         const tn = String(first);
         if (tn === "browser") return "QA in browser";
@@ -1296,7 +1300,7 @@ export default {
         if (tn === "write" || tn === "edit") return "Update project files";
         if (tn === "exec") return "Run a command";
         if (tn === "message") return "Prepare a reply";
-        return "Tool: " + tn;
+        return genericToolLabel(tn) || "Agent run";
       }
 
       return "Agent run";
