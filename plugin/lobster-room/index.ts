@@ -171,7 +171,7 @@ function contentTypeByExt(ext: string): string | null {
   return null;
 }
 
-const BUILD_TAG = "feed-v3-20260323.2c-lite-history";
+const BUILD_TAG = "feed-v3-20260315.19";
 
 export default {
   id: "lobster-room",
@@ -1095,7 +1095,6 @@ export default {
 
     const FEED_MAX = Math.max(500, Number(api.config?.feedMaxItems) || 0, 600);
     const feedBuf: FeedItem[] = [];
-    const FEED_HISTORY_MAX = Math.max(80, Number(api.config?.feedHistoryMaxRows) || 0, 160);
     const FEED_PRESENCE_MIN_MS = Math.max(2000, Number(api.config?.feedPresenceMinMs) || 0);
     const FEED_HEARTBEAT_MS = Math.max(5000, Number(api.config?.feedPresenceHeartbeatMs) || 0);
     const lastPresenceByAgent = new Map<string, { state: ActivityState; ts: number; toolName?: string }>();
@@ -1199,7 +1198,6 @@ export default {
 
     const pushFeed = (item: FeedItem) => {
       feedBuf.push(item);
-      pushFeedHistoryRow(item);
       if (typeof item.agentId === "string" && item.agentId.trim()) {
         lastFeedByAgent.set(item.agentId.trim(), item.ts || nowMs());
       }
@@ -1386,9 +1384,6 @@ export default {
       plain?: string;
       action?: string;
     };
-
-    const feedHistoryBuf: FeedRowV3[] = [];
-    let feedHistorySeq = 0;
 
     const maskUrlLite = (s: string): string => {
       // Keep feed content-free: strip literal URLs / localhost.
@@ -1828,68 +1823,6 @@ export default {
 
       // Fallback: omit other raw events in default feed.
       return null;
-    };
-
-    const stableHistorySentence = (it: FeedItem): { kind: FeedRowV3["kind"]; what: string } | null => {
-      const details = (it.details && typeof it.details === "object") ? it.details : {};
-      const ctx = inferWorkContext({ ...details, sessionKey: it.sessionKey || (details as any).sessionKey });
-      const label = detailTaskLabel({ ...details, sessionKey: it.sessionKey || (details as any).sessionKey });
-      const title = ctx === "helper"
-        ? (label ? `Helper task — ${label}` : "Helper task")
-        : (ctx === "scheduled"
-          ? (label ? `Scheduled task — ${label}` : "Scheduled task")
-          : (label || "Agent run"));
-
-      if (it.kind === "before_agent_start") {
-        if (ctx === "helper" || ctx === "scheduled") return { kind: it.kind, what: `started — ${title}` };
-        return null;
-      }
-      if (it.kind === "agent_end") {
-        if (it.success === false) return { kind: "error", what: `ended — ${title} (failed)` };
-        if (ctx === "helper" || ctx === "scheduled") return { kind: it.kind, what: `ended — ${title} (ok)` };
-        return null;
-      }
-      if (it.kind === "message_sent") {
-        const target = safeReplyTarget(it.to);
-        if (it.success === false) return { kind: "error", what: target ? `Message to ${target} failed` : "Message failed" };
-        return { kind: it.kind, what: target ? `Reply sent to ${target}` : "Message sent" };
-      }
-      if (it.kind === "before_tool_call" && it.toolName === "sessions_spawn") {
-        return { kind: it.kind, what: toolHumanSummary(it) };
-      }
-      if (it.kind === "after_tool_call") {
-        if (it.success === false || it.error) {
-          const summary = it.toolName === "sessions_spawn" ? toolHumanSummary(it) : toolCompletedSummary(it);
-          return { kind: "error", what: `${summary} (failed)` };
-        }
-        if (it.toolName === "sessions_spawn" || it.toolName === "exec") {
-          return { kind: it.toolName === "sessions_spawn" ? "sessions_spawn" : it.kind, what: toolCompletedSummary(it) };
-        }
-      }
-      if (it.kind === "presence") {
-        const stRaw = typeof (details as any)?.state === "string" ? String((details as any).state) : "";
-        if (stRaw === "error") return { kind: "error", what: "Error" };
-      }
-      return null;
-    };
-
-    const pushFeedHistoryRow = (item: FeedItem) => {
-      const h = stableHistorySentence(item);
-      if (!h) return;
-      const agentId = (item.agentId || "unknown").trim() || "unknown";
-      const row: FeedRowV3 = {
-        id: `${item.sessionKey || agentId}:hist:${item.ts}:${feedHistorySeq += 1}`,
-        ts: item.ts,
-        agentId,
-        sessionKey: item.sessionKey,
-        rowType: "timeline",
-        kind: h.kind,
-        what: h.what,
-        plain: h.what,
-        action: h.what,
-      };
-      feedHistoryBuf.push(row);
-      if (feedHistoryBuf.length > FEED_HISTORY_MAX) feedHistoryBuf.splice(0, feedHistoryBuf.length - FEED_HISTORY_MAX);
     };
 
     const buildFeedV3Rows = (items: FeedItem[]): FeedRowV3[] => {
@@ -2782,13 +2715,7 @@ export default {
               const last = items.length ? items[items.length - 1] : null;
 
               const version = Number(payload?.version) || 2;
-              const rows = version >= 3
-                ? feedHistoryBuf
-                  .filter((row) => (!agentId || row.agentId === agentId) && (!kind || row.kind === (kind as any)))
-                  .slice(-limit)
-                  .slice()
-                  .sort((a, b) => b.ts - a.ts)
-                : undefined;
+              const rows = version >= 3 ? buildFeedV3Rows(items) : undefined;
 
               sendJson(res, 200, {
                 ok: true,
