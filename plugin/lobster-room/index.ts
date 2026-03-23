@@ -1523,6 +1523,24 @@ export default {
       return `"${out}"`;
     };
 
+    const isInternalTransportToken = (raw: unknown): boolean => {
+      if (typeof raw !== "string") return false;
+      const out = raw.trim().toLowerCase();
+      return [
+        "discord",
+        "slack",
+        "telegram",
+        "whatsapp",
+        "channel",
+        "conversation",
+        "thread",
+        "session",
+        "provider",
+        "transport",
+        "messageprovider",
+      ].includes(out);
+    };
+
     const safeReplyTarget = (raw: unknown): string => {
       if (typeof raw !== "string") return "";
       let out = redactSecretsInText(raw)
@@ -1532,8 +1550,8 @@ export default {
         .trim();
       if (!out) return "";
       if (/^agent:[^:]+:/i.test(out) || /^spawn:/i.test(out)) return "";
-      if (/^(channel|conversation|thread|session)[:=]/i.test(out)) return "";
-      if (/^discord$/i.test(out) || /^slack$/i.test(out) || /^telegram$/i.test(out) || /^whatsapp$/i.test(out)) return "";
+      if (/^(channel|conversation|thread|session|provider|transport|messageProvider)[:=]/i.test(out)) return "";
+      if (isInternalTransportToken(out)) return "";
       if (/^\d{5,}$/.test(out)) return "";
       if (/https?:\/\//i.test(out) || /[<>]/.test(out)) return "";
       if (out.length > 40) return "";
@@ -1556,7 +1574,8 @@ export default {
         .replace(/[\s:;,.\-–—]+$/, "")
         .trim();
       if (!out) return "";
-      if (/^(tool|command|task|session|agent|cron|scheduled|schedule|spawn|channel|conversation|thread)$/i.test(out)) return "";
+      if (/^(tool|command|task|session|agent|cron|scheduled|schedule|spawn|channel|conversation|thread|provider|transport|messageprovider)$/i.test(out)) return "";
+      if (isInternalTransportToken(out)) return "";
       return out;
     };
 
@@ -1621,13 +1640,32 @@ export default {
     };
 
     const replyTargetValue = (details: any, recentEvents?: any[]): string => {
-      const direct = safeReplyTarget(details?.to || details?.target || details?.user || details?.name);
+      const direct = safeReplyTarget(
+        details?.to
+        || details?.target
+        || details?.user
+        || details?.name
+        || details?.recipient
+        || details?.channel
+        || details?.messageProvider,
+      );
       if (direct) return direct;
       const evs = Array.isArray(recentEvents) ? recentEvents : [];
       for (let i = evs.length - 1; i >= 0; i -= 1) {
         const ev = evs[i];
         if (String(ev?.kind || "") !== "message_sending") continue;
-        const value = safeReplyTarget(ev?.data?.to || ev?.details?.to || ev?.data?.target || ev?.details?.target);
+        const value = safeReplyTarget(
+          ev?.data?.to
+          || ev?.details?.to
+          || ev?.data?.target
+          || ev?.details?.target
+          || ev?.data?.recipient
+          || ev?.details?.recipient
+          || ev?.data?.channel
+          || ev?.details?.channel
+          || ev?.data?.messageProvider
+          || ev?.details?.messageProvider,
+        );
         if (value) return value;
       }
       return "";
@@ -1636,8 +1674,9 @@ export default {
     const replyingSummary = (details: any, recentEvents?: any[]): string => {
       const target = replyTargetValue(details, recentEvents);
       const preview = scrubReplyPreview(replyPreviewValue(details, recentEvents), 48);
-      const head = target ? `Replying to ${target}` : "Replying";
-      return preview ? `${head} — ${preview}` : head;
+      if (target && preview) return `Replying to ${target} — ${preview}`;
+      if (preview) return `Replying — ${preview}`;
+      return target ? `Replying to ${target}` : "Replying";
     };
 
     const workContextSummary = (details: any, recentEvents?: any[]): string => {
@@ -1715,6 +1754,8 @@ export default {
         return basenameLite(p) ? "Updated project file" : "Updated project files";
       }
       if (tn === "sessions_spawn") {
+        const preview = scrubReplyPreview(replyPreviewValue(d), 64);
+        if (preview) return `Helper task finished — ${preview}`;
         const label = detailTaskLabel(d);
         return label ? `Helper task finished — ${label}` : "Helper task finished";
       }
@@ -1819,16 +1860,17 @@ export default {
       };
       const label = detailTaskLabel(details);
       const ctx = inferWorkContext(details);
+      const naturalLabel = label && !isCommandishLabel(label) ? label : "";
       if (phase === "start") {
-        if (ctx === "helper") return label ? `Starting helper task — ${label}` : "Starting helper task";
-        if (ctx === "scheduled") return label ? `Running scheduled task — ${label}` : "Running scheduled task";
+        if (ctx === "helper") return naturalLabel ? `Starting helper task — ${naturalLabel}` : "Starting helper task";
+        if (ctx === "scheduled") return naturalLabel ? `Running scheduled task — ${naturalLabel}` : "Running scheduled task";
         if (isCommandishLabel(label)) return "Running a command";
-        return label ? `Starting task — ${label}` : "Starting task";
+        return naturalLabel ? `Starting task — ${naturalLabel}` : "Starting task";
       }
-      if (ctx === "helper") return label ? `Helper task finished — ${label}` : "Helper task finished";
-      if (ctx === "scheduled") return label ? `Scheduled task finished — ${label}` : "Scheduled task finished";
+      if (ctx === "helper") return naturalLabel ? `Helper task finished — ${naturalLabel}` : "Helper task finished";
+      if (ctx === "scheduled") return naturalLabel ? `Scheduled task finished` : "Scheduled task finished";
       if (isCommandishLabel(label)) return "Completed command";
-      return label ? `Task finished — ${label}` : "Task finished";
+      return naturalLabel ? `Task finished — ${naturalLabel}` : "Task finished";
     };
 
     const humanStateLabel = (stRaw: string, details?: any): string => {
@@ -1884,10 +1926,13 @@ export default {
 
       // started/ended rows are rendered at the task level for clearer titles.
 
-      if (it.kind === "message_sending") return { kind: it.kind, what: replyingSummary({ ...(it.details || {}), to: it.to }) };
+      if (it.kind === "message_sending") return { kind: it.kind, what: replyingSummary({ ...(it.details || {}), to: it.to }, (it.details as any)?.recentEvents) };
       if (it.kind === "message_sent") {
-        const target = safeReplyTarget(it.to);
+        const target = replyTargetValue({ ...(it.details || {}), to: it.to }, (it.details as any)?.recentEvents);
+        const preview = scrubReplyPreview(replyPreviewValue(it.details || {}, (it.details as any)?.recentEvents), 48);
         if (it.success === false) return { kind: "error", what: target ? `Message to ${target} failed` : "Message failed" };
+        if (target && preview) return { kind: it.kind, what: `Reply sent to ${target} — ${preview}` };
+        if (preview) return { kind: it.kind, what: `Message sent — ${preview}` };
         return { kind: it.kind, what: target ? `Reply sent to ${target}` : "Message sent" };
       }
 
@@ -1898,6 +1943,7 @@ export default {
         const summary = toolHumanSummary(it);
         if (it.kind === "before_tool_call") return { kind: it.kind, what: summary };
         if (it.success === false || it.error) return { kind: "error", what: `${summary} (failed)` };
+        if (tn === "sessions_spawn") return null;
         return { kind: it.kind, what: toolCompletedSummary(it) };
       }
 
@@ -2097,7 +2143,7 @@ export default {
           if (shouldSkipPresenceTool(it, i, raw, who)) continue;
           if (shouldSkipGenericPresence(it, i, raw, who)) continue;
 
-          const rowItem = (it.kind === "presence" || it.kind === "state")
+          const rowItem = (it.kind === "presence" || it.kind === "state" || it.kind === "message_sending" || it.kind === "message_sent")
             ? { ...it, details: { ...((it.details as any) || {}), recentEvents: raw } }
             : it;
           const h = rowSentenceHuman(rowItem as FeedItem);

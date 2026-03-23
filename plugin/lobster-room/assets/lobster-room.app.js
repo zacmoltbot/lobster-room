@@ -2361,6 +2361,11 @@
       }catch{return ''}
     }
 
+    function feedIsInternalTransportToken(raw){
+      const out = String(raw || '').trim().toLowerCase();
+      return ['discord','slack','telegram','whatsapp','channel','conversation','thread','session','provider','transport','messageprovider'].includes(out);
+    }
+
     function feedReplyTarget(details, recentEvents){
       const pick = (v)=> (typeof v === 'string' && v.trim()) ? v.trim() : '';
       const candidates = [
@@ -2368,6 +2373,9 @@
         pick(details && details.target),
         pick(details && details.user),
         pick(details && details.name),
+        pick(details && details.recipient),
+        pick(details && details.channel),
+        pick(details && details.messageProvider),
       ];
       const evs = Array.isArray(recentEvents) ? recentEvents : [];
       for(let i=evs.length-1;i>=0 && candidates.length < 8;i--){
@@ -2375,7 +2383,13 @@
         if(!ev || String(ev.kind||'') !== 'message_sending') continue;
         const data = ev.data && typeof ev.data === 'object' ? ev.data : null;
         const details2 = ev.details && typeof ev.details === 'object' ? ev.details : null;
-        candidates.push(pick(data && data.to), pick(details2 && details2.to));
+        candidates.push(
+          pick(data && data.to), pick(details2 && details2.to),
+          pick(data && data.target), pick(details2 && details2.target),
+          pick(data && data.recipient), pick(details2 && details2.recipient),
+          pick(data && data.channel), pick(details2 && details2.channel),
+          pick(data && data.messageProvider), pick(details2 && details2.messageProvider)
+        );
       }
       for(const raw of candidates){
         if(!raw) continue;
@@ -2385,7 +2399,7 @@
           .replace(/[^A-Za-z0-9\u00C0-\u024F\u4E00-\u9FFF\u3400-\u4DBF._ -]+$/g, '')
           .trim();
         if(!cleaned) continue;
-        if(/^(discord|slack|telegram|whatsapp|channel)$/i.test(cleaned)) continue;
+        if(feedIsInternalTransportToken(cleaned)) continue;
         if(/^[-_a-f0-9]{8,}$/i.test(cleaned)) continue;
         if(/^\d+$/.test(cleaned)) continue;
         if(cleaned.length > 32) continue;
@@ -2397,8 +2411,9 @@
     function feedReplyingText(details, recentEvents){
       const target = feedReplyTarget(details, recentEvents);
       const pv = feedScrubReplyPreview(feedReplyPreviewValue(details, recentEvents), 48);
-      const head = target ? ('replying to ' + target) : 'replying';
-      return pv ? (head + ' — ' + pv) : head;
+      if(target && pv) return 'replying to ' + target + ' — ' + pv;
+      if(pv) return 'replying — ' + pv;
+      return target ? ('replying to ' + target) : 'replying';
     }
 
     function feedReplyingNow(details, recentEvents){
@@ -2412,7 +2427,8 @@
         if(!out) return '';
         out = out.replace(/^[\s:;,.\-–—]+/, '').replace(/[\s:;,.\-–—]+$/, '').trim();
         if(!out) return '';
-        if(/^(tool|command|task|session|agent|cron|scheduled|schedule|spawn|channel|conversation|thread)$/i.test(out)) return '';
+        if(/^(tool|command|task|session|agent|cron|scheduled|schedule|spawn|channel|conversation|thread|provider|transport|messageprovider)$/i.test(out)) return '';
+        if(feedIsInternalTransportToken(out)) return '';
         const lim = Math.max(12, Number(maxLen||96));
         if(out.length > lim) out = out.slice(0, lim - 1).trimEnd() + '…';
         return out;
