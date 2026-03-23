@@ -1666,13 +1666,41 @@ export default {
         [/\b(npm|pnpm|yarn|bun)\s+run\s+build\b|\b(make|cargo|go|python)\b.*\bbuild\b/, "Built the project"],
         [/\b(npm|pnpm|yarn|bun)\s+run\s+dev\b|\b(npm|pnpm|yarn|bun)\s+start\b/, "Started the app"],
         [/\b(ls|find|tree)\b/, "Reviewed project files"],
-        [/\b(cat|sed|awk|head|tail|grep)\b/, "Reviewed project files"],
+        [/\b(cat|sed|awk|head|tail|grep)\b/, "Reviewed file contents"],
       ];
       for (const [re, label] of tests) {
         if (re.test(lower)) return label;
       }
       const safe = redactLine(cmd, 80);
       return safe ? `Completed command — ${safe}` : "Completed command";
+    };
+
+    const toolCompletedSummary = (it: FeedItem): string => {
+      const tn = (it.toolName || "tool").trim();
+      const d: any = it.details || {};
+
+      if (tn === "exec") return commandCompletedSummary(d.command);
+
+      if (tn === "read") {
+        const p = d.path ?? d.file_path;
+        return basenameLite(p) ? "Reviewed file contents" : "Reviewed project files";
+      }
+      if (tn === "write") {
+        const p = d.path ?? d.file_path;
+        return basenameLite(p) ? "Updated project file" : "Updated project files";
+      }
+      if (tn === "edit") {
+        const p = d.path ?? d.file_path;
+        return basenameLite(p) ? "Updated project file" : "Updated project files";
+      }
+      if (tn === "sessions_spawn") {
+        const label = detailTaskLabel(d);
+        return label ? `Helper task finished — ${label}` : "Helper task finished";
+      }
+
+      const summary = toolHumanSummary(it);
+      const safeSummary = summary ? summary.replace(/\s*for current task$/i, "").trim() : "";
+      return safeSummary ? `Completed command — ${safeSummary}` : "Completed command";
     };
 
     const toolHumanSummary = (it: FeedItem): string => {
@@ -1790,12 +1818,7 @@ export default {
         const summary = toolHumanSummary(it);
         if (it.kind === "before_tool_call") return { kind: it.kind, what: summary };
         if (it.success === false || it.error) return { kind: "error", what: `${summary} (failed)` };
-        if (tn === "exec") return { kind: it.kind, what: commandCompletedSummary((it.details as any)?.command) };
-        if (tn === "sessions_spawn") {
-          const label = detailTaskLabel(it.details || {});
-          return { kind: it.kind, what: label ? `Helper task finished — ${label}` : "Helper task finished" };
-        }
-        return { kind: it.kind, what: `${summary} (done)` };
+        return { kind: it.kind, what: toolCompletedSummary(it) };
       }
 
       // Fallback: omit other raw events in default feed.
