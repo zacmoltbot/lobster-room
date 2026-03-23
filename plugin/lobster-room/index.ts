@@ -1511,11 +1511,14 @@ export default {
       if (!out) return "";
 
       out = out
+        .replace(/^(["'“”‘’])\s*(.*?)\s*\1$/u, "$2")
         .replace(/\b[\w.+-]+@[\w.-]+\.[A-Za-z]{2,}\b/g, "[redacted email]")
         .replace(/\b(?:\+?\d[\d\s().-]{6,}\d)\b/g, "[redacted number]")
-        .replace(/\b\d{4,}\b/g, "[redacted]");
+        .replace(/\b\d{4,}\b/g, "[redacted]")
+        .trim();
 
       if (!out || /^\[(?:redacted|hex_redacted|url|session)\]$/i.test(out)) return "";
+      if (/^(replying|reply|message|sent)$/i.test(out)) return "";
       if (out.length > maxLen) out = out.slice(0, Math.max(0, maxLen - 1)).trimEnd() + "…";
       return `"${out}"`;
     };
@@ -1553,7 +1556,7 @@ export default {
         .replace(/[\s:;,.\-–—]+$/, "")
         .trim();
       if (!out) return "";
-      if (/^(tool|command|task|session|agent|cron|scheduled|schedule|spawn)$/i.test(out)) return "";
+      if (/^(tool|command|task|session|agent|cron|scheduled|schedule|spawn|channel|conversation|thread)$/i.test(out)) return "";
       return out;
     };
 
@@ -1786,6 +1789,12 @@ export default {
 
     const thinkingSummary = (details: any, recentEvents?: any[]): string => workContextSummary(details, recentEvents);
 
+    const isCommandishLabel = (raw: unknown): boolean => {
+      if (typeof raw !== "string") return false;
+      const out = raw.trim().toLowerCase();
+      return ["run a command", "running a command", "command", "shell command", "terminal command"].includes(out);
+    };
+
     const shouldRenderTaskBoundary = (task: any, phase: "start" | "end", status?: FeedTaskStatus): boolean => {
       const details = {
         title: task?.title,
@@ -1813,10 +1822,12 @@ export default {
       if (phase === "start") {
         if (ctx === "helper") return label ? `Starting helper task — ${label}` : "Starting helper task";
         if (ctx === "scheduled") return label ? `Running scheduled task — ${label}` : "Running scheduled task";
+        if (isCommandishLabel(label)) return "Running a command";
         return label ? `Starting task — ${label}` : "Starting task";
       }
       if (ctx === "helper") return label ? `Helper task finished — ${label}` : "Helper task finished";
       if (ctx === "scheduled") return label ? `Scheduled task finished — ${label}` : "Scheduled task finished";
+      if (isCommandishLabel(label)) return "Completed command";
       return label ? `Task finished — ${label}` : "Task finished";
     };
 
@@ -1843,6 +1854,8 @@ export default {
         const stRaw = typeof (it.details as any)?.state === "string" ? String((it.details as any).state) : "";
         const isHeartbeat = !!(it.details as any)?.heartbeat;
         if (isHeartbeat && stRaw && stRaw !== "idle" && stRaw !== "error") return null;
+        if (/^(channel|conversation|thread|session)$/i.test(stRaw)) return null;
+        if ((it.details as any)?.synthetic && stRaw === "reply") return null;
         const what = humanStateLabel(stRaw, it.details || {});
         if (!what) return null;
         return { kind: stRaw === "error" ? "error" : it.kind, what };
@@ -1923,6 +1936,52 @@ export default {
       const lastAggByAgent = new Map<string, { outIdx: number; ts: number; signalRank: number }>();
 
       const toolPresenceMergeWindowMs = 1200;
+
+      const presenceNeighborWindowMs = 2500;
+
+      const hasConcreteNeighbor = (it: FeedItem, idx: number, raw: FeedItem[], who: string, mode: "thinking" | "idle" | "reply"): boolean => {
+        const matchesConcrete = (x: FeedItem): boolean => {
+          if (!x) return false;
+          const agent = x.agentId || who;
+          if (agent !== who || x === it) return false;
+          if (x.kind === "message_sending" || x.kind === "message_sent") return true;
+          if (x.kind === "before_tool_call" || x.kind === "after_tool_call") {
+            const tn = String(x.toolName || "").trim();
+            return !!tn && !isLowSignalObservationTool(tn) && !["channel", "conversation", "thread", "session"].includes(tn);
+          }
+          if (x.kind === "agent_end") return true;
+          if (x.kind === "presence") {
+            const otherState = typeof (x.details as any)?.state === "string" ? String((x.details as any).state) : "";
+            if (mode === "reply") return otherState === "reply" && !(x.details as any)?.synthetic;
+            if (mode === "thinking") return otherState === "tool" || otherState === "reply" || otherState === "error";
+            if (mode === "idle") return otherState === "tool" || otherState === "reply" || otherState === "thinking" || otherState === "error";
+          }
+          return false;
+        };
+
+        for (let j = idx - 1; j >= 0; j -= 1) {
+          const prev = raw[j];
+          if (it.ts - prev.ts > presenceNeighborWindowMs) break;
+          if (matchesConcrete(prev)) return true;
+        }
+        for (let j = idx + 1; j < raw.length; j += 1) {
+          const next = raw[j];
+          if (next.ts - it.ts > presenceNeighborWindowMs) break;
+          if (matchesConcrete(next)) return true;
+        }
+        return false;
+      };
+
+      const shouldSkipGenericPresence = (it: FeedItem, idx: number, raw: FeedItem[], who: string): boolean => {
+        if (it.kind !== "presence") return false;
+        const stRaw = typeof (it.details as any)?.state === "string" ? String((it.details as any).state) : "";
+        if (stRaw === "reply") return hasConcreteNeighbor(it, idx, raw, who, "reply");
+        if (stRaw === "idle") return hasConcreteNeighbor(it, idx, raw, who, "idle");
+        if (stRaw !== "thinking") return false;
+        const what = humanStateLabel(stRaw, { ...((it.details as any) || {}), recentEvents: raw });
+        if (what && what !== "Thinking") return false;
+        return hasConcreteNeighbor(it, idx, raw, who, "thinking");
+      };
 
       const shouldSkipPresenceTool = (it: FeedItem, idx: number, raw: FeedItem[], who: string): boolean => {
         if (it.kind !== "presence") return false;
@@ -2022,6 +2081,7 @@ export default {
           }
 
           if (shouldSkipPresenceTool(it, i, raw, who)) continue;
+          if (shouldSkipGenericPresence(it, i, raw, who)) continue;
 
           const rowItem = (it.kind === "presence" || it.kind === "state")
             ? { ...it, details: { ...((it.details as any) || {}), recentEvents: raw } }

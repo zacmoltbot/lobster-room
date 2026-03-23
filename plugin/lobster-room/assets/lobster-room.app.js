@@ -2348,10 +2348,13 @@
         let out = feedRedact(raw).replace(/[\r\n\t]+/g, ' ').replace(/\s+/g, ' ').trim();
         if(!out) return '';
         out = out
+          .replace(/^(["'“”‘’])\s*(.*?)\s*\1$/u, '$2')
           .replace(/\b[\w.+-]+@[\w.-]+\.[A-Za-z]{2,}\b/g, '[redacted email]')
           .replace(/\b(?:\+?\d[\d\s().-]{6,}\d)\b/g, '[redacted number]')
-          .replace(/\b\d{4,}\b/g, '[redacted]');
+          .replace(/\b\d{4,}\b/g, '[redacted]')
+          .trim();
         if(!out || /^\[(?:redacted|hex_redacted|url|session)\]$/i.test(out)) return '';
+        if(/^(replying|reply|message|sent)$/i.test(out)) return '';
         const lim = Math.max(8, Number(maxLen||48));
         if(out.length > lim) out = out.slice(0, lim - 1).trimEnd() + '…';
         return '"' + out + '"';
@@ -2409,7 +2412,7 @@
         if(!out) return '';
         out = out.replace(/^[\s:;,.\-–—]+/, '').replace(/[\s:;,.\-–—]+$/, '').trim();
         if(!out) return '';
-        if(/^(tool|command|task|session|agent|cron|scheduled|schedule|spawn)$/i.test(out)) return '';
+        if(/^(tool|command|task|session|agent|cron|scheduled|schedule|spawn|channel|conversation|thread)$/i.test(out)) return '';
         const lim = Math.max(12, Number(maxLen||96));
         if(out.length > lim) out = out.slice(0, lim - 1).trimEnd() + '…';
         return out;
