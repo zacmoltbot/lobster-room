@@ -1817,6 +1817,7 @@ export default {
       if (st === "idle") return "Idle";
       if (st === "tool") return toolStateSummary(details || {});
       if (st === "error") return "Error";
+      if (/^(channel|conversation|thread|session)$/i.test(st)) return "";
       return st || "State update";
     };
 

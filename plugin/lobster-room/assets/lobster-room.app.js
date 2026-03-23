@@ -2557,6 +2557,7 @@
       if(st === 'thinking') return feedThinkingText(details, recentEvents) || feedInferRecentActivity(details, recentEvents) || 'thinking';
       if(st === 'error') return 'error';
       if(st === 'idle' || st === 'wait') return 'idle';
+      if(/^(channel|conversation|thread|session)$/i.test(st)) return '';
       return st || 'idle';
     }
 
