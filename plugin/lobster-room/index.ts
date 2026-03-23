@@ -1852,8 +1852,21 @@ export default {
         return false;
       };
 
+      const rowSignalRank = (it: FeedItem, kind: FeedRowV3["kind"]): number => {
+        const stRaw = typeof (it.details as any)?.state === "string" ? String((it.details as any).state) : "";
+        const isPresence = kind === "presence" || kind === "state" || it.kind === "presence" || it.kind === "state";
+        if (kind === "error" || stRaw === "error") return 3;
+        if (kind === "before_tool_call" || kind === "after_tool_call" || kind === "message_sending") return 2;
+        if (isPresence) {
+          if (stRaw === "idle") return 0;
+          if (!isMeaningfulActivityDetails(it.details)) return 0;
+          return 1;
+        }
+        return 1;
+      };
+
       // Track the last aggregated row per agent for short-window collapsing.
-      const lastAggByAgent = new Map<string, { outIdx: number; ts: number }>();
+      const lastAggByAgent = new Map<string, { outIdx: number; ts: number; signalRank: number }>();
 
       const toolPresenceMergeWindowMs = 1200;
 
@@ -1886,20 +1899,24 @@ export default {
       };
 
       // Short-window aggregation: collapse rapid sequences (within 8s) into one semantic row.
-      // The newer event's label wins since it carries more context (e.g. "Thinking" → "Run a command").
+      // The newer event only wins when it is at least as meaningful as the row already kept.
       const pushRow = (it: FeedItem, what: string, kind: FeedRowV3["kind"], agentId: string, sessionKey?: string, taskId?: string) => {
         const agentKey = agentId.trim();
         const agg = lastAggByAgent.get(agentKey);
+        const nextSignalRank = rowSignalRank(it, kind);
 
         if (agg && isCollapsibleKind(kind, it)) {
           const prevRow = out[agg.outIdx];
           const withinWindow = Math.abs(it.ts - agg.ts) <= AGGREGATION_WINDOW_MS;
           if (withinWindow) {
-            // Collapse: update the existing row's label with the more semantic version.
-            prevRow.what = what;
-            prevRow.plain = what;
-            prevRow.action = what;
-            prevRow.ts = it.ts; // refresh to newest event time
+            // Keep aggregation, but do not let a lower-signal terminal row overwrite meaningful activity.
+            if (nextSignalRank >= agg.signalRank) {
+              prevRow.what = what;
+              prevRow.plain = what;
+              prevRow.action = what;
+              prevRow.ts = it.ts; // refresh to newest event time
+              agg.signalRank = nextSignalRank;
+            }
             agg.ts = it.ts;
             return;
           }
@@ -1920,7 +1937,7 @@ export default {
           action: what,
         };
         out.push(row);
-        lastAggByAgent.set(agentKey, { outIdx: out.length - 1, ts: it.ts });
+        lastAggByAgent.set(agentKey, { outIdx: out.length - 1, ts: it.ts, signalRank: nextSignalRank });
       };
 
       for (const task of tasks) {
