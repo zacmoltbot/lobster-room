@@ -1,5 +1,5 @@
     // UI build stamp (bump this when you deploy so we can confirm which frontend is running).
-    const UI_VERSION = 'feed-v3-20260322.3';
+    const UI_VERSION = 'feed-v3-20260323.1';
 
     // Soft muted color palette for agent name coloring (deterministic, dark-background friendly).
     const AGENT_COLORS = ['#7eb8da','#b4a7d6','#8dd49e','#e6b89c','#d4a5c9','#8ecfc9','#d4c88a'];
@@ -2392,13 +2392,14 @@
     }
 
     function feedReplyingText(details, recentEvents){
+      const target = feedReplyTarget(details, recentEvents);
       const pv = feedScrubReplyPreview(feedReplyPreviewValue(details, recentEvents), 48);
-      return pv ? ('replying — ' + pv) : 'replying';
+      const head = target ? ('replying to ' + target) : 'replying';
+      return pv ? (head + ' — ' + pv) : head;
     }
 
     function feedReplyingNow(details, recentEvents){
-      const target = feedReplyTarget(details, recentEvents);
-      return target ? ('replying to ' + target) : 'replying';
+      return feedReplyingText(details, recentEvents);
     }
 
     function feedSpecificLabel(raw, maxLen){
@@ -2519,6 +2520,7 @@
     function feedActivityFromTool(toolName, details, recentEvents, opts){
       const compact = !!(opts && opts.compact);
       const tn = String(toolName || '').trim().toLowerCase();
+      if(tn === 'channel' || tn === 'conversation' || tn === 'thread' || tn === 'session') return '';
       if(tn === 'browser') return compact ? 'checking in browser' : 'inspecting in browser';
       if(tn === 'exec') return compact ? feedCommandActivity(details && details.command) : feedCommandIntent(details && details.command);
       if(tn === 'read') return compact ? 'reviewing project files' : 'reading project files';
@@ -2550,7 +2552,7 @@
     function feedHumanState(state, toolName, details, recentEvents){
       const st = String(state || '').trim().toLowerCase();
       const tn = String(toolName || '').trim().toLowerCase();
-      if(st === 'tool') return feedActivityFromTool(tn, details, recentEvents, {compact:true});
+      if(st === 'tool') return feedActivityFromTool(tn, details, recentEvents, {compact:true}) || 'working';
       if(st === 'reply') return feedReplyingNow(details, recentEvents);
       if(st === 'thinking') return feedThinkingText(details, recentEvents) || feedInferRecentActivity(details, recentEvents) || 'thinking';
       if(st === 'error') return 'error';

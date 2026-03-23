@@ -171,7 +171,7 @@ function contentTypeByExt(ext: string): string | null {
   return null;
 }
 
-const BUILD_TAG = "feed-v3-20260315.19";
+const BUILD_TAG = "feed-v3-20260323.1";
 
 export default {
   id: "lobster-room",
@@ -1486,6 +1486,7 @@ export default {
     const genericToolLabel = (toolName: unknown): string => {
       const tn = typeof toolName === "string" ? toolName.trim() : "";
       if (!tn) return "Working";
+      if (["channel", "conversation", "thread", "session"].includes(tn)) return "";
       if (tn === "message") return "Preparing a reply";
       if (tn === "web_fetch") return "Checking a page";
       if (tn === "web_search") return "Searching the web";
@@ -1612,8 +1613,21 @@ export default {
       return "";
     };
 
+    const replyTargetValue = (details: any, recentEvents?: any[]): string => {
+      const direct = safeReplyTarget(details?.to || details?.target || details?.user || details?.name);
+      if (direct) return direct;
+      const evs = Array.isArray(recentEvents) ? recentEvents : [];
+      for (let i = evs.length - 1; i >= 0; i -= 1) {
+        const ev = evs[i];
+        if (String(ev?.kind || "") !== "message_sending") continue;
+        const value = safeReplyTarget(ev?.data?.to || ev?.details?.to || ev?.data?.target || ev?.details?.target);
+        if (value) return value;
+      }
+      return "";
+    };
+
     const replyingSummary = (details: any, recentEvents?: any[]): string => {
-      const target = safeReplyTarget(details?.to || details?.target);
+      const target = replyTargetValue(details, recentEvents);
       const preview = scrubReplyPreview(replyPreviewValue(details, recentEvents), 48);
       const head = target ? `Replying to ${target}` : "Replying";
       return preview ? `${head} — ${preview}` : head;
@@ -1768,6 +1782,25 @@ export default {
 
     const thinkingSummary = (details: any, recentEvents?: any[]): string => workContextSummary(details, recentEvents);
 
+    const taskBoundarySummary = (task: any, phase: "start" | "end"): string => {
+      const details = {
+        title: task?.title,
+        sessionKey: task?.sessionKey,
+        parentSessionKey: task?.parentSessionKey,
+        spawnedBy: task?.spawnedBy,
+      };
+      const label = detailTaskLabel(details);
+      const ctx = inferWorkContext(details);
+      if (phase === "start") {
+        if (ctx === "helper") return label ? `Starting helper task — ${label}` : "Starting helper task";
+        if (ctx === "scheduled") return label ? `Running scheduled task — ${label}` : "Running scheduled task";
+        return label ? `Starting task — ${label}` : "Starting task";
+      }
+      if (ctx === "helper") return label ? `Helper task finished — ${label}` : "Helper task finished";
+      if (ctx === "scheduled") return label ? `Scheduled task finished — ${label}` : "Scheduled task finished";
+      return label ? `Task finished — ${label}` : "Task finished";
+    };
+
     const humanStateLabel = (stRaw: string, details?: any): string => {
       const st = stRaw === "reply" ? "replying"
         : stRaw === "tool" ? "tool"
@@ -1791,6 +1824,7 @@ export default {
         const isHeartbeat = !!(it.details as any)?.heartbeat;
         if (isHeartbeat && stRaw && stRaw !== "idle" && stRaw !== "error") return null;
         const what = humanStateLabel(stRaw, it.details || {});
+        if (!what) return null;
         return { kind: stRaw === "error" ? "error" : it.kind, what };
       }
 
@@ -1952,14 +1986,14 @@ export default {
 
           // Task boundaries: render meaningful started/ended rows.
           if (it.kind === "before_agent_start") {
-            const title = redactLine(task.title || "Agent run", 120);
-            pushRow(it, `started — ${title}`, it.kind, who, sessionKey, task.id);
+            pushRow(it, taskBoundarySummary(task, "start"), it.kind, who, sessionKey, task.id);
             continue;
           }
           if (it.kind === "agent_end") {
-            const title = redactLine(task.title || "Agent run", 120);
             const ok = task.status !== "error";
-            pushRow(it, `ended — ${title} (${ok ? "ok" : "failed"})`, ok ? it.kind : "error", who, sessionKey, task.id);
+            let what = taskBoundarySummary(task, "end");
+            if (!ok) what = `${what} (failed)`;
+            pushRow(it, what, ok ? it.kind : "error", who, sessionKey, task.id);
             continue;
           }
 
