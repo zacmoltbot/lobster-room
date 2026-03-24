@@ -1778,7 +1778,7 @@ export default {
 
     const commandCompletedSummary = (raw: unknown): string => {
       const cmd = typeof raw === "string" ? raw.replace(/\s+/g, " ").trim() : "";
-      if (!cmd) return "Completed command";
+      if (!cmd) return "Ran a command";
       const lower = cmd.toLowerCase();
       const tests: Array<[RegExp, string]> = [
         [/\bgit\s+status\b/, "Checked repo status"],
@@ -1937,7 +1937,7 @@ export default {
       }
       if (ctx === "helper") return naturalLabel ? `Helper task finished — ${naturalLabel}` : "Helper task finished";
       if (ctx === "scheduled") return naturalLabel ? `Scheduled task finished — ${naturalLabel}` : "Scheduled task finished";
-      if (isCommandishLabel(label)) return "Completed command";
+      if (isCommandishLabel(label)) return "Ran a command";
       return naturalLabel ? `Task finished — ${naturalLabel}` : "Task finished";
     };
 
