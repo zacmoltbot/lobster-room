@@ -1798,7 +1798,12 @@ export default {
         if (re.test(lower)) return label;
       }
       const safe = redactLine(cmd, 80);
-      return safe ? `Completed command — ${safe}` : "Completed command";
+      // If safe summary looks like only a path/URL with no readable content, use generic.
+      // Raw paths (starting with /) or URLs are not user-facing.
+      if (safe && /^\s*[\/~.\w-]*\//.test(safe)) {
+        return "Ran a command";
+      }
+      return safe ? `Completed command — ${safe}` : "Ran a command";
     };
 
     const toolCompletedSummary = (it: FeedItem): string => {
@@ -1828,7 +1833,7 @@ export default {
 
       const summary = toolHumanSummary(it);
       const safeSummary = summary ? summary.replace(/\s*for current task$/i, "").trim() : "";
-      return safeSummary ? `Completed command — ${safeSummary}` : "Completed command";
+      return safeSummary ? `Completed command — ${safeSummary}` : "Ran a command";
     };
 
     const toolHumanSummary = (it: FeedItem): string => {
