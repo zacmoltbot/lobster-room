@@ -9,7 +9,7 @@ type PluginApi = {
   logger: { info: (msg: string, meta?: any) => void; warn: (msg: string, meta?: any) => void };
   registerHttpRoute: (params: {
     path: string;
-    method?: string;
+    match?: "exact" | "prefix";
     handler: (req: IncomingMessage, res: ServerResponse) => void | Promise<void>;
   }) => void;
   on: (hookName: string, handler: (event: any, ctx: any) => any, opts?: { priority?: number }) => void;
@@ -292,6 +292,7 @@ export default {
     // --- Static assets: /lobster-room/assets/** → <pluginDir>/assets/** ---
     api.registerHttpRoute({
       path: "/lobster-room/assets/",
+      match: "prefix",
       handler: async (req, res) => {
         const url = readRequestUrl(req);
         let rel = url.pathname?.slice("/lobster-room/assets/".length) || "";
@@ -1346,6 +1347,7 @@ export default {
     // HTTP: portal
     api.registerHttpRoute({
       path: "/lobster-room/",
+      match: "prefix",
       handler: async (_req, res) => {
         try {
           const html = await fs.readFile(portalHtmlPath, "utf8");
