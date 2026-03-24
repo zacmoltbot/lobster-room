@@ -3091,6 +3091,8 @@
       const agentLabelsStatus = document.getElementById('agent-labels-status');
       const agentLabelsTa = document.getElementById('agent-labels-ta');
       const btnAgentLabelsOpen = document.getElementById('btn-agent-labels-open');
+      const retentionSelect = document.getElementById('retention-select');
+      const retentionStatus = document.getElementById('retention-status');
 
       // Labels modal
       const labelsBackdrop = document.getElementById('labels-backdrop');
@@ -3111,6 +3113,17 @@
       const openSettings = ()=>{
         if(backdrop && backdrop.classList) backdrop.classList.add('show');
         refreshRoomsList();
+        // Load retention setting
+        (async ()=>{
+          if(!retentionSelect) return;
+          try{
+            const r = await fetch('./api/retention?ts=' + Date.now(), {cache:'no-store'});
+            const j = r.ok ? await r.json() : null;
+            if(j && j.retentionMs != null){
+              retentionSelect.value = String(j.retentionMs);
+            }
+          }catch{}
+        })();
         // Load agent label mapping
         (async ()=>{
           if(!agentLabelsTa) return;
@@ -3231,6 +3244,27 @@
         applyLobsterSize();
         if(lobsterSize) lobsterSize.addEventListener('input', applyLobsterSize);
         if(lobsterSize) lobsterSize.addEventListener('change', applyLobsterSize);
+      })();
+
+      (function initRetention(){
+        if(!retentionSelect) return;
+        if(retentionSelect) retentionSelect.addEventListener('change', async ()=>{
+          if(!retentionSelect) return;
+          const val = retentionSelect.value;
+          if(retentionStatus) retentionStatus.textContent = 'Saving…';
+          try{
+            const r = await fetch('./api/retention', {method:'POST', headers:{'content-type':'application/json'}, body: JSON.stringify({retentionMs: Number(val)})});
+            const j = r.ok ? await r.json().catch(()=>null) : null;
+            if(j && j.ok){
+              if(retentionStatus) retentionStatus.textContent = 'Saved.';
+            }else{
+              if(retentionStatus) retentionStatus.textContent = 'Save failed.';
+            }
+          }catch{
+            if(retentionStatus) retentionStatus.textContent = 'Save failed.';
+          }
+          setTimeout(()=>{ if(retentionStatus) retentionStatus.textContent = ''; }, 2500);
+        });
       })();
 
 
