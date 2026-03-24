@@ -93,8 +93,8 @@ Edward 的瀏覽器
 
 | ID | 項目 | 狀態 | 備註 |
 |----|------|------|------|
-| P1.1 | Now panel 重建，走 detailTaskLabel() | 待執行 | Now 目前繞過白話 logic |
-| P1.2 | Conversation rows 修 Frontend | 待執行 | Backend 有，但 app.js fmtWhat() 沒處理 |
+| P1.1 | Now panel 重建，走 detailTaskLabel() | ⚠️ 脫 scope（Now panel 在 gateway 核心，非 plugin 範圍） | Now 目前繞過白話 logic |
+| P1.2 | Conversation rows 修 Frontend | ✅ 已完成（backend 已實作 conversationTurnSummary，frontend fmtWhat 只讀 r.what） | Backend 有，但 app.js fmtWhat() 沒處理 |
 | P1.3 | Internal token / jargon 全面 suppress | ✅ 完成（18f6e40） | subagent / discord 等 |
 | P1.4 | Completed command 最低資訊量 | ✅ 完成（f73b486/428adbc/77052b6） | 不能 alone 無意義結束 |
 | P1.5 | Raw command 不泄漏到 what | ✅ 完成（77052b6） | aggregation 時 command 不進 what |
