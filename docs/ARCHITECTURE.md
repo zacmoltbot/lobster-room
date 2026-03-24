@@ -105,13 +105,13 @@ Edward 的瀏覽器
 | ID | 項目 | 狀態 |
 |----|------|------|
 | P2.1 | History retention 設定 | ✅ 完成（d368755/6ce70fa/4ec5185） |
-| P2.2 | Settings panel UX | 待執行 |
+| P2.2 | Settings panel UX | ✅ 完成（2da67eb） |
 
 ### Phase 3：UX 品質
 
 | ID | 項目 | 狀態 |
 |----|------|------|
-| P3.1 | QA UX checklist 正式化 | 待執行 |
+| P3.1 | QA UX checklist 正式化 | ✅ 完成（9bb0c8e） |
 
 ---
 
