@@ -1773,6 +1773,11 @@ export default {
         if (re.test(lower)) return label;
       }
       const safe = redactLine(cmd, 80);
+      // If safe looks like a path/URL with no readable intent, suppress the suffix.
+      // Raw paths (starting with / ~ or containing http) are not user-facing.
+      if (safe && (/^\s*[\/~]/.test(safe) || /\w+:\/\//.test(safe))) {
+        return "Running a command";
+      }
       return safe ? `Running a command — ${safe}` : "Running a command";
     };
 
@@ -1833,6 +1838,10 @@ export default {
 
       const summary = toolHumanSummary(it);
       const safeSummary = summary ? summary.replace(/\s*for current task$/i, "").trim() : "";
+      // If safeSummary looks like only a path/URL, suppress it to avoid leaking internal paths.
+      if (safeSummary && /^\s*[\/~.\w-]*\//.test(safeSummary)) {
+        return "Ran a command";
+      }
       return safeSummary ? `Completed command — ${safeSummary}` : "Ran a command";
     };
 
