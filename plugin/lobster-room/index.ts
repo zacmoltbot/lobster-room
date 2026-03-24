@@ -3,19 +3,14 @@ import { fileURLToPath } from "node:url";
 import { dirname, join, extname } from "node:path";
 import fs from "node:fs/promises";
 
-type PluginRoute = {
-  path: string;
-  auth?: "gateway" | "plugin";
-  match?: "exact" | "prefix";
-  replaceExisting?: boolean;
-  handler: (req: IncomingMessage, res: ServerResponse) => boolean | void | Promise<boolean | void>;
-};
-
 type PluginApi = {
   id: string;
   config: any;
   logger: { info: (msg: string, meta?: any) => void; warn: (msg: string, meta?: any) => void };
-  registerHttpRoute: (params: PluginRoute) => void;
+  registerHttpRoute: (params: {
+    path: string;
+    handler: (req: IncomingMessage, res: ServerResponse) => void | Promise<void>;
+  }) => void;
   on: (hookName: string, handler: (event: any, ctx: any) => any, opts?: { priority?: number }) => void;
 };
 
@@ -25,38 +20,6 @@ function sendJson(res: ServerResponse, status: number, body: unknown) {
   res.setHeader("content-type", "application/json; charset=utf-8");
   res.setHeader("cache-control", "no-store");
   res.end(text);
-}
-
-function registerSafePluginRoute(api: PluginApi, route: PluginRoute) {
-  try {
-    api.registerHttpRoute({
-      auth: route.auth ?? "plugin",
-      ...route,
-      handler: async (req, res) => {
-        try {
-          const handled = await route.handler(req, res);
-          return handled !== false;
-        } catch (err: any) {
-          api.logger.warn("[lobster-room] route handler failed", {
-            path: route.path,
-            error: String(err?.message || err),
-          });
-          if (!res.headersSent) {
-            sendJson(res, 500, { ok: false, error: "internal_error", path: route.path });
-          } else if (!res.writableEnded) {
-            res.end();
-          }
-          return true;
-        }
-      },
-    });
-  } catch (err: any) {
-    api.logger.warn("[lobster-room] route registration skipped", {
-      path: route.path,
-      match: route.match ?? "exact",
-      error: String(err?.message || err),
-    });
-  }
 }
 
 async function readBody(req: IncomingMessage, maxBytes = 8 * 1024 * 1024): Promise<Buffer> {
@@ -146,16 +109,6 @@ function mapActivityToUiState(s: ActivityState): "think" | "wait" | "tool" | "re
   return s;
 }
 
-const LOW_SIGNAL_OBSERVATION_TOOLS = new Set(["sessions_history", "sessions_list", "session_status"]);
-
-function isLowSignalObservationTool(toolName: unknown): boolean {
-  return typeof toolName === "string" && LOW_SIGNAL_OBSERVATION_TOOLS.has(toolName.trim());
-}
-
-function isMeaningfulActivityDetails(details: unknown): boolean {
-  return !(details && typeof details === "object" && (details as any).meaningful === false);
-}
-
 function contentTypeByExt(ext: string): string | null {
   const e = ext.toLowerCase();
   if (e === ".svg") return "image/svg+xml; charset=utf-8";
@@ -171,7 +124,7 @@ function contentTypeByExt(ext: string): string | null {
   return null;
 }
 
-const BUILD_TAG = "feed-v3-20260323.1";
+const BUILD_TAG = "2026-03-08-debug-hooks-1";
 
 export default {
   id: "lobster-room",
@@ -180,8 +133,6 @@ export default {
     // Resolve asset path relative to this plugin module (NOT the gateway cwd).
     const pluginDir = dirname(fileURLToPath(import.meta.url));
     const portalHtmlPath = join(pluginDir, "assets", "lobster-room.html");
-    const bundledRoomImgPath = join(pluginDir, "assets", "default-room.jpg");
-    const bundledManualMapPath = join(pluginDir, "assets", "default-manual-map.json");
 
     // --- Rooms (multi-background profiles) ---
     const rootUserDir = join(pluginDir, "assets", "user");
@@ -338,12 +289,8 @@ export default {
     };
 
     // --- HTTP: dynamic handler (prefix routing) ---
-    // OpenClaw 2026.3.13 removed registerHttpHandler; use a prefix route instead.
-    registerSafePluginRoute(api, {
-      path: "/lobster-room",
-      auth: "plugin",
-      match: "prefix",
-      handler: async (req, res) => {
+    // OpenClaw plugin httpRoutes are exact-path matches; use httpHandler for prefix routes like static assets.
+    api.registerHttpHandler(async (req, res) => {
       const url = readRequestUrl(req);
       // Normalize trailing slashes so routes work with or without a final '/'
       const pRaw = url.pathname || "/";
@@ -373,22 +320,8 @@ export default {
           res.setHeader("cache-control", "no-store");
           res.end(buf);
         } catch {
-          if (rel === "user/activity.js") {
-            const payload = JSON.stringify({ status: "" });
-            res.statusCode = 200;
-            res.setHeader("content-type", "application/json; charset=utf-8");
-            res.setHeader("cache-control", "no-store");
-            res.end(payload);
-            // Best-effort seed so future reads succeed.
-            try {
-              const target = join(pluginDir, "assets", rel);
-              await fs.mkdir(dirname(target), { recursive: true });
-              await fs.writeFile(target, payload);
-            } catch {}
-          } else {
-            res.statusCode = 404;
-            res.end("not_found");
-          }
+          res.statusCode = 404;
+          res.end("not_found");
         }
         return true;
       }
@@ -541,30 +474,8 @@ export default {
             res.setHeader("cache-control", "no-store");
             res.end(txt);
           } catch {
-            try {
-              const txt = await fs.readFile(bundledManualMapPath, "utf8");
-              res.statusCode = 200;
-              res.setHeader("content-type", "application/json; charset=utf-8");
-              res.setHeader("cache-control", "no-store");
-              res.end(txt);
-              // Best-effort seed so future reads succeed.
-              try {
-                await fs.mkdir(dirname(mapPath), { recursive: true });
-                await fs.writeFile(mapPath, txt);
-              } catch {}
-            } catch {
-              const empty = { version: 1, tx: 32, ty: 20, cells: new Array(32 * 20).fill(null), updatedAt: null };
-              const txt = JSON.stringify(empty, null, 2);
-              res.statusCode = 200;
-              res.setHeader("content-type", "application/json; charset=utf-8");
-              res.setHeader("cache-control", "no-store");
-              res.end(txt);
-              // Best-effort seed so future reads succeed.
-              try {
-                await fs.mkdir(dirname(mapPath), { recursive: true });
-                await fs.writeFile(mapPath, txt);
-              } catch {}
-            }
+            res.statusCode = 404;
+            res.end("not_found");
           }
           return true;
         }
@@ -710,34 +621,8 @@ export default {
             res.statusCode = 200;
             res.end(buf);
           } catch {
-            try {
-              const st = await fs.stat(bundledRoomImgPath);
-              const etag = `W/"${st.size}-${Math.floor(st.mtimeMs)}"`;
-
-              res.setHeader("content-type", "image/jpeg");
-              res.setHeader("cache-control", "public, max-age=31536000, immutable");
-              res.setHeader("etag", etag);
-              res.setHeader("last-modified", st.mtime.toUTCString());
-
-              const inm = String(req.headers["if-none-match"] || "");
-              if (inm && inm === etag) {
-                res.statusCode = 304;
-                res.end();
-                return true;
-              }
-
-              const buf = await fs.readFile(bundledRoomImgPath);
-              res.statusCode = 200;
-              res.end(buf);
-              // Best-effort seed so future reads succeed.
-              try {
-                await fs.mkdir(dirname(imgPath), { recursive: true });
-                await fs.writeFile(imgPath, buf);
-              } catch {}
-            } catch {
-              res.statusCode = 404;
-              res.end("not_found");
-            }
+            res.statusCode = 404;
+            res.end("not_found");
           }
           return true;
         }
@@ -785,7 +670,6 @@ export default {
       }
 
       return false;
-      },
     });
 
     const cooldownMs = Number.parseInt((process.env.LOBSTER_ROOM_IDLE_COOLDOWN_MS || "1500").trim(), 10) || 1500;
@@ -892,218 +776,6 @@ export default {
       } catch {}
     };
 
-    const syncSnapshotAgent = (agentId: string, state: ActivityState, details?: Record<string, unknown> | null, ts?: number) => {
-      try {
-        const t = typeof ts === "number" && Number.isFinite(ts) ? ts : nowMs();
-        const prev = snap.agents[agentId];
-        snap.agents[agentId] = {
-          state,
-          sinceMs: prev?.state === state && typeof prev?.sinceMs === "number" ? prev.sinceMs : t,
-          lastEventMs: t,
-          details: details ?? null,
-        };
-        snap.updatedAtMs = t;
-        writeSnapshotSoon();
-      } catch {}
-    };
-
-    const readSnapshotDisk = async (): Promise<ActivitySnapshot | null> => {
-      try {
-        const txt = await fs.readFile(snapshotPath, "utf8");
-        const obj = JSON.parse(txt);
-        if (obj && typeof obj === "object" && typeof (obj as any).buildTag === "string") return obj as any;
-      } catch {
-        return null;
-      }
-      return null;
-    };
-
-    const collectAllowedAgentIds = (snapDisk: ActivitySnapshot | null): string[] => {
-      const agentIdAllowRaw = (process.env.LOBSTER_ROOM_AGENT_IDS || "").trim();
-      let allowIds: string[] = [];
-      if (agentIdAllowRaw) {
-        allowIds = agentIdAllowRaw
-          .split(",")
-          .map((s) => s.trim())
-          .filter(Boolean);
-      } else {
-        const ids: string[] = [];
-        const seen = new Set<string>();
-        const agentListRaw = Array.isArray(api.config?.agents?.list) ? api.config.agents.list : [];
-        for (const a of agentListRaw) {
-          const id = a?.id;
-          if (typeof id === "string" && id.trim() && !seen.has(id.trim())) {
-            ids.push(id.trim());
-            seen.add(id.trim());
-          }
-        }
-        for (const id of activity.keys()) {
-          if (id && !seen.has(id)) {
-            ids.push(id);
-            seen.add(id);
-          }
-        }
-        const snapAgentIds = snapDisk && snapDisk.agents ? Object.keys(snapDisk.agents) : [];
-        for (const id of snapAgentIds) {
-          if (id && !seen.has(id)) {
-            ids.push(id);
-            seen.add(id);
-          }
-        }
-        if (!seen.has("main")) {
-          ids.push("main");
-          seen.add("main");
-        }
-        allowIds = ids.length ? ids : ["main"];
-      }
-      return allowIds;
-    };
-
-    const activitySnapshotCacheMs = Math.max(1000, Math.min(10000, Number.parseInt((process.env.LOBSTER_ROOM_ACTIVITY_CACHE_MS || "3000").trim(), 10) || 3000));
-    let activitySnapshotCache: { at: number; value: ActivitySnapshot | null; inFlight: Promise<ActivitySnapshot> | null } = {
-      at: 0,
-      value: null,
-      inFlight: null,
-    };
-
-    const deriveActivitySnapshot = async (): Promise<ActivitySnapshot> => {
-      const cachedAge = nowMs() - activitySnapshotCache.at;
-      if (activitySnapshotCache.value && cachedAge >= 0 && cachedAge < activitySnapshotCacheMs) return activitySnapshotCache.value;
-      if (activitySnapshotCache.inFlight) return activitySnapshotCache.inFlight;
-
-      const run = async (): Promise<ActivitySnapshot> => {
-      const t = nowMs();
-      const snapDisk = await readSnapshotDisk();
-      const allowIds = collectAllowedAgentIds(snapDisk);
-      for (const id of allowIds) ensure(id);
-
-      const gatewayToken: string | null = typeof api.config?.gateway?.auth?.token === "string" ? api.config.gateway.auth.token : null;
-      const invokeUrl = "http://127.0.0.1:18789/tools/invoke";
-      const invoke = async (tool: string, args: any) => {
-        const headers: Record<string, string> = { "content-type": "application/json" };
-        if (gatewayToken) headers.authorization = `Bearer ${gatewayToken}`;
-        const resp = await fetch(invokeUrl, { method: "POST", headers, body: JSON.stringify({ tool, args }) });
-        const data = await resp.json();
-        if (!data?.ok) throw new Error(String(data?.error || "invoke_failed"));
-        return data;
-      };
-
-      const skToAgentId = (sk: unknown): string | null => {
-        if (typeof sk !== "string") return null;
-        const m = sk.match(/^agent:([^:]+):/);
-        return m && m[1] ? m[1] : null;
-      };
-
-      let sessions: any[] = [];
-      try {
-        const r = await invoke("sessions_list", {});
-        const details = r?.result?.details || {};
-        sessions = Array.isArray(details.sessions) ? details.sessions : [];
-      } catch {
-        sessions = [];
-      }
-
-      const sessionsByAgent = new Map<string, any[]>();
-      for (const s of sessions) {
-        const aid = skToAgentId(s?.key);
-        if (!aid) continue;
-        const arr = sessionsByAgent.get(aid) || [];
-        arr.push(s);
-        sessionsByAgent.set(aid, arr);
-      }
-
-      const agents: ActivitySnapshot["agents"] = {};
-      let updatedAtMs = snapDisk?.updatedAtMs || 0;
-
-      for (const agentId of allowIds) {
-        const list = (sessionsByAgent.get(agentId) || []).filter((s) => typeof s?.key === "string");
-        list.sort((a, b) => (Number(b?.updatedAt || 0) - Number(a?.updatedAt || 0)));
-
-        const maxUpdatedAt = list.length ? Number(list[0]?.updatedAt || 0) : 0;
-        const recent = !!(maxUpdatedAt && (t - maxUpdatedAt) <= staleMs);
-
-        let queueDepth: number | null = null;
-        let statusText: string | null = null;
-        if (list.length) {
-          try {
-            const r2 = await invoke("session_status", { sessionKey: String(list[0].key) });
-            const det2 = r2?.result?.details || {};
-            const qd = det2.queueDepth ?? det2?.queue?.depth;
-            if (Number.isFinite(Number(qd))) queueDepth = Number(qd);
-            if (typeof det2.statusText === "string") statusText = det2.statusText;
-          } catch {}
-        }
-
-        let lastType: string | null = null;
-        let lastRole: string | null = null;
-        let historyTypes: string[] = [];
-        if (list.length) {
-          try {
-            const r3 = await invoke("sessions_history", { sessionKey: String(list[0].key), limit: 8 });
-            const msgs = r3?.result?.details?.messages || [];
-            const last = Array.isArray(msgs) && msgs.length ? msgs[0] : null;
-            lastRole = typeof last?.role === "string" ? last.role : null;
-            const c = last?.content;
-            if (Array.isArray(c)) {
-              for (const part of c) {
-                if (part && typeof part === "object" && typeof part.type === "string") historyTypes.push(part.type);
-              }
-              lastType = historyTypes[0] || null;
-            }
-          } catch {}
-        }
-
-        let activityState: ActivityState = "idle";
-        const snapRow = snapDisk?.agents?.[agentId];
-        const snapFresh = !!(snapRow && typeof snapRow.lastEventMs === "number" && (t - snapRow.lastEventMs) <= staleMs);
-        if (snapFresh) {
-          activityState = isMeaningfulActivityDetails(snapRow?.details)
-            ? (snapRow.state as ActivityState)
-            : "idle";
-        } else if (typeof queueDepth === "number" && queueDepth > 0) {
-          activityState = "thinking";
-        } else if (recent && lastType === "toolCall") {
-          activityState = "tool";
-        } else if (recent && lastType === "text" && lastRole === "assistant") {
-          activityState = "reply";
-        } else {
-          activityState = "idle";
-        }
-
-        const sinceOut = snapFresh ? (snapRow?.sinceMs || null) : (maxUpdatedAt || null);
-        const lastOut = snapFresh ? (snapRow?.lastEventMs || null) : (maxUpdatedAt || null);
-        const details = snapFresh ? (snapRow?.details || null) : { queueDepth, statusText, historyTypes, lastRole, lastType };
-
-        agents[agentId] = {
-          state: activityState,
-          sinceMs: sinceOut || t,
-          lastEventMs: lastOut || t,
-          details: details || null,
-        };
-        if (typeof lastOut === "number" && Number.isFinite(lastOut)) updatedAtMs = Math.max(updatedAtMs, lastOut);
-      }
-
-      if (!updatedAtMs) updatedAtMs = t;
-
-      return {
-        buildTag: BUILD_TAG,
-        updatedAtMs,
-        agents,
-        events: snapDisk?.events || [],
-      };
-      };
-
-      activitySnapshotCache.inFlight = run();
-      try {
-        const snapshot = await activitySnapshotCache.inFlight;
-        activitySnapshotCache = { at: nowMs(), value: snapshot, inFlight: null };
-        return snapshot;
-      } catch (err) {
-        activitySnapshotCache.inFlight = null;
-        throw err;
-      }
-    };
-
     const pushEvent = (kind: string, params: { agentId?: string; data?: any }) => {
       const ev = { ts: nowMs(), kind, agentId: params.agentId, data: params.data };
       eventBuf.push(ev);
@@ -1123,9 +795,7 @@ export default {
       | "tool_result_persist"
       | "message_sending"
       | "message_sent"
-      | "agent_end"
-      | "presence"
-      | "conversation_turn";
+      | "agent_end";
 
     type FeedItem = {
       ts: number;
@@ -1144,28 +814,9 @@ export default {
 
     const FEED_MAX = Math.max(500, Number(api.config?.feedMaxItems) || 0, 600);
     const feedBuf: FeedItem[] = [];
-    const FEED_PRESENCE_MIN_MS = Math.max(2000, Number(api.config?.feedPresenceMinMs) || 0);
-    const FEED_HEARTBEAT_MS = Math.max(5000, Number(api.config?.feedPresenceHeartbeatMs) || 0);
-    const lastPresenceByAgent = new Map<string, { state: ActivityState; ts: number; toolName?: string }>();
-    const lastFeedByAgent = new Map<string, number>();
-
-    // Synthetic feed events for spawned sub-agents (sessions_spawn).
-    // The runtime doesn't currently emit feed hooks for child agents unless they use /tools/invoke.
-    type SpawnInfo = {
-      childAgentId: string;
-      childSessionKey: string;
-      startTs: number;
-    };
-    const spawnStacksByAgent = new Map<string, SpawnInfo[]>();
-
 
     const redactSecretsInText = (s: string): string => {
       let out = String(s || "");
-
-      // OpenClaw tool call ids / file cache ids can appear in logs as call_*/fc_* tokens.
-      // Redact them WITHOUT leaking the prefixes (no literal 'call_' / 'fc_' should remain).
-      // Match even when embedded (e.g. JSON, markdown, stack traces).
-      out = out.replace(/(?:call|fc)_[A-Za-z0-9_-]{6,}/g, '[OC_ID_REDACTED]'); // CALL_FC_REDACTED
 
       // URLs can leak tokens/hostnames; replace with a placeholder.
       out = out.replace(/\bhttps?:\/\/[^\s)\]]+/gi, "[URL]");
@@ -1199,18 +850,6 @@ export default {
 
     const feedPreview = (it: FeedItem): string => {
       const agent = it.agentId ? `@${it.agentId}` : "";
-      if (it.kind === "presence") {
-        const stRaw = typeof (it.details as any)?.state === "string" ? String((it.details as any).state) : "";
-        const st = stRaw === "reply" ? "replying"
-          : stRaw === "tool" ? "tool"
-          : stRaw === "thinking" ? "thinking"
-          : stRaw === "idle" ? "idle"
-          : stRaw === "error" ? "error"
-          : stRaw;
-        const tn = typeof it.toolName === "string" ? it.toolName : (typeof (it.details as any)?.toolName === "string" ? (it.details as any).toolName : "");
-        const tail = (stRaw === "tool" && tn) ? `: ${tn}` : "";
-        return `${agent} ${st}${tail}`.trim();
-      }
       if (it.kind === "before_agent_start") return `${agent} started`;
       if (it.kind === "before_tool_call") {
         const tn = it.toolName || "tool";
@@ -1224,11 +863,7 @@ export default {
         const d = typeof it.durationMs === "number" ? ` (${Math.round(it.durationMs)}ms)` : "";
         return `${agent} ${tn} done${d}`.trim();
       }
-      if (it.kind === "tool_result_persist") {
-        // tool_result_persist is an internal storage hook — do not surface raw event name.
-        // Show a neutral, user-facing label instead.
-        return `${agent} Working`.trim();
-      }
+      if (it.kind === "tool_result_persist") return `${agent} tool result persisted`;
       if (it.kind === "message_sending") {
         const to = it.to ? redactSecretsInText(it.to) : "(unknown)";
         return `sending message → ${to}`;
@@ -1242,62 +877,12 @@ export default {
         if (it.success === false) return `${agent} ended (error)`;
         return `${agent} ended`;
       }
-      if (it.kind === "state") {
-        const st = String((it.details as any)?.state || "");
-        return st ? `${agent} state → ${st}` : `${agent} state changed`;
-      }
       return it.kind;
     };
 
     const pushFeed = (item: FeedItem) => {
       feedBuf.push(item);
-      if (typeof item.agentId === "string" && item.agentId.trim()) {
-        lastFeedByAgent.set(item.agentId.trim(), item.ts || nowMs());
-      }
       if (feedBuf.length > FEED_MAX) feedBuf.splice(0, feedBuf.length - FEED_MAX);
-    };
-
-    const pushPresence = (
-      agentId: string,
-      state: ActivityState,
-      details?: Record<string, unknown> | null,
-      opts?: { force?: boolean; heartbeat?: boolean },
-    ) => {
-      const t = nowMs();
-      const toolName = typeof (details as any)?.toolName === "string" ? String((details as any).toolName) : undefined;
-      const prev = lastPresenceByAgent.get(agentId);
-      const force = !!opts?.force;
-      if (!force && prev && prev.state === state && (prev.toolName || "") === (toolName || "")) return;
-      if (!force && prev && (t - prev.ts) < FEED_PRESENCE_MIN_MS) return;
-      lastPresenceByAgent.set(agentId, { state, ts: t, toolName });
-      const detailPayload: Record<string, unknown> = { state, toolName };
-      if (opts?.heartbeat) detailPayload.heartbeat = true;
-      const extra: any = details && typeof details === "object" ? details : null;
-      if (extra) {
-        if (typeof extra.command === "string" || Array.isArray(extra.command)) detailPayload.command = extra.command;
-        if (typeof extra.action === "string") detailPayload.action = extra.action;
-        if (typeof extra.targetUrl === "string") detailPayload.targetUrl = extra.targetUrl;
-        if (typeof extra.ref === "string") detailPayload.ref = extra.ref;
-        if (typeof extra.selector === "string") detailPayload.selector = extra.selector;
-        if (typeof extra.op === "string") detailPayload.op = extra.op;
-        if (typeof extra.url === "string") detailPayload.url = extra.url;
-        if (typeof extra.sessionKey === "string") detailPayload.sessionKey = extra.sessionKey;
-        if (typeof extra.messageProvider === "string") detailPayload.messageProvider = extra.messageProvider;
-        if (typeof extra.spawnedBy === "string") detailPayload.spawnedBy = extra.spawnedBy;
-        if (typeof extra.to === "string") detailPayload.to = extra.to;
-        if (typeof extra.target === "string") detailPayload.target = extra.target;
-      }
-
-      if (opts?.heartbeat) return;
-
-      pushFeed({
-        ts: t,
-        kind: "presence",
-        agentId,
-        sessionKey: typeof (details as any)?.sessionKey === "string" ? String((details as any).sessionKey) : undefined,
-        toolName,
-        details: detailPayload,
-      });
     };
 
     type FeedTaskStatus = "running" | "done" | "error";
@@ -1327,34 +912,12 @@ export default {
         }
       }
 
-      // Scheduled/background sessions: prefer concrete labels when we can infer them.
-      const firstCtx = items.find((x) => x.kind === "before_agent_start" || x.kind === "presence" || x.kind === "state");
-      const ctxDetails = firstCtx?.details || { sessionKey: firstCtx?.sessionKey };
-      const ctxKind = inferWorkContext(ctxDetails);
-      if (ctxKind === "scheduled") {
-        const label = detailTaskLabel(ctxDetails, items);
-        return label ? `Scheduled task — ${label}` : "Scheduled task";
-      }
-      if (ctxKind === "helper") {
-        const label = detailTaskLabel(ctxDetails, items);
-        return label ? `Helper task — ${label}` : "Helper task";
-      }
-
-      // Otherwise infer intent from the first meaningful user-facing tool call(s).
-      const first = items.find((x) => {
+      // Otherwise, use the first meaningful user-facing tool label.
+      const firstTool = items.find((x) => {
         if (x.kind !== "before_tool_call" || !x.toolName) return false;
-        const tn = String(x.toolName).trim();
-        return !!genericToolLabel(tn);
+        return !!genericToolLabel(String(x.toolName).trim());
       })?.toolName;
-      if (first) {
-        const tn = String(first);
-        if (tn === "browser") return "QA in browser";
-        if (tn === "read") return "Review project files";
-        if (tn === "write" || tn === "edit") return "Update project files";
-        if (tn === "exec") return "Run a command";
-        if (tn === "message") return "Prepare a reply";
-        return genericToolLabel(tn) || "Agent run";
-      }
+      if (firstTool) return genericToolLabel(String(firstTool).trim()) || "Agent run";
 
       return "Agent run";
     };
@@ -1425,974 +988,6 @@ export default {
       return tasks.sort((a, b) => b.startTs - a.startTs);
     };
 
-    // --- Message Feed v3 (human-friendly rows; timeline style) ---
-    type FeedRowV3 = {
-      id: string;
-      ts: number;
-      agentId: string;
-      sessionKey?: string;
-      // Keep legacy rowType field for older clients; v3 now uses only timeline rows.
-      rowType: "timeline";
-      kind?: FeedKind | "error" | "sessions_spawn";
-
-      // v3 UX: human-friendly, single-line text.
-      // Keep legacy `action` for backwards compatibility with older frontends.
-      what: string;
-      plain?: string;
-      action?: string;
-    };
-
-    const maskUrlLite = (s: string): string => {
-      // Keep feed content-free: strip literal URLs / localhost.
-      // (We do not want clickable URLs in the default feed.)
-      return s
-        .replace(/https?:\/\/[^\s"'<>]+/gi, "[URL]")
-        .replace(/\blocalhost(?:\:\d+)?(?:\/[\w-.~%!$&'()*+,;=:@\/]*)?/gi, "[URL]")
-        .replace(/\b127\.0\.0\.1(?:\:\d+)?(?:\/[\w-.~%!$&'()*+,;=:@\/]*)?/gi, "[URL]");
-    };
-
-    const redactLine = (s: string, max = 200): string => {
-      const x = redactSecretsInText(String(s || "")).replace(/\s+/g, " ").trim();
-      return maskUrlLite(x).slice(0, max);
-    };
-
-    // (Advanced feed removed)
-
-    const safeCmdSummary = (cmd: unknown): string => {
-      if (Array.isArray(cmd)) {
-        const parts = cmd
-          .map((x) => (typeof x === "string" ? x.trim() : ""))
-          .filter(Boolean);
-        return parts.length ? parts.join(" ") : "command";
-      }
-      if (typeof cmd === "string") {
-        const s = cmd.trim();
-        if (!s) return "command";
-        return s.split(/\r?\n/)[0].trim();
-      }
-      return "command";
-    };
-
-    const basenameLite = (p: unknown): string => {
-      const s = typeof p === "string" ? p.trim() : "";
-      if (!s) return "";
-      const parts = s.split(/\\|\//g).filter(Boolean);
-      const base = parts[parts.length - 1] || "";
-      return redactLine(base, 80);
-    };
-
-    const scrubUrlForFeed = (u: unknown): string => {
-      const s = typeof u === "string" ? u.trim() : "";
-      if (!s) return "";
-      // Keep it non-clickable: drop scheme + query/hash.
-      // Also avoid leaking localhost.
-      try {
-        const uu = new URL(s);
-        const host = uu.hostname;
-        const path = uu.pathname || "/";
-        const out = `${host}${path}`;
-        if (/^(localhost|127\.0\.0\.1)$/i.test(host)) return "[URL]";
-        return redactLine(out, 80);
-      } catch {
-        // Fall back: remove protocol if present.
-        const out = s.replace(/^https?:\/\//i, "").split(/[?#]/)[0];
-        if (/\blocalhost\b|\b127\.0\.0\.1\b/i.test(out)) return "[URL]";
-        return redactLine(out, 80);
-      }
-    };
-
-    const isOpaqueRef = (s: string): boolean => {
-      const t = String(s || "").trim();
-      if (!t) return false;
-      return /^[a-z]{1,2}\d{1,6}$/i.test(t);
-    };
-
-    const browserActionLabel = (raw: string): string => {
-      const v = String(raw || "").trim().toLowerCase();
-      if (!v) return "";
-      if (v === "navigate" || v === "open") return "Open";
-      if (v === "focus") return "Switch tab";
-      if (v === "close") return "Close tab";
-      if (v === "screenshot") return "Take screenshot";
-      if (v === "snapshot") return "Inspect page";
-      if (v === "act") return "Interact";
-      if (v === "upload") return "Upload";
-      if (v === "console") return "Console";
-      if (v === "pdf") return "Export PDF";
-      if (v === "click") return "Click";
-      if (v === "type") return "Type";
-      if (v === "press") return "Press key";
-      if (v === "hover") return "Hover";
-      if (v === "drag") return "Drag";
-      if (v === "select") return "Select";
-      if (v === "fill") return "Fill";
-      if (v === "resize") return "Resize";
-      if (v === "wait") return "Wait";
-      return raw;
-    };
-
-    const browserTarget = (d: any): string => {
-      const url = scrubUrlForFeed(d.targetUrl || d.url);
-      const selectorRaw = typeof d.selector === "string" ? d.selector : (typeof d?.request?.selector === "string" ? d.request.selector : "");
-      const selector = selectorRaw ? redactLine(selectorRaw, 120) : "";
-      const refRaw = typeof d.ref === "string" ? d.ref : (typeof d?.request?.ref === "string" ? d.request.ref : "");
-      const ref = refRaw && !isOpaqueRef(refRaw) ? redactLine(refRaw, 80) : "";
-      return url || selector || (ref ? `ref ${ref}` : "");
-    };
-
-    const genericToolLabel = (toolName: unknown): string => {
-      const tn = typeof toolName === "string" ? toolName.trim() : "";
-      if (!tn) return "Working";
-      if (["channel", "conversation", "thread", "session"].includes(tn)) return "";
-      if (tn === "message") return "Preparing a reply";
-      if (tn === "web_fetch") return "Checking a page";
-      if (tn === "web_search") return "Searching the web";
-      if (tn === "image") return "Analyzing an image";
-      if (tn === "pdf") return "Reading a PDF";
-      if (tn === "read") return "Reading project files";
-      if (tn === "write" || tn === "edit") return "Updating project files";
-      if (tn === "sessions_yield") return "Waiting for helper results";
-      return `Using ${tn}`;
-    };
-
-    const scrubReplyPreview = (raw: unknown, maxLen = 48): string => {
-      if (typeof raw !== "string") return "";
-      let out = redactSecretsInText(raw)
-        .replace(/[\r\n\t]+/g, " ")
-        .replace(/\s+/g, " ")
-        .trim();
-      if (!out) return "";
-
-      out = out
-        .replace(/^(["'“”‘’])\s*(.*?)\s*\1$/u, "$2")
-        .replace(/\b[\w.+-]+@[\w.-]+\.[A-Za-z]{2,}\b/g, "[redacted email]")
-        .replace(/\b(?:\+?\d[\d\s().-]{6,}\d)\b/g, "[redacted number]")
-        .replace(/\b\d{4,}\b/g, "[redacted]")
-        .trim();
-
-      if (!out || /^\[(?:redacted|hex_redacted|url|session)\]$/i.test(out)) return "";
-      if (/^(replying|reply|message|sent)$/i.test(out)) return "";
-      if (out.length > maxLen) out = out.slice(0, Math.max(0, maxLen - 1)).trimEnd() + "…";
-      return `"${out}"`;
-    };
-
-    const scrubConversationPreview = (raw: unknown, maxLen = 72): string => scrubReplyPreview(raw, maxLen) || "";
-
-    const extractMessageText = (content: unknown): string => {
-      const parts = Array.isArray(content) ? content : [content];
-      for (const part of parts) {
-        if (typeof part === "string" && part.trim()) return part.trim();
-        if (!part || typeof part !== "object") continue;
-        const type = typeof (part as any).type === "string" ? String((part as any).type) : "";
-        if (type && type !== "text" && type !== "input_text" && type !== "output_text") continue;
-        const text = typeof (part as any).text === "string"
-          ? (part as any).text
-          : typeof (part as any)?.text?.value === "string"
-            ? (part as any).text.value
-            : typeof (part as any)?.value === "string"
-              ? (part as any).value
-              : "";
-        if (text && text.trim()) return text.trim();
-      }
-      return "";
-    };
-
-    const isInternalTransportToken = (raw: unknown): boolean => {
-      if (typeof raw !== "string") return false;
-      const out = raw.trim().toLowerCase();
-      if (!out) return false;
-      if (/^(discord|slack|telegram|whatsapp)(?:[:/._-]|$)/i.test(out)) return true;
-      return [
-        "discord",
-        "slack",
-        "telegram",
-        "whatsapp",
-        "channel",
-        "conversation",
-        "thread",
-        "session",
-        "provider",
-        "transport",
-        "messageprovider",
-      ].includes(out);
-    };
-
-    const looksInternalSlugLabel = (raw: unknown): boolean => {
-      if (typeof raw !== "string") return false;
-      const s = raw.trim();
-      if (!s) return false;
-      const lower = s.toLowerCase();
-      if (isInternalTransportToken(lower)) return true;
-      if (/^(agent|spawn|cron|scheduled|schedule|session|provider|transport|messageprovider)([:/_-]|$)/i.test(lower)) return true;
-      if (/^agent:[^:]+:/i.test(s) || /^spawn:/i.test(s)) return true;
-      if (/^[a-z0-9]+(?:[-_][a-z0-9]+){3,}$/i.test(s)) return true;
-      if (/\bcanonical\b|\bcleanup\b|\bfinal\b|\bpass\b/.test(lower) && /[-_]/.test(s) && !/\s/.test(s)) return true;
-      return false;
-    };
-
-    const safeReplyTarget = (raw: unknown): string => {
-      if (typeof raw !== "string") return "";
-      let out = redactSecretsInText(raw)
-        .replace(/[\r\n\t]+/g, " ")
-        .replace(/\s+/g, " ")
-        .replace(/^[@#]+/, "")
-        .trim();
-      if (!out) return "";
-      if (/^agent:[^:]+:/i.test(out) || /^spawn:/i.test(out)) return "";
-      if (/^(channel|conversation|thread|session|provider|transport|messageProvider)[:=]/i.test(out)) return "";
-      if (isInternalTransportToken(out)) return "";
-      if (/^\d{5,}$/.test(out)) return "";
-      if (/https?:\/\//i.test(out) || /[<>]/.test(out)) return "";
-      if (out.length > 40) return "";
-      return out;
-    };
-
-    const inferWorkContext = (details: any): "helper" | "scheduled" | null => {
-      const sk = typeof details?.sessionKey === "string" ? String(details.sessionKey).toLowerCase() : "";
-      const mp = typeof details?.messageProvider === "string" ? String(details.messageProvider).toLowerCase() : "";
-      if (typeof details?.spawnedBy === "string" && String(details.spawnedBy).trim()) return "helper";
-      if (sk.startsWith("spawn:")) return "helper";
-      if (/\bcron\b|\bschedule\b|\bscheduled\b/.test(sk) || /\bcron\b|\bschedule\b|\bscheduled\b/.test(mp)) return "scheduled";
-      return null;
-    };
-
-    const cleanSpecificLabel = (raw: unknown, max = 120): string => {
-      if (typeof raw !== "string") return "";
-      if (looksInternalSlugLabel(raw)) return "";
-      const out = redactLine(raw, max)
-        .replace(/^[\s:;,.\-–—]+/, "")
-        .replace(/[\s:;,.\-–—]+$/, "")
-        .trim();
-      if (!out) return "";
-      if (/^(tool|command|task|session|agent|cron|scheduled|schedule|spawn|channel|conversation|thread|provider|transport|messageprovider)$/i.test(out)) return "";
-      if (isInternalTransportToken(out)) return "";
-      if (looksInternalSlugLabel(out)) return "";
-      return out;
-    };
-
-    const sessionKeyTaskLabel = (raw: unknown): string => {
-      const sk = typeof raw === "string" ? String(raw).trim() : "";
-      if (!sk) return "";
-      const parts = sk.split(":").map((x) => x.trim()).filter(Boolean);
-      for (let i = parts.length - 1; i >= 0; i -= 1) {
-        const part = parts[i];
-        if (!part) continue;
-        if (/^(agent|spawn|cron|scheduled|schedule|main)$/i.test(part)) continue;
-        if (/^[a-f0-9-]{8,}$/i.test(part) || /^\d+$/.test(part)) continue;
-        if (part.length < 3) continue;
-        const label = cleanSpecificLabel(part.replace(/[_-]+/g, " "), 80);
-        if (label) return label;
-      }
-      return "";
-    };
-
-    const isGenericTaskLabel = (raw: unknown): boolean => {
-      if (typeof raw !== "string") return false;
-      const out = raw.trim().toLowerCase();
-      return [
-        "scheduled task",
-        "task",
-        "run a command",
-        "running a command",
-        "command",
-        "shell command",
-        "terminal command",
-        "subagent",
-        "spawn",
-        "helper",
-      ].includes(out);
-    };
-
-    const detailTaskLabel = (details: any, recentEvents?: any[]): string => {
-      const candidates: unknown[] = [
-        details?.label,
-        details?.task,
-        details?.title,
-        details?.summary,
-        details?.purpose,
-        details?.name,
-        details?.prompt,
-        sessionKeyTaskLabel(details?.sessionKey),
-        sessionKeyTaskLabel(details?.parentSessionKey),
-      ];
-      for (const value of candidates) {
-        const label = cleanSpecificLabel(value, 120);
-        if (label && !isGenericTaskLabel(label)) return label;
-      }
-      const evs = Array.isArray(recentEvents) ? recentEvents : [];
-      for (let i = evs.length - 1; i >= 0; i -= 1) {
-        const ev = evs[i];
-        const data = ev?.data && typeof ev.data === "object" ? ev.data : (ev?.details && typeof ev.details === "object" ? ev.details : null);
-        if (!data) continue;
-        for (const value of [data.label, data.task, data.title, data.summary, data.purpose, data.name, sessionKeyTaskLabel(data.sessionKey)]) {
-          const label = cleanSpecificLabel(value, 120);
-          if (label && !isGenericTaskLabel(label)) return label;
-        }
-      }
-      return "";
-    };
-
-    const replyPreviewValue = (details: any, recentEvents?: any[]): string => {
-      const pick = (v: unknown): string => (typeof v === "string" && v.trim() ? v : "");
-      const from = (obj: any): string => pick(obj?.contentPreview) || pick(obj?.preview) || pick(obj?.message) || pick(obj?.content) || pick(obj?.text) || pick(obj?.outputPreview) || "";
-      const direct = from(details);
-      if (direct) return direct;
-      const evs = Array.isArray(recentEvents) ? recentEvents : [];
-      for (let i = evs.length - 1; i >= 0; i -= 1) {
-        const ev = evs[i];
-        const kind = String(ev?.kind || "");
-        if (kind !== "message_sending" && kind !== "message_sent") continue;
-        const value = from(ev?.data) || from(ev?.details);
-        if (value) return value;
-      }
-      return "";
-    };
-
-    const replyTargetValue = (details: any, recentEvents?: any[]): string => {
-      const direct = safeReplyTarget(
-        details?.to
-        || details?.target
-        || details?.user
-        || details?.name
-        || details?.recipient
-        || details?.channel
-        || details?.messageProvider,
-      );
-      if (direct) return direct;
-      const evs = Array.isArray(recentEvents) ? recentEvents : [];
-      for (let i = evs.length - 1; i >= 0; i -= 1) {
-        const ev = evs[i];
-        if (String(ev?.kind || "") !== "message_sending") continue;
-        const value = safeReplyTarget(
-          ev?.data?.to
-          || ev?.details?.to
-          || ev?.data?.target
-          || ev?.details?.target
-          || ev?.data?.recipient
-          || ev?.details?.recipient
-          || ev?.data?.channel
-          || ev?.details?.channel
-          || ev?.data?.messageProvider
-          || ev?.details?.messageProvider,
-        );
-        if (value) return value;
-      }
-      return "";
-    };
-
-    const replyingSummary = (details: any, recentEvents?: any[]): string => {
-      const target = replyTargetValue(details, recentEvents);
-      const preview = scrubReplyPreview(replyPreviewValue(details, recentEvents), 48);
-      if (target && preview) return `Replying to ${target} — ${preview}`;
-      if (preview) return `Replying — ${preview}`;
-      return target ? `Replying to ${target}` : "Replying";
-    };
-
-    const conversationTurnSummary = (details: any): string => {
-      const role = typeof details?.role === "string" ? String(details.role).trim().toLowerCase() : "";
-      const preview = scrubConversationPreview(details?.contentPreview || details?.text || details?.content, role === "user" ? 64 : 72);
-      if (role === "user") return preview ? `User asked — ${preview}` : "User asked a question";
-      if (role === "assistant") return preview ? `Assistant replied — ${preview}` : "Assistant replied";
-      return preview ? `Conversation update — ${preview}` : "Conversation update";
-    };
-
-    const workContextSummary = (details: any, recentEvents?: any[]): string => {
-      const ctx = inferWorkContext(details || {});
-      const label = detailTaskLabel(details || {}, recentEvents);
-      if (ctx === "helper") return label ? `Working on helper task — ${label}` : "Working on helper task";
-      if (ctx === "scheduled") return label ? `Running scheduled task — ${label}` : "Running scheduled task";
-      return label || "Thinking";
-    };
-
-    const commandIntentSummary = (raw: unknown): string => {
-      const cmd = typeof raw === "string" ? raw.replace(/\s+/g, " ").trim() : "";
-      if (!cmd) return "Running a command";
-      const lower = cmd.toLowerCase();
-      const tests: Array<[RegExp, string]> = [
-        [/\bgit\s+status\b/, "Checking repo status"],
-        [/\bgit\s+diff\b|\bgit\s+show\b|\bgit\s+diff\s+--stat\b/, "Reviewing code changes"],
-        [/\bgit\s+log\b/, "Reviewing commit history"],
-        [/\bgit\s+(branch|checkout|switch)\b/, "Managing git branches"],
-        [/\b(npm|pnpm|yarn|bun)\s+(test|run\s+test)\b/, "Running tests"],
-        [/\b(pytest|jest|vitest|mocha|go\s+test|cargo\s+test|phpunit)\b/, "Running tests"],
-        [/\b(npm|pnpm|yarn|bun)\s+(install|add|ci)\b/, "Installing dependencies"],
-        [/\b(npm|pnpm|yarn|bun)\s+run\s+build\b|\b(make|cargo|go|python)\b.*\bbuild\b|\btsc\b/, "Building project"],
-        [/\b(npm|pnpm|yarn|bun)\s+run\s+dev\b|\b(npm|pnpm|yarn|bun)\s+start\b/, "Starting the app"],
-        [/\b(ls|find|tree|fd)\b/, "Reviewing project files"],
-        [/\b(cat|sed|awk|head|tail|bat|less|more)\b/, "Reviewing file contents"],
-        [/\b(grep|rg)\b/, "Searching project files"],
-      ];
-      for (const [re, label] of tests) {
-        if (re.test(lower)) return label;
-      }
-      const safe = redactLine(cmd, 80);
-      // If safe looks like a path/URL with no readable intent, suppress the suffix.
-      // Raw paths (starting with / ~ or containing http) are not user-facing.
-      if (safe && (/^\s*[\/~]/.test(safe) || /\w+:\/\//.test(safe))) {
-        return "Running a command";
-      }
-      return safe ? `Running a command — ${safe}` : "Running a command";
-    };
-
-    const commandCompletedSummary = (raw: unknown): string => {
-      const cmd = typeof raw === "string" ? raw.replace(/\s+/g, " ").trim() : "";
-      if (!cmd) return "Ran a command";
-      const lower = cmd.toLowerCase();
-      const tests: Array<[RegExp, string]> = [
-        [/\bgit\s+status\b/, "Checked repo status"],
-        [/\bgit\s+diff\b|\bgit\s+show\b|\bgit\s+diff\s+--stat\b/, "Reviewed code changes"],
-        [/\bgit\s+log\b/, "Reviewed commit history"],
-        [/\bgit\s+(branch|checkout|switch)\b/, "Managed git branches"],
-        [/\b(npm|pnpm|yarn|bun)\s+(test|run\s+test)\b/, "Ran tests"],
-        [/\b(pytest|jest|vitest|mocha|go\s+test|cargo\s+test|phpunit)\b/, "Ran tests"],
-        [/\b(npm|pnpm|yarn|bun)\s+(install|add|ci)\b/, "Installed dependencies"],
-        [/\b(npm|pnpm|yarn|bun)\s+run\s+build\b|\b(make|cargo|go|python)\b.*\bbuild\b|\btsc\b/, "Built the project"],
-        [/\b(npm|pnpm|yarn|bun)\s+run\s+dev\b|\b(npm|pnpm|yarn|bun)\s+start\b/, "Started the app"],
-        [/\b(ls|find|tree|fd)\b/, "Reviewed project files"],
-        [/\b(cat|sed|awk|head|tail|bat|less|more)\b/, "Reviewed file contents"],
-        [/\b(grep|rg)\b/, "Searched project files"],
-      ];
-      for (const [re, label] of tests) {
-        if (re.test(lower)) return label;
-      }
-      const safe = redactLine(cmd, 80);
-      // If safe summary looks like only a path/URL with no readable content, use generic.
-      // Raw paths (starting with /) or URLs are not user-facing.
-      if (safe && /^\s*[\/~.\w-]*\//.test(safe)) {
-        return "Ran a command";
-      }
-      return safe ? `Completed command — ${safe}` : "Ran a command";
-    };
-
-    const toolCompletedSummary = (it: FeedItem): string => {
-      const tn = (it.toolName || "tool").trim();
-      const d: any = it.details || {};
-
-      if (tn === "exec") return commandCompletedSummary(d.command);
-
-      if (tn === "read") {
-        const p = d.path ?? d.file_path;
-        return basenameLite(p) ? "Reviewed file contents" : "Reviewed project files";
-      }
-      if (tn === "write") {
-        const p = d.path ?? d.file_path;
-        return basenameLite(p) ? "Updated project file" : "Updated project files";
-      }
-      if (tn === "edit") {
-        const p = d.path ?? d.file_path;
-        return basenameLite(p) ? "Updated project file" : "Updated project files";
-      }
-      if (tn === "sessions_spawn") {
-        const preview = scrubReplyPreview(replyPreviewValue(d), 64);
-        if (preview) return `Helper task finished — ${preview}`;
-        const label = detailTaskLabel(d);
-        return label ? `Helper task finished — ${label}` : "Helper task finished";
-      }
-
-      const summary = toolHumanSummary(it);
-      const safeSummary = summary ? summary.replace(/\s*for current task$/i, "").trim() : "";
-      // If safeSummary looks like only a path/URL, suppress it to avoid leaking internal paths.
-      if (safeSummary && /^\s*[\/~.\w-]*\//.test(safeSummary)) {
-        return "Ran a command";
-      }
-      return safeSummary ? `Completed command — ${safeSummary}` : "Ran a command";
-    };
-
-    const toolHumanSummary = (it: FeedItem): string => {
-      const tn = (it.toolName || "tool").trim();
-      const d: any = it.details || {};
-
-      if (tn === "browser") {
-        const action = typeof d.action === "string" ? d.action
-          : (typeof d.op === "string" ? d.op
-            : (typeof d?.request?.kind === "string" ? String(d.request.kind) : ""));
-        const verb = browserActionLabel(action) || "Browser step";
-        const target = browserTarget(d);
-        return target ? `Browser — ${verb} ${target}` : `Browser — ${verb}`;
-      }
-
-      if (tn === "exec") {
-        const code = typeof d.exitCode === "number" ? d.exitCode : (typeof d.code === "number" ? d.code : null);
-        const tail = code === null ? "" : ` (exit ${code})`;
-        return `${commandIntentSummary(d.command)}${tail}`.trim();
-      }
-
-      if (tn === "read") {
-        const p = d.path ?? d.file_path;
-        const base = basenameLite(p);
-        return base ? `Reviewing project file — ${base}` : "Reviewing project files for current task";
-      }
-      if (tn === "write") {
-        const p = d.path ?? d.file_path;
-        const base = basenameLite(p);
-        return base ? `Updating project file — ${base}` : "Updating project files for current task";
-      }
-      if (tn === "edit") {
-        const p = d.path ?? d.file_path;
-        const base = basenameLite(p);
-        return base ? `Updating project file — ${base}` : "Updating project files for current task";
-      }
-
-      if (tn === "sessions_spawn") {
-        const child = typeof d.spawnAgentId === "string" ? String(d.spawnAgentId) : "";
-        const desc = detailTaskLabel(d);
-        const tail = desc ? ` — ${desc}` : "";
-        return `Starting a helper task${child ? ` @${child}` : ""}${tail}`.trim();
-      }
-
-      return genericToolLabel(tn);
-    };
-
-    const toolStateSummary = (details: any): string => {
-      const tn = typeof details?.toolName === "string" ? String(details.toolName).trim() : "";
-      if (tn === "browser") {
-        const action = typeof details?.action === "string" ? details.action
-          : (typeof details?.op === "string" ? details.op
-            : (typeof details?.request?.kind === "string" ? String(details.request.kind) : ""));
-        const verb = browserActionLabel(action) || "browser step";
-        const target = browserTarget(details || {});
-        return target ? `Inspecting in browser — ${verb} ${target}` : `Inspecting in browser — ${verb}`;
-      }
-      if (tn === "exec") return commandIntentSummary(details?.command);
-      if (tn === "sessions_spawn") {
-        const label = detailTaskLabel(details);
-        return label ? `Starting a helper task — ${label}` : "Starting a helper task";
-      }
-      return genericToolLabel(tn);
-    };
-
-    const thinkingSummary = (details: any, recentEvents?: any[]): string => workContextSummary(details, recentEvents);
-
-    const isCommandishLabel = (raw: unknown): boolean => isGenericTaskLabel(raw);
-
-    const shouldRenderTaskBoundary = (task: any, phase: "start" | "end", status?: FeedTaskStatus): boolean => {
-      const details = {
-        title: task?.title,
-        sessionKey: task?.sessionKey,
-        parentSessionKey: task?.parentSessionKey,
-        spawnedBy: task?.spawnedBy,
-      };
-      const label = detailTaskLabel(details);
-      const ctx = inferWorkContext(details);
-      if (ctx === "helper" || ctx === "scheduled") return true;
-      if (label) return true;
-      if (phase === "end" && status === "error") return true;
-      return false;
-    };
-
-    const taskBoundarySummary = (task: any, phase: "start" | "end"): string => {
-      const details = {
-        title: task?.title,
-        summary: task?.summary,
-        sessionKey: task?.sessionKey,
-        parentSessionKey: task?.parentSessionKey,
-        spawnedBy: task?.spawnedBy,
-      };
-      const label = detailTaskLabel(details);
-      const ctx = inferWorkContext(details);
-      const naturalLabel = label && !isCommandishLabel(label) ? label : "";
-      if (phase === "start") {
-        if (ctx === "helper") return naturalLabel ? `Starting helper task — ${naturalLabel}` : "Starting helper task";
-        if (ctx === "scheduled") return naturalLabel ? `Running scheduled task — ${naturalLabel}` : "Running scheduled task";
-        if (isCommandishLabel(label)) return "Running a command";
-        return naturalLabel ? `Starting task — ${naturalLabel}` : "Starting task";
-      }
-      if (ctx === "helper") return naturalLabel ? `Helper task finished — ${naturalLabel}` : "Helper task finished";
-      if (ctx === "scheduled") return naturalLabel ? `Scheduled task finished — ${naturalLabel}` : "Scheduled task finished";
-      if (isCommandishLabel(label)) return "Ran a command";
-      return naturalLabel ? `Task finished — ${naturalLabel}` : "Task finished";
-    };
-
-    const humanStateLabel = (stRaw: string, details?: any): string => {
-      const st = stRaw === "reply" ? "replying"
-        : stRaw === "tool" ? "tool"
-        : stRaw === "thinking" ? "thinking"
-        : stRaw === "idle" ? "idle"
-        : stRaw === "error" ? "error"
-        : stRaw;
-      if (st === "thinking") return thinkingSummary(details || {}, details?.recentEvents);
-      if (st === "replying") return replyingSummary(details || {}, details?.recentEvents);
-      if (st === "idle") return "Idle";
-      if (st === "tool") return toolStateSummary(details || {});
-      if (st === "error") return "Error";
-      if (/^(channel|conversation|thread|session)$/i.test(st)) return "";
-      return st || "State update";
-    };
-
-    const FEED_CANONICAL_TOOLS = new Set(["browser", "exec", "read", "write", "edit", "sessions_spawn", "web_search", "web_fetch", "image", "pdf"]);
-    const isCanonicalToolForFeed = (toolName: unknown): boolean => {
-      const tn = typeof toolName === "string" ? toolName.trim() : "";
-      if (!tn) return false;
-      if (isLowSignalObservationTool(tn)) return false;
-      if (["message", "channel", "conversation", "thread", "session", "sessions_yield"].includes(tn)) return false;
-      return FEED_CANONICAL_TOOLS.has(tn);
-    };
-
-    const shouldRenderPresenceRow = (it: FeedItem): boolean => {
-      if (it.kind !== "presence") return false;
-      const stRaw = typeof (it.details as any)?.state === "string" ? String((it.details as any).state) : "";
-      if (!stRaw) return false;
-      if (/^(channel|conversation|thread|session)$/i.test(stRaw)) return false;
-      if ((it.details as any)?.synthetic && stRaw === "reply") return false;
-      if (stRaw === "reply" || stRaw === "tool" || stRaw === "idle") return false;
-      if (stRaw === "thinking") {
-        const ctx = inferWorkContext(it.details || {});
-        const label = detailTaskLabel(it.details || {}, (it.details as any)?.recentEvents);
-        return !!(ctx || label);
-      }
-      return stRaw === "error";
-    };
-
-    const rowSentenceHuman = (it: FeedItem): { kind: FeedRowV3["kind"]; what: string } | null => {
-      const tn = (it.toolName || "tool").trim();
-
-      if (it.kind === "conversation_turn") return { kind: it.kind, what: conversationTurnSummary(it.details || {}) };
-
-      if (it.kind === "presence") {
-        if (!shouldRenderPresenceRow(it)) return null;
-        const stRaw = typeof (it.details as any)?.state === "string" ? String((it.details as any).state) : "";
-        const what = humanStateLabel(stRaw, it.details || {});
-        if (!what) return null;
-        return { kind: stRaw === "error" ? "error" : it.kind, what };
-      }
-
-      // started/ended rows are rendered at the task level for clearer titles.
-
-      if (it.kind === "message_sending") return { kind: it.kind, what: replyingSummary({ ...(it.details || {}), to: it.to }, (it.details as any)?.recentEvents) };
-      if (it.kind === "message_sent") {
-        const target = replyTargetValue({ ...(it.details || {}), to: it.to }, (it.details as any)?.recentEvents);
-        const preview = scrubReplyPreview(replyPreviewValue(it.details || {}, (it.details as any)?.recentEvents), 48);
-        if (it.success === false) return { kind: "error", what: target ? `Message to ${target} failed` : "Message failed" };
-        if (target && preview) return { kind: it.kind, what: `Reply sent to ${target} — ${preview}` };
-        if (preview) return { kind: it.kind, what: `Message sent — ${preview}` };
-        return { kind: it.kind, what: target ? `Reply sent to ${target}` : "Message sent" };
-      }
-
-      // Feed should stay event-driven; current state belongs in Now.
-      if (it.kind === "state" || it.kind === "tool_result_persist") return null;
-
-      if ((it.kind === "before_tool_call" || it.kind === "after_tool_call") && isCanonicalToolForFeed(tn)) {
-        const summary = toolHumanSummary(it);
-        if (it.kind === "before_tool_call") return { kind: it.kind, what: summary };
-        if (it.success === false || it.error) return { kind: "error", what: `${summary} (failed)` };
-        if (tn === "sessions_spawn") return null;
-        return { kind: it.kind, what: toolCompletedSummary(it) };
-      }
-
-      // Fallback: omit other raw events in default feed.
-      return null;
-    };
-
-    let conversationFeedCache: { at: number; items: FeedItem[] } = { at: 0, items: [] };
-    const CONVERSATION_FEED_CACHE_MS = 3000;
-
-    const mergeConversationFeed = async (items: FeedItem[]): Promise<FeedItem[]> => {
-      const now = nowMs();
-      if (now - conversationFeedCache.at < CONVERSATION_FEED_CACHE_MS) return items.concat(conversationFeedCache.items);
-
-      let mainSession = (await deriveActivitySnapshot().catch(() => null))?.agents?.main?.details?.sessionKey;
-      const gatewayToken: string | null = typeof api.config?.gateway?.auth?.token === "string" ? api.config.gateway.auth.token : null;
-      const invokeUrl = "http://127.0.0.1:18789/tools/invoke";
-      const invoke = async (tool: string, args: any) => {
-        const headers: Record<string, string> = { "content-type": "application/json" };
-        if (gatewayToken) headers.authorization = `Bearer ${gatewayToken}`;
-        const resp = await fetch(invokeUrl, { method: "POST", headers, body: JSON.stringify({ tool, args }) });
-        const data = await resp.json();
-        if (!data?.ok) throw new Error(String(data?.error || "invoke_failed"));
-        return data;
-      };
-
-      try {
-        if (typeof mainSession !== "string" || !mainSession.trim()) {
-          const listResp = await invoke("sessions_list", {});
-          const sessions = Array.isArray(listResp?.result?.details?.sessions) ? listResp.result.details.sessions : [];
-          const topMain = sessions
-            .filter((s: any) => typeof s?.key === "string" && /^agent:main:/i.test(String(s.key)))
-            .sort((a: any, b: any) => Number(b?.updatedAt || 0) - Number(a?.updatedAt || 0))[0];
-          mainSession = typeof topMain?.key === "string" ? topMain.key : "";
-        }
-        if (typeof mainSession !== "string" || !mainSession.trim()) {
-          conversationFeedCache = { at: now, items: [] };
-          return items;
-        }
-
-        const r = await invoke("sessions_history", { sessionKey: mainSession, limit: 12 });
-        const msgs = Array.isArray(r?.result?.details?.messages) ? r.result.details.messages : [];
-        const synthetic: FeedItem[] = [];
-        for (const msg of msgs.slice().reverse()) {
-          const role = typeof msg?.role === "string" ? String(msg.role).trim().toLowerCase() : "";
-          if (role !== "user" && role !== "assistant") continue;
-          const text = extractMessageText(msg?.content);
-          const preview = scrubConversationPreview(text, role === "user" ? 64 : 72);
-          if (!preview) continue;
-          const tsRaw = msg?.createdAtMs ?? msg?.createdAt ?? msg?.timestampMs ?? msg?.timestamp ?? msg?.ts ?? msg?.time;
-          const tsNum = Number(tsRaw);
-          const ts = Number.isFinite(tsNum) && tsNum > 0 ? tsNum : now;
-          const dup = items.some((it) => {
-            if (Math.abs(it.ts - ts) > 8000) return false;
-            if (role === "assistant" && (it.kind === "message_sending" || it.kind === "message_sent")) {
-              const existing = scrubConversationPreview(replyPreviewValue(it.details || {}, (it.details as any)?.recentEvents), 72);
-              return !existing || existing === preview;
-            }
-            return false;
-          });
-          if (dup) continue;
-          synthetic.push({
-            ts,
-            kind: "conversation_turn",
-            agentId: role === "assistant" ? "main" : "user",
-            sessionKey: mainSession,
-            details: {
-              role,
-              contentPreview: preview,
-            },
-          });
-        }
-        conversationFeedCache = { at: now, items: synthetic.slice(-6) };
-        return items.concat(conversationFeedCache.items);
-      } catch {
-        conversationFeedCache = { at: now, items: [] };
-        return items;
-      }
-    };
-
-    const buildFeedV3Rows = (items: FeedItem[]): FeedRowV3[] => {
-      const tasks = groupFeedIntoTasks(items, { includeRaw: true });
-      const out: FeedRowV3[] = [];
-
-      // Default feed should be readable: de-dup short bursts of identical low-signal rows.
-      const humanDedupeWindowMs = 1500;
-      const presenceDedupeWindowMs = 12000;
-      const heartbeatDedupeWindowMs = 15000;
-      const lastHumanSigByAgent = new Map<string, { sig: string; ts: number }>();
-
-      // 2A-2: Short-window aggregation — collapse rapid sequences into a single semantic row.
-      const AGGREGATION_WINDOW_MS = 8000;
-
-      // Kinds that are safe to collapse within the aggregation window.
-      // Never aggregate across errors, explicit boundaries, or sent confirmations.
-      const isCollapsibleKind = (kind: FeedRowV3["kind"] | undefined, it: FeedItem): boolean => {
-        if (!kind) return false;
-        if (kind === "error") return false;
-        if (kind === "message_sent") return false;
-        if (kind === "before_agent_start" || kind === "agent_end") return false;
-        // Collapse sequences: thinking → tool → done, read → read → read, reply → sent, etc.
-        if (kind === "presence" || kind === "state") return true;
-        if (kind === "before_tool_call" || kind === "after_tool_call") return true;
-        if (kind === "message_sending") return true;
-        return false;
-      };
-
-      const rowSignalRank = (it: FeedItem, kind: FeedRowV3["kind"]): number => {
-        const stRaw = typeof (it.details as any)?.state === "string" ? String((it.details as any).state) : "";
-        const isPresence = kind === "presence" || kind === "state" || it.kind === "presence" || it.kind === "state";
-        if (kind === "error" || stRaw === "error") return 3;
-        if (kind === "before_tool_call" || kind === "after_tool_call" || kind === "message_sending") return 2;
-        if (isPresence) {
-          if (stRaw === "idle") return 0;
-          if (!isMeaningfulActivityDetails(it.details)) return 0;
-          return 1;
-        }
-        return 1;
-      };
-
-      // Track the last aggregated row per agent for short-window collapsing.
-      const lastAggByAgent = new Map<string, { outIdx: number; ts: number; signalRank: number }>();
-
-      const toolPresenceMergeWindowMs = 1200;
-
-      const presenceNeighborWindowMs = 2500;
-
-      const hasConcreteNeighbor = (it: FeedItem, idx: number, raw: FeedItem[], who: string, mode: "thinking" | "idle" | "reply"): boolean => {
-        const matchesConcrete = (x: FeedItem): boolean => {
-          if (!x) return false;
-          const agent = x.agentId || who;
-          if (agent !== who || x === it) return false;
-          if (x.kind === "message_sending" || x.kind === "message_sent") return true;
-          if (x.kind === "before_tool_call" || x.kind === "after_tool_call") {
-            const tn = String(x.toolName || "").trim();
-            return !!tn && !isLowSignalObservationTool(tn) && !["channel", "conversation", "thread", "session"].includes(tn);
-          }
-          if (x.kind === "agent_end") return true;
-          if (x.kind === "presence") {
-            const otherState = typeof (x.details as any)?.state === "string" ? String((x.details as any).state) : "";
-            if (mode === "reply") return otherState === "reply" && !(x.details as any)?.synthetic;
-            if (mode === "thinking") return otherState === "tool" || otherState === "reply" || otherState === "error";
-            if (mode === "idle") return otherState === "tool" || otherState === "reply" || otherState === "thinking" || otherState === "error";
-          }
-          return false;
-        };
-
-        for (let j = idx - 1; j >= 0; j -= 1) {
-          const prev = raw[j];
-          if (it.ts - prev.ts > presenceNeighborWindowMs) break;
-          if (matchesConcrete(prev)) return true;
-        }
-        for (let j = idx + 1; j < raw.length; j += 1) {
-          const next = raw[j];
-          if (next.ts - it.ts > presenceNeighborWindowMs) break;
-          if (matchesConcrete(next)) return true;
-        }
-        return false;
-      };
-
-      const shouldSkipGenericPresence = (it: FeedItem, idx: number, raw: FeedItem[], who: string): boolean => {
-        if (it.kind !== "presence") return false;
-        const stRaw = typeof (it.details as any)?.state === "string" ? String((it.details as any).state) : "";
-        if (!shouldRenderPresenceRow({ ...it, details: { ...((it.details as any) || {}), recentEvents: raw } } as FeedItem)) return true;
-        if (stRaw === "thinking") {
-          const what = humanStateLabel(stRaw, { ...((it.details as any) || {}), recentEvents: raw });
-          if (what && what !== "Thinking") return false;
-          return hasConcreteNeighbor(it, idx, raw, who, "thinking");
-        }
-        return false;
-      };
-
-      const shouldSkipPresenceTool = (it: FeedItem, idx: number, raw: FeedItem[], who: string): boolean => {
-        if (it.kind !== "presence") return false;
-        const stRaw = typeof (it.details as any)?.state === "string" ? String((it.details as any).state) : "";
-        if (stRaw !== "tool") return false;
-        const toolName = typeof it.toolName === "string" ? it.toolName
-          : (typeof (it.details as any)?.toolName === "string" ? String((it.details as any).toolName) : "");
-
-        const matches = (x: FeedItem): boolean => {
-          if (!x || x.kind !== "before_tool_call") return false;
-          const agent = x.agentId || who;
-          if (agent !== who) return false;
-          if (!toolName) return true;
-          return (x.toolName || "") === toolName;
-        };
-
-        for (let j = idx - 1; j >= 0; j--) {
-          const prev = raw[j];
-          if (it.ts - prev.ts > toolPresenceMergeWindowMs) break;
-          if (matches(prev)) return true;
-        }
-        for (let j = idx + 1; j < raw.length; j++) {
-          const next = raw[j];
-          if (next.ts - it.ts > toolPresenceMergeWindowMs) break;
-          if (matches(next)) return true;
-        }
-        return false;
-      };
-
-      const shouldSkipHelperCompletionBoundary = (task: FeedTask, phase: "start" | "end"): boolean => {
-        if (phase !== "end") return false;
-        const details = {
-          title: task?.title,
-          summary: task?.summary,
-          sessionKey: task?.sessionKey,
-          parentSessionKey: task?.parentSessionKey,
-          spawnedBy: task?.spawnedBy,
-        };
-        if (inferWorkContext(details) !== "helper") return false;
-        const raw = Array.isArray(task?.items) ? task.items : [];
-        if (!raw.length) return false;
-        const hasReplyTerminal = raw.some((x) => x.kind === "message_sent" && x.success !== false);
-        if (hasReplyTerminal) return true;
-        let completionRows = 0;
-        for (const x of raw) {
-          if (x.kind === "after_tool_call" && isCanonicalToolForFeed(x.toolName) && x.toolName !== "sessions_spawn") completionRows += 1;
-        }
-        return completionRows > 0;
-      };
-
-      // Short-window aggregation: collapse rapid sequences (within 8s) into one semantic row.
-      // The newer event only wins when it is at least as meaningful as the row already kept.
-      const pushRow = (it: FeedItem, what: string, kind: FeedRowV3["kind"], agentId: string, sessionKey?: string, taskId?: string) => {
-        const agentKey = agentId.trim();
-        const agg = lastAggByAgent.get(agentKey);
-        const nextSignalRank = rowSignalRank(it, kind);
-
-        if (agg && isCollapsibleKind(kind, it)) {
-          const prevRow = out[agg.outIdx];
-          const withinWindow = Math.abs(it.ts - agg.ts) <= AGGREGATION_WINDOW_MS;
-          if (withinWindow) {
-            // Keep aggregation, but do not let a lower-signal terminal row overwrite meaningful activity.
-            if (nextSignalRank >= agg.signalRank) {
-              prevRow.what = what;
-              prevRow.plain = what;
-              prevRow.action = what;
-              prevRow.ts = it.ts; // refresh to newest event time
-              agg.signalRank = nextSignalRank;
-            }
-            agg.ts = it.ts;
-            return;
-          }
-        }
-
-        // Not collapsible or outside window — push a new row.
-        const base = `${sessionKey || taskId || "task"}:row:${it.ts}:${String(kind || it.kind)}:${it.toolName || ""}`;
-        const id = base;
-        const row: FeedRowV3 = {
-          id,
-          ts: it.ts,
-          agentId,
-          sessionKey,
-          rowType: "timeline",
-          kind,
-          what,
-          plain: what,
-          action: what,
-        };
-        out.push(row);
-        lastAggByAgent.set(agentKey, { outIdx: out.length - 1, ts: it.ts, signalRank: nextSignalRank });
-      };
-
-      for (const task of tasks) {
-        const fallbackAgentId = task.agentId || "unknown";
-        const sessionKey = task.sessionKey;
-        const raw = Array.isArray(task.items) ? task.items.slice().sort((a, b) => a.ts - b.ts) : [];
-        if (!raw.length) continue;
-
-        for (let i = 0; i < raw.length; i++) {
-          const it = raw[i];
-          const who = it.agentId || fallbackAgentId;
-
-          // Task boundaries: render meaningful started/ended rows.
-          if (it.kind === "before_agent_start") {
-            if (shouldRenderTaskBoundary(task, "start", task.status)) {
-              pushRow(it, taskBoundarySummary(task, "start"), it.kind, who, sessionKey, task.id);
-            }
-            continue;
-          }
-          if (it.kind === "agent_end") {
-            const ok = task.status !== "error";
-            if (!shouldSkipHelperCompletionBoundary(task, "end") && shouldRenderTaskBoundary(task, "end", task.status)) {
-              let what = taskBoundarySummary(task, "end");
-              if (!ok) what = `${what} (failed)`;
-              pushRow(it, what, ok ? it.kind : "error", who, sessionKey, task.id);
-            }
-            continue;
-          }
-
-          if (shouldSkipPresenceTool(it, i, raw, who)) continue;
-          if (shouldSkipGenericPresence(it, i, raw, who)) continue;
-
-          const rowItem = (it.kind === "presence" || it.kind === "state" || it.kind === "message_sending" || it.kind === "message_sent")
-            ? { ...it, details: { ...((it.details as any) || {}), recentEvents: raw } }
-            : it;
-          const h = rowSentenceHuman(rowItem as FeedItem);
-          if (h) {
-            const sig = `${who}|${String(h.kind)}|${h.what}`;
-            const prev = lastHumanSigByAgent.get(who);
-            const isPresence = it.kind === "presence" || it.kind === "state";
-            const isHeartbeat = it.kind === "presence" && !!(it.details as any)?.heartbeat;
-            const dedupeWindowMs = isHeartbeat
-              ? heartbeatDedupeWindowMs
-              : (isPresence ? presenceDedupeWindowMs : humanDedupeWindowMs);
-            if (!(prev && prev.sig === sig && Math.abs(it.ts - prev.ts) < dedupeWindowMs)) {
-              lastHumanSigByAgent.set(who, { sig, ts: it.ts });
-              pushRow(it, h.what, h.kind, who, sessionKey, task.id);
-            }
-          }
-        }
-      }
-
-      // Timeline newest-first (UI shows latest at top).
-      return out.sort((a, b) => b.ts - a.ts);
-    };
-
     const priority: Record<ActivityState, number> = {
       idle: 0,
       thinking: 1,
@@ -2428,8 +1023,6 @@ export default {
         cur.sinceMs = t;
         cur.lastEventMs = t;
         cur.details = { stale: true };
-        syncSnapshotAgent(agentId, "idle", cur.details || null, t);
-        pushPresence(agentId, "idle", cur.details || null);
       }, staleMs + 50);
 
       // Tool-specific max duration: demote tool -> thinking -> (later) idle.
@@ -2444,8 +1037,6 @@ export default {
         cur.sinceMs = t;
         cur.lastEventMs = t;
         cur.details = { ...(cur.details || {}), toolMax: true };
-        syncSnapshotAgent(agentId, "thinking", cur.details || null, t);
-        pushPresence(agentId, "thinking", cur.details || null);
         setIdleWithCooldown(agentId);
       }, toolMaxMs);
     };
@@ -2453,10 +1044,18 @@ export default {
     const setState = (agentId: string, next: ActivityState, details?: Record<string, unknown> | null) => {
       const row = ensure(agentId);
       const t = nowMs();
-      const prevState = row.state;
 
       // Persist to snapshot for API consumers.
-      syncSnapshotAgent(agentId, next, details ?? null, t);
+      try {
+        const prev = snap.agents[agentId];
+        if (!prev || prev.state !== next) {
+          snap.agents[agentId] = { state: next, sinceMs: t, lastEventMs: t, details: details ?? null };
+        } else {
+          snap.agents[agentId] = { ...prev, lastEventMs: t, details: details ?? prev.details };
+        }
+        snap.updatedAtMs = t;
+        writeSnapshotSoon();
+      } catch {}
 
       // Min-dwell: don't let fast transitions to idle hide states between polls.
       // Also enforce priority so high-signal states override lower ones.
@@ -2477,8 +1076,6 @@ export default {
       if (row.state !== next) {
         row.state = next;
         row.sinceMs = t;
-        // Emit state change to feed.
-        pushPresence(agentId, next, details ?? null);
       }
 
       if (next !== "idle") {
@@ -2506,24 +1103,10 @@ export default {
         cur.sinceMs = t;
         cur.lastEventMs = t;
         cur.details = null;
-        syncSnapshotAgent(agentId, "idle", null, t);
-        pushPresence(agentId, "idle", null);
       }, waitMs);
       // Update lastEvent so API knows something just happened.
       row.lastEventMs = scheduledAt;
     };
-
-    // Feed heartbeat: keep the timeline advancing while an agent is active.
-    const feedHeartbeatPollMs = Math.max(1000, Math.floor(FEED_HEARTBEAT_MS / 2));
-    setInterval(() => {
-      const t = nowMs();
-      for (const [agentId, row] of activity.entries()) {
-        if (!row || row.state === "idle" || !isMeaningfulActivityDetails(row.details)) continue;
-        const last = lastFeedByAgent.get(agentId) || 0;
-        if (t - last < FEED_HEARTBEAT_MS) continue;
-        pushPresence(agentId, row.state, row.details || null, { force: true, heartbeat: true });
-      }
-    }, feedHeartbeatPollMs);
 
     // Hooks → real runtime state
     const resolveAgentId = (ctx: any): string => {
@@ -2537,25 +1120,16 @@ export default {
 
     api.on("before_agent_start", (_event, ctx) => {
       const agentId = resolveAgentId(ctx);
+      api.logger.info("[lobster-room] hook before_agent_start", { buildTag: BUILD_TAG, agentId, sessionKey: ctx?.sessionKey });
       pushEvent("before_agent_start", { agentId, data: { sessionKey: ctx?.sessionKey, messageProvider: ctx?.messageProvider } });
-      const startTs = nowMs();
-      pushFeed({
-        ts: startTs,
-        kind: "before_agent_start",
-        agentId,
-        sessionKey: typeof ctx?.sessionKey === "string" ? ctx.sessionKey : undefined,
-        details: {
-          messageProvider: typeof ctx?.messageProvider === "string" ? ctx.messageProvider : undefined,
-        },
-      });
-      pushPresence(agentId, "thinking", { sessionKey: ctx?.sessionKey, messageProvider: ctx?.messageProvider }, { force: true });
+      pushFeed({ ts: nowMs(), kind: "before_agent_start", agentId, sessionKey: typeof ctx?.sessionKey === "string" ? ctx.sessionKey : undefined });
       setState(agentId, "thinking", { sessionKey: ctx?.sessionKey, messageProvider: ctx?.messageProvider });
     });
 
     api.on("before_tool_call", (event, ctx) => {
       const agentId = resolveAgentId(ctx);
       const toolName = event?.toolName || event?.tool || event?.name;
-      const isLowSignalObservation = isLowSignalObservationTool(toolName);
+      api.logger.info("[lobster-room] hook before_tool_call", { buildTag: BUILD_TAG, agentId, toolName, sessionKey: ctx?.sessionKey });
 
       // Capture high-value params for debugging (truncate aggressively).
       let toolData: any = { toolName, sessionKey: ctx?.sessionKey };
@@ -2566,67 +1140,12 @@ export default {
         toolData.command = cmd;
       }
 
-      if (toolName === "browser") {
-        // params: {action, targetUrl, targetId, request:{...}}
-        toolData.action = typeof p?.action === "string" ? p.action : undefined;
-        toolData.targetUrl = typeof p?.targetUrl === "string" ? p.targetUrl : undefined;
-        toolData.targetId = typeof p?.targetId === "string" ? p.targetId : undefined;
-        toolData.ref = typeof p?.ref === "string" ? p.ref : undefined;
-        toolData.selector = typeof p?.selector === "string" ? p.selector : undefined;
-        toolData.op = typeof p?.request?.kind === "string" ? p.request.kind : undefined;
-        // Some calls put URL inside request fields.
-        toolData.url = typeof p?.request?.url === "string" ? p.request.url : undefined;
-      }
-
-      if (toolName === "read" || toolName === "write" || toolName === "edit") {
-        toolData.path = typeof p?.path === "string" ? p.path : undefined;
-        toolData.file_path = typeof p?.file_path === "string" ? p.file_path : undefined;
-      }
-
       // Show what spawned the subagent.
       if (toolName === "sessions_spawn") {
         toolData.spawnAgentId = p?.agentId;
         toolData.label = p?.label;
         const task = typeof p?.task === "string" ? p.task : "";
         toolData.task = task ? task.slice(0, 160) : undefined;
-
-        // SYNTH_SUBAGENT_FEED_START
-        try {
-          const childAgentId = typeof p?.agentId === "string" ? String(p.agentId).trim() : "";
-          if (childAgentId) {
-            const parentSk = typeof ctx?.sessionKey === "string" ? String(ctx.sessionKey) : "";
-            const startTs = nowMs();
-            const childSessionKey = `spawn:${parentSk || agentId}:${childAgentId}:${startTs}`;
-            const st = spawnStacksByAgent.get(agentId) || [];
-            st.push({ childAgentId, childSessionKey, startTs });
-            spawnStacksByAgent.set(agentId, st);
-
-            // Start a synthetic task card for the child agent.
-            pushFeed({
-              ts: startTs,
-              kind: "before_agent_start",
-              agentId: childAgentId,
-              sessionKey: childSessionKey,
-              details: { parentSessionKey: parentSk ? redactSecretsInText(parentSk).slice(0, 120) : undefined },
-            });
-            pushFeed({
-              ts: startTs + 1,
-              kind: "before_tool_call",
-              agentId: childAgentId,
-              sessionKey: childSessionKey,
-              toolName: "sessions_spawn",
-              details: {
-                label: coerceStr(toolData.label, 120),
-                task: coerceStr(toolData.task, 180),
-                spawnAgentId: coerceStr(childAgentId, 80),
-              },
-            });
-            setState(childAgentId, "thinking", { sessionKey: childSessionKey, spawnedBy: agentId });
-          }
-        } catch {
-          // best-effort only
-        }
-        // SYNTH_SUBAGENT_FEED_END
       }
 
       // Show message preview when using the message tool.
@@ -2651,29 +1170,16 @@ export default {
         details: {
           command: toolName === "exec" ? coerceStr(toolData.command, 240) : undefined,
           url: toolName === "web_fetch" ? coerceStr(toolData.url, 240) : undefined,
-          action: toolName === "browser" ? coerceStr(toolData.action, 80) : undefined,
-          targetUrl: toolName === "browser" ? coerceStr(toolData.targetUrl, 240) : undefined,
-          ref: toolName === "browser" ? coerceStr(toolData.ref, 80) : undefined,
-          selector: toolName === "browser" ? coerceStr(toolData.selector, 160) : undefined,
-          op: toolName === "browser" ? coerceStr(toolData.op, 80) : undefined,
-          path: (toolName === "read" || toolName === "write" || toolName === "edit") ? coerceStr(toolData.path, 240) : undefined,
-          file_path: (toolName === "read" || toolName === "write" || toolName === "edit") ? coerceStr(toolData.file_path, 240) : undefined,
           label: toolName === "sessions_spawn" ? coerceStr(toolData.label, 120) : undefined,
           task: toolName === "sessions_spawn" ? coerceStr(toolData.task, 180) : undefined,
           spawnAgentId: toolName === "sessions_spawn" ? coerceStr(toolData.spawnAgentId, 80) : undefined,
         },
       });
-      setState(agentId, isLowSignalObservation ? "thinking" : "tool", {
-        ...toolData,
-        sessionKey: ctx?.sessionKey,
-        meaningful: !isLowSignalObservation,
-        observationOnly: isLowSignalObservation || undefined,
-      });
+      setState(agentId, "tool", { toolName, sessionKey: ctx?.sessionKey });
     });
 
     api.on("after_tool_call", (event, ctx) => {
       const agentId = resolveAgentId(ctx);
-      const isLowSignalObservation = isLowSignalObservationTool(event?.toolName);
       pushEvent("after_tool_call", { agentId, data: { toolName: event?.toolName, durationMs: event?.durationMs } });
 
       // Best-effort: capture a safe preview of sessions_spawn final assistant output (if the runtime provides it).
@@ -2696,46 +1202,6 @@ export default {
         }
       }
 
-      // SYNTH_SUBAGENT_FEED_FINISH
-      if (event?.toolName === "sessions_spawn") {
-        try {
-          const st = spawnStacksByAgent.get(agentId) || [];
-          const info = st.pop();
-          if (st.length) spawnStacksByAgent.set(agentId, st);
-          else spawnStacksByAgent.delete(agentId);
-
-          if (info?.childAgentId && info.childSessionKey) {
-            const t = nowMs();
-            const rawErr = event?.error || event?.result?.error;
-            const err = typeof rawErr === "string" && rawErr.trim() ? rawErr.trim() : "";
-            const ok = !err;
-
-            pushFeed({
-              ts: t,
-              kind: "after_tool_call",
-              agentId: info.childAgentId,
-              sessionKey: info.childSessionKey,
-              toolName: "sessions_spawn",
-              durationMs: typeof event?.durationMs === "number" ? event.durationMs : undefined,
-              success: ok,
-              error: err ? redactSecretsInText(err).slice(0, 200) : undefined,
-              details: outputPreview ? { outputPreview } : undefined,
-            });
-            pushFeed({
-              ts: t + 1,
-              kind: "agent_end",
-              agentId: info.childAgentId,
-              sessionKey: info.childSessionKey,
-              success: ok,
-              error: err ? redactSecretsInText(err).slice(0, 200) : undefined,
-            });
-            setState(info.childAgentId, ok ? "idle" : "error", { sessionKey: info.childSessionKey });
-          }
-        } catch {
-          // best-effort only
-        }
-      }
-
       pushFeed({
         ts: nowMs(),
         kind: "after_tool_call",
@@ -2745,17 +1211,12 @@ export default {
         durationMs: typeof event?.durationMs === "number" ? event.durationMs : undefined,
         details: outputPreview ? { outputPreview } : undefined,
       });
-      if (isLowSignalObservation) {
-        setIdleWithCooldown(agentId, 0);
-      } else {
-        setState(agentId, "thinking", { sessionKey: ctx?.sessionKey });
-      }
+      setState(agentId, "thinking", { sessionKey: ctx?.sessionKey });
     });
 
     // Some tools may not reliably fire after_tool_call in all paths; use persist as a backup.
     api.on("tool_result_persist", (event, ctx) => {
       const agentId = resolveAgentId(ctx);
-      const isLowSignalObservation = isLowSignalObservationTool(event?.toolName);
       pushEvent("tool_result_persist", {
         agentId,
         data: { toolName: event?.toolName, toolCallId: event?.toolCallId, isSynthetic: event?.isSynthetic },
@@ -2771,11 +1232,7 @@ export default {
           isSynthetic: !!event?.isSynthetic,
         },
       });
-      if (isLowSignalObservation) {
-        setIdleWithCooldown(agentId, 0);
-      } else {
-        setState(agentId, "thinking", { sessionKey: ctx?.sessionKey, persisted: true });
-      }
+      setState(agentId, "thinking", { sessionKey: ctx?.sessionKey, persisted: true });
     });
 
     api.on("message_sending", (event, ctx) => {
@@ -2783,10 +1240,9 @@ export default {
       const agentId = "main";
 
       const capturePreview = !!api.config?.debugCaptureMessagePreview;
-      const replyPreview = scrubReplyPreview(event?.content, 48);
-      const data: any = { to: event?.to, channelId: ctx?.channelId, contentPreview: replyPreview || undefined };
-      if (capturePreview && !data.contentPreview) {
-        data.contentPreview = scrubReplyPreview(String(event?.content || "").slice(0, 80), 48) || undefined;
+      const data: any = { to: event?.to, channelId: ctx?.channelId };
+      if (capturePreview) {
+        data.contentPreview = String(event?.content || "").slice(0, 80);
       }
 
       pushEvent("message_sending", { agentId, data });
@@ -2796,15 +1252,13 @@ export default {
         agentId,
         channelId: typeof ctx?.channelId === "string" ? ctx.channelId : undefined,
         to: typeof event?.to === "string" ? redactSecretsInText(event.to) : undefined,
-        details: { contentPreview: data.contentPreview },
       });
-      setState(agentId, "reply", { to: event?.to, channelId: ctx?.channelId, conversationId: ctx?.conversationId, contentPreview: data.contentPreview });
+      setState(agentId, "reply", { to: event?.to, channelId: ctx?.channelId, conversationId: ctx?.conversationId });
     });
 
     api.on("message_sent", (event, ctx) => {
       const agentId = "main";
-      const replyPreview = scrubReplyPreview(event?.content, 48);
-      pushEvent("message_sent", { agentId, data: { to: event?.to, success: event?.success, channelId: ctx?.channelId, contentPreview: replyPreview || undefined } });
+      pushEvent("message_sent", { agentId, data: { to: event?.to, success: event?.success, channelId: ctx?.channelId } });
       pushFeed({
         ts: nowMs(),
         kind: "message_sent",
@@ -2813,7 +1267,6 @@ export default {
         to: typeof event?.to === "string" ? redactSecretsInText(event.to) : undefined,
         success: typeof event?.success === "boolean" ? event.success : undefined,
         error: typeof event?.error === "string" ? redactSecretsInText(event.error) : undefined,
-        details: { contentPreview: replyPreview || undefined },
       });
       if (event?.success === false) {
         setState(agentId, "error", { error: event?.error || "message_sent failed", to: event?.to, channelId: ctx?.channelId });
@@ -2845,9 +1298,8 @@ export default {
 
     // --- Local assets via API (most reliable across gateway routers) ---
     // Usage: /lobster-room/api/asset?path=furniture/sofa.svg
-    registerSafePluginRoute(api, {
+    api.registerHttpRoute({
       path: "/lobster-room/api/asset",
-      auth: "plugin",
       handler: async (req, res) => {
         const url = readRequestUrl(req);
         let rel = (url.searchParams.get("path") || "").trim();
@@ -2885,9 +1337,8 @@ export default {
     });
 
     // HTTP: portal
-    registerSafePluginRoute(api, {
+    api.registerHttpRoute({
       path: "/lobster-room/",
-      auth: "plugin",
       handler: async (_req, res) => {
         try {
           const html = await fs.readFile(portalHtmlPath, "utf8");
@@ -2907,9 +1358,8 @@ export default {
     // NOTE: Message Feed API is multiplexed via /lobster-room/api/lobster-room (op=feedGet/feedSummarize)
     // because some gateway/proxy setups only reliably route this single plugin API endpoint.
 
-    registerSafePluginRoute(api, {
+    api.registerHttpRoute({
       path: "/lobster-room/api/feed/summarize",
-      auth: "plugin",
       handler: async (req, res) => {
         if ((req.method || "GET").toUpperCase() !== "POST") {
           sendJson(res, 405, { ok: false, error: "method_not_allowed" });
@@ -3040,9 +1490,8 @@ export default {
     });
 
     // HTTP: API
-    registerSafePluginRoute(api, {
+    api.registerHttpRoute({
       path: "/lobster-room/api/lobster-room",
-      auth: "plugin",
       handler: async (req, res) => {
         const url = readRequestUrl(req);
 
@@ -3114,23 +1563,24 @@ export default {
               if (agentId) items = items.filter((x) => x.agentId === agentId);
               if (kind) items = items.filter((x) => x.kind === (kind as any));
               items = items.slice(-limit);
-              if (!kind || kind === "conversation_turn") items = await mergeConversationFeed(items);
-              items.sort((a, b) => a.ts - b.ts);
-              items = items.slice(-Math.max(limit, 12));
+
+              // Apply retention filter
+              const activeRoomId = await getActiveRoomId();
+              const retentionMs = await readRetention(activeRoomId);
+              if (retentionMs > 0) {
+                const cutoff = Date.now() - retentionMs;
+                items = items.filter((x) => x.ts >= cutoff);
+              }
 
               const tasks = groupFeedIntoTasks(items, { includeRaw });
 
               // Latest preview = most recent event.
               const last = items.length ? items[items.length - 1] : null;
 
-              const version = Number(payload?.version) || 2;
-              const rows = version >= 3 ? buildFeedV3Rows(items) : undefined;
-
               sendJson(res, 200, {
                 ok: true,
-                buildTagFeed: version >= 3 ? "feed-v3" : "feed-v2",
+                buildTagFeed: "feed-v2",
                 latest: last ? { ...last, preview: feedPreview(last) } : null,
-                rows,
                 tasks: tasks.map((t) => ({
                   id: t.id,
                   sessionKey: t.sessionKey,
@@ -3144,16 +1594,6 @@ export default {
                 })),
                 items: includeRaw ? items.slice().reverse().map((it) => ({ ...it, preview: feedPreview(it) })) : undefined,
               });
-              return;
-            }
-
-            if (op === "activityGet") {
-              try {
-                const snapshot = await deriveActivitySnapshot();
-                sendJson(res, 200, { ok: true, snapshot });
-              } catch (err: any) {
-                sendJson(res, 200, { ok: false, error: "activity_failed", detail: String(err?.message || err) });
-              }
               return;
             }
 
@@ -3204,23 +1644,12 @@ export default {
                 ? payload.sinceMs
                 : (nowMs() - windowMs);
 
-              const startMs = typeof payload?.startMs === "number" && Number.isFinite(payload.startMs) ? payload.startMs : null;
-              const endMs = typeof payload?.endMs === "number" && Number.isFinite(payload.endMs) ? payload.endMs : null;
-
               let items = feedBuf.slice();
               if (sessionKey) items = items.filter((x) => x.sessionKey === sessionKey);
               else {
                 if (agentId) items = items.filter((x) => x.agentId === agentId);
                 items = items.filter((x) => x.ts >= sinceMs);
               }
-
-              // Optional explicit window (used by v3 "Summary: this segment")
-              if (startMs !== null || endMs !== null) {
-                const a = startMs !== null ? startMs : (nowMs() - windowMs);
-                const b = endMs !== null ? endMs : nowMs();
-                items = items.filter((x) => x.ts >= a && x.ts <= b);
-              }
-
               items = items.slice(-maxItems);
 
               const lines = items
@@ -3284,6 +1713,113 @@ export default {
                 sendJson(res, 200, { ok: true, summary: summary.trim(), model });
               } catch (err: any) {
                 sendJson(res, 200, { ok: false, error: "llm_unreachable", detail: String(err?.message || err) });
+              }
+              return;
+            }
+
+            if (op === "feedDevSpawn") {
+              // Dev-only helper: spawn a non-main agent session so QA can validate multi-agent feed grouping.
+              const spawnAgentId = typeof payload?.spawnAgentId === "string" ? payload.spawnAgentId.trim() : "coding_agent";
+              const label = typeof payload?.label === "string" ? payload.label.trim().slice(0, 120) : "QA: multi-agent validation";
+              const task = typeof payload?.task === "string" ? payload.task.trim().slice(0, 400) : "Quick QA test task: respond with a short message and then finish.";
+
+              // Resolve a gateway token (best-effort). Some QA envs don't have api.config.gateway.auth.token wired.
+              const readGatewayTokenFromConfigFile = async (): Promise<string> => {
+                try {
+                  const home = (process.env.HOME || "").trim() || "/home/node";
+                  const p = join(home, ".openclaw", "openclaw.json");
+                  const txt = await fs.readFile(p, "utf8");
+                  const obj: any = JSON.parse(txt);
+                  const tok = obj?.gateway?.auth?.token;
+                  return (typeof tok === "string" ? tok.trim() : "");
+                } catch {
+                  return "";
+                }
+              };
+
+              let gatewayToken =
+                (typeof api.config?.gateway?.auth?.token === "string" && api.config.gateway.auth.token.trim())
+                  ? api.config.gateway.auth.token.trim()
+                  : (process.env.OPENCLAW_GATEWAY_TOKEN || process.env.OPENCLAW_TOKEN || "").trim();
+
+              if (!gatewayToken) {
+                gatewayToken = await readGatewayTokenFromConfigFile();
+              }
+
+              // Prefer loopback to avoid any external proxy auth/header rewriting.
+              // Keep request-origin as a fallback for setups where the gateway isn't bound to 18789.
+              const origin = readRequestUrl(req);
+              const invokeCandidates = ["http://127.0.0.1:18789/tools/invoke", new URL("/tools/invoke", origin).toString()];
+
+              const invokeOnce = async (invokeUrl: string) => {
+                const headers: Record<string, string> = { "content-type": "application/json" };
+                // /tools/invoke expects Authorization: Bearer <gateway token>
+                if (gatewayToken) headers["Authorization"] = `Bearer ${gatewayToken}`;
+
+                const resp = await fetch(invokeUrl, {
+                  method: "POST",
+                  headers,
+                  body: JSON.stringify({
+                    tool: "sessions_spawn",
+                    // Be liberal in what we send: different runtimes have used different arg names.
+                    args: { spawnAgentId, agentId: spawnAgentId, label, task },
+                  }),
+                });
+
+                const txt = await resp.text().catch(() => "");
+                let data: any = null;
+                try {
+                  data = txt ? JSON.parse(txt) : null;
+                } catch {
+                  data = null;
+                }
+
+                if (!resp.ok || !data?.ok) {
+                  let detail = "";
+                  if (data && typeof data === "object") {
+                    if (typeof (data as any).detail === "string") detail = (data as any).detail;
+                    else if (typeof (data as any).message === "string") detail = (data as any).message;
+                    else if (typeof (data as any).error === "string") detail = (data as any).error;
+                    else {
+                      try { detail = JSON.stringify(data); } catch { detail = ""; }
+                    }
+                  }
+                  if (!detail) detail = txt || "";
+
+                  return {
+                    ok: false,
+                    status: resp.status,
+                    error: String(data?.error || (resp.ok ? "invoke_failed" : "invoke_http_error")),
+                    detail: (String(detail).trim() || "").slice(0, 800),
+                  };
+                }
+
+                return { ok: true, result: data.result || null };
+              };
+
+              try {
+                let lastErr: any = null;
+                for (const invokeUrl of invokeCandidates) {
+                  try {
+                    const r = await invokeOnce(invokeUrl);
+                    if (r.ok) {
+                      sendJson(res, 200, { ok: true, result: r.result || null });
+                      return;
+                    }
+                    lastErr = { invokeUrl, ...r };
+                  } catch (err: any) {
+                    lastErr = { invokeUrl, ok: false, error: "spawn_unreachable", detail: String(err?.message || err) };
+                  }
+                }
+
+                sendJson(res, 200, {
+                  ok: false,
+                  error: "spawn_failed",
+                  detail: (lastErr && lastErr.detail) ? String(lastErr.detail) : "invoke_failed",
+                  status: (lastErr && typeof lastErr.status === "number") ? lastErr.status : undefined,
+                });
+              } catch (err: any) {
+                sendJson(res, 200, { ok: false, error: "spawn_unreachable", detail: String(err?.message || err) });
               }
               return;
             }
@@ -3425,14 +1961,111 @@ export default {
           }
         }
 
-        const snapshot = await deriveActivitySnapshot();
-        const agentsPayload = allowIds.map((agentId) => {
+        // Derive activity by polling gateway session stores.
+        // (Hook-based signals are unreliable in some deployments / behind proxies.)
+        const gatewayToken: string | null = typeof api.config?.gateway?.auth?.token === "string" ? api.config.gateway.auth.token : null;
+        const invokeUrl = "http://127.0.0.1:18789/tools/invoke";
+        const invoke = async (tool: string, args: any) => {
+          const headers: Record<string, string> = { "content-type": "application/json" };
+          if (gatewayToken) headers.authorization = `Bearer ${gatewayToken}`;
+          const resp = await fetch(invokeUrl, { method: "POST", headers, body: JSON.stringify({ tool, args }) });
+          const data = await resp.json();
+          if (!data?.ok) throw new Error(String(data?.error || "invoke_failed"));
+          return data;
+        };
+
+        const skToAgentId = (sk: unknown): string | null => {
+          if (typeof sk !== "string") return null;
+          const m = sk.match(/^agent:([^:]+):/);
+          return m && m[1] ? m[1] : null;
+        };
+
+        let sessions: any[] = [];
+        try {
+          const r = await invoke("sessions_list", {});
+          const details = r?.result?.details || {};
+          sessions = Array.isArray(details.sessions) ? details.sessions : [];
+        } catch {
+          sessions = [];
+        }
+
+        const sessionsByAgent = new Map<string, any[]>();
+        for (const s of sessions) {
+          const aid = skToAgentId(s?.key);
+          if (!aid) continue;
+          const arr = sessionsByAgent.get(aid) || [];
+          arr.push(s);
+          sessionsByAgent.set(aid, arr);
+        }
+
+        const agentsPayload = [] as any[];
+        for (const agentId of allowIds) {
           const displayName = agentNameOverrides[agentId] || identityNameByAgentId.get(agentId) || agentId;
-          const snapRow = snapshot.agents?.[agentId];
-          const activityState = (snapRow?.state || "idle") as ActivityState;
-          const uiState = mapActivityToUiState(activityState);
-          const details = (snapRow?.details || {}) as any;
-          return {
+          const list = (sessionsByAgent.get(agentId) || []).filter((s) => typeof s?.key === "string");
+          list.sort((a, b) => (Number(b?.updatedAt || 0) - Number(a?.updatedAt || 0)));
+
+          const maxUpdatedAt = list.length ? Number(list[0]?.updatedAt || 0) : 0;
+          const recent = !!(maxUpdatedAt && (t - maxUpdatedAt) <= staleMs);
+
+          // session_status on the most recent session (best-effort)
+          let queueDepth: number | null = null;
+          let statusText: string | null = null;
+          if (list.length) {
+            try {
+              const r2 = await invoke("session_status", { sessionKey: String(list[0].key) });
+              const det2 = r2?.result?.details || {};
+              const qd = det2.queueDepth ?? det2?.queue?.depth;
+              if (Number.isFinite(Number(qd))) queueDepth = Number(qd);
+              if (typeof det2.statusText === "string") statusText = det2.statusText;
+            } catch {}
+          }
+
+          // sessions_history for last message type (best-effort)
+          let lastType: string | null = null;
+          let lastRole: string | null = null;
+          let historyTypes: string[] = [];
+          if (list.length) {
+            try {
+              const r3 = await invoke("sessions_history", { sessionKey: String(list[0].key), limit: 8 });
+              const msgs = r3?.result?.details?.messages || [];
+              const last = Array.isArray(msgs) && msgs.length ? msgs[0] : null;
+              lastRole = typeof last?.role === "string" ? last.role : null;
+              const c = last?.content;
+              if (Array.isArray(c)) {
+                for (const part of c) {
+                  if (part && typeof part === "object" && typeof part.type === "string") historyTypes.push(part.type);
+                }
+                lastType = historyTypes[0] || null;
+              }
+            } catch {}
+          }
+
+          let activityState: ActivityState = "idle";
+          let uiState: "think" | "wait" | "tool" | "reply" | "error" = "wait";
+
+          // Prefer hook-derived snapshot (more real-time, no polling lag).
+          const snapRow = snapDisk?.agents?.[agentId];
+          const snapFresh = !!(snapRow && typeof snapRow.lastEventMs === "number" && (t - snapRow.lastEventMs) <= staleMs);
+          if (snapFresh) {
+            activityState = snapRow.state as ActivityState;
+            uiState = mapActivityToUiState(activityState);
+          } else if (typeof queueDepth === "number" && queueDepth > 0) {
+            activityState = "thinking";
+            uiState = "think";
+          } else if (recent && lastType === "toolCall") {
+            activityState = "tool";
+            uiState = "tool";
+          } else if (recent && lastType === "text" && lastRole === "assistant") {
+            activityState = "reply";
+            uiState = "reply";
+          } else {
+            activityState = "idle";
+            uiState = "wait";
+          }
+
+          const sinceOut = snapFresh ? (snapRow?.sinceMs || null) : (maxUpdatedAt || null);
+          const lastOut = snapFresh ? (snapRow?.lastEventMs || null) : (maxUpdatedAt || null);
+          agentsPayload.push({
             id: `resident@${agentId}`,
             hostId: "local",
             hostLabel: "OpenClaw",
@@ -3440,28 +2073,36 @@ export default {
             state: uiState,
             meta: {
               active: uiState !== "wait",
-              sinceMs: snapRow?.sinceMs || null,
-              maxUpdatedAt: snapRow?.lastEventMs || null,
-              queueDepth: Number.isFinite(Number(details?.queueDepth)) ? Number(details.queueDepth) : null,
-              statusText: typeof details?.statusText === "string" ? details.statusText : null,
+              sinceMs: sinceOut,
+              maxUpdatedAt: maxUpdatedAt || null,
+              queueDepth,
+              statusText,
             },
             debug: {
               decision: {
                 agentId,
                 displayName,
                 activityState,
-                sinceMs: snapRow?.sinceMs || null,
-                lastEventMs: snapRow?.lastEventMs || null,
+                sinceMs: sinceOut,
+                lastEventMs: lastOut,
                 cooldownMs,
                 staleMs,
                 toolMaxMs,
                 finalState: uiState,
-                details,
-                recentEvents: snapshot.events || (snapDisk?.events || eventBuf),
+                details: {
+                  queueDepth,
+                  statusText,
+                  historyTypes,
+                  lastRole,
+                  lastType,
+                  snapFresh,
+                  snapState: snapRow?.state || null,
+                } as any,
+                recentEvents: (snapDisk?.events || eventBuf),
               },
             },
-          };
-        });
+          });
+        }
 
         sendJson(res, 200, {
           ok: true,
@@ -3486,9 +2127,8 @@ export default {
 
     // Debug: manually ping an agent state (for UI testing without running the real agent)
     // GET /lobster-room/api/debug/ping?agentId=coding_agent&state=tool
-    registerSafePluginRoute(api, {
+    api.registerHttpRoute({
       path: "/lobster-room/api/debug/ping",
-      auth: "plugin",
       handler: async (req, res) => {
         const url = readRequestUrl(req);
         const agentId = String(url.searchParams.get("agentId") || "").trim() || "main";
@@ -3512,9 +2152,8 @@ export default {
     });
 
     // Convenience redirect
-    registerSafePluginRoute(api, {
+    api.registerHttpRoute({
       path: "/lobster-room",
-      auth: "plugin",
       handler: async (_req, res) => {
         res.statusCode = 301;
         res.setHeader("location", "/lobster-room/");
