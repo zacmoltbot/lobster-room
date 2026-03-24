@@ -1651,6 +1651,7 @@ export default {
         "terminal command",
         "subagent",
         "spawn",
+        "helper",
       ].includes(out);
     };
 
