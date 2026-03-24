@@ -2469,12 +2469,19 @@
       return '';
     }
 
+    function feedIsGenericTaskLabel(raw){
+      try{
+        const out = String(raw || '').trim().toLowerCase();
+        return ['scheduled task', 'task', 'run a command', 'running a command', 'command', 'shell command', 'terminal command'].includes(out);
+      }catch{return false}
+    }
+
     function feedDetailTaskLabel(details, recentEvents){
       const d = details && typeof details === 'object' ? details : {};
       const candidates = [d.label, d.task, d.title, d.summary, d.purpose, d.name, d.prompt, feedSessionTaskLabel(d.sessionKey), feedSessionTaskLabel(d.parentSessionKey)];
       for(const value of candidates){
         const label = feedSpecificLabel(value, 96);
-        if(label) return label;
+        if(label && !feedIsGenericTaskLabel(label)) return label;
       }
       const evs = Array.isArray(recentEvents) ? recentEvents : [];
       for(let i=evs.length-1;i>=0;i--){
@@ -2483,7 +2490,7 @@
         if(!data) continue;
         for(const value of [data.label, data.task, data.title, data.summary, data.purpose, data.name, feedSessionTaskLabel(data.sessionKey)]){
           const label = feedSpecificLabel(value, 96);
-          if(label) return label;
+          if(label && !feedIsGenericTaskLabel(label)) return label;
         }
       }
       return '';

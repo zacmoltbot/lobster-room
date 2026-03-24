@@ -1612,6 +1612,20 @@ export default {
       return "";
     };
 
+    const isGenericTaskLabel = (raw: unknown): boolean => {
+      if (typeof raw !== "string") return false;
+      const out = raw.trim().toLowerCase();
+      return [
+        "scheduled task",
+        "task",
+        "run a command",
+        "running a command",
+        "command",
+        "shell command",
+        "terminal command",
+      ].includes(out);
+    };
+
     const detailTaskLabel = (details: any, recentEvents?: any[]): string => {
       const candidates: unknown[] = [
         details?.label,
@@ -1626,7 +1640,7 @@ export default {
       ];
       for (const value of candidates) {
         const label = cleanSpecificLabel(value, 120);
-        if (label) return label;
+        if (label && !isGenericTaskLabel(label)) return label;
       }
       const evs = Array.isArray(recentEvents) ? recentEvents : [];
       for (let i = evs.length - 1; i >= 0; i -= 1) {
@@ -1635,7 +1649,7 @@ export default {
         if (!data) continue;
         for (const value of [data.label, data.task, data.title, data.summary, data.purpose, data.name, sessionKeyTaskLabel(data.sessionKey)]) {
           const label = cleanSpecificLabel(value, 120);
-          if (label) return label;
+          if (label && !isGenericTaskLabel(label)) return label;
         }
       }
       return "";
@@ -1848,11 +1862,7 @@ export default {
 
     const thinkingSummary = (details: any, recentEvents?: any[]): string => workContextSummary(details, recentEvents);
 
-    const isCommandishLabel = (raw: unknown): boolean => {
-      if (typeof raw !== "string") return false;
-      const out = raw.trim().toLowerCase();
-      return ["run a command", "running a command", "command", "shell command", "terminal command"].includes(out);
-    };
+    const isCommandishLabel = (raw: unknown): boolean => isGenericTaskLabel(raw);
 
     const shouldRenderTaskBoundary = (task: any, phase: "start" | "end", status?: FeedTaskStatus): boolean => {
       const details = {
