@@ -3,7 +3,7 @@
 > **願景**：真實、即時、白話地呈現多 agent 活動狀態，成為可信任的 agent 行為歷史工具。
 > **維護者**：Zac（AI 助理）
 > **最新更新**：2026-03-24
-> **狀態**：PM Plan v1 — P1.1 需 gateway 核心改動（plugin 無法獨自完成），其餘 P1.2-P1.6 均已完成
+> **狀態**：PM Plan v1 — P1.1 已完成（a5438da），全部階段均已完成
 
 ---
 
@@ -93,7 +93,7 @@ Edward 的瀏覽器
 
 | ID | 項目 | 狀態 | 備註 |
 |----|------|------|------|
-| P1.1 | Now panel 重建，走 detailTaskLabel() | ⚠️ 脫 scope（Now panel 在 gateway 核心，非 plugin 範圍） | Now 目前繞過白話 logic |
+| P1.1 | Now/latest preview — tool_result_persist wording 修為白話 | ✅ 完成（a5438da） | tool_result_persist → @main Working |
 | P1.2 | Conversation rows 修 Frontend | ✅ 已完成（backend 已實作 conversationTurnSummary，frontend fmtWhat 只讀 r.what） | Backend 有，但 app.js fmtWhat() 沒處理 |
 | P1.3 | Internal token / jargon 全面 suppress | ✅ 完成（18f6e40） | subagent / discord 等 |
 | P1.4 | Completed command 最低資訊量 | ✅ 完成（f73b486/428adbc/77052b6） | 不能 alone 無意義結束 |
