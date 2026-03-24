@@ -98,7 +98,7 @@ Edward 的瀏覽器
 | P1.3 | Internal token / jargon 全面 suppress | ✅ 完成（18f6e40） | subagent / discord 等 |
 | P1.4 | Completed command 最低資訊量 | ✅ 完成（f73b486/428adbc/77052b6） | 不能 alone 無意義結束 |
 | P1.5 | Raw command 不泄漏到 what | ✅ 完成（77052b6） | aggregation 時 command 不進 what |
-| P1.6 | Now/Face wording 統一 | 待執行 | idle · Ns ago 統一 |
+| P1.6 | Now/Face wording 統一 | ✅ 完成（0eae320 + uncommitted） | idle · Ns ago 統一 |
 
 ### Phase 2：設定功能
 
@@ -138,5 +138,5 @@ Edward 的瀏覽器
 | Raw curl/command 进 what | aggregation 沒 sanitize | P1.5 |
 | Now panel 露 `tool_result_persist` | Now 走別的 path | P1.1 |
 | `conversation_turn` 不顯示 | Frontend fmtWhat() 沒處理 | P1.2 |
-| `idle · 5s ago` 太機械 | Now wording 沒統一 | P1.6 |
+| `idle · 5s ago` 太機械 | Now wording 已統一 | ✅ P1.6 |
 | Retention 設定不存在 | 功能未實作 | P2.1 |

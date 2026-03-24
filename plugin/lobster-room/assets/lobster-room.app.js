@@ -2314,7 +2314,7 @@
 
     function feedUpdatedAge(ts){
       const age = feedAge(ts);
-      return age ? ('updated ' + age) : '';
+      return age ? age : ''; // "Xs ago" without "updated" prefix - more human
     }
 
     function feedReplyPreviewValue(details, recentEvents){
@@ -2786,8 +2786,10 @@
             agent.style.color = agentColor(line.agent);
             const state = document.createElement('span');
             state.className = 'feed-now-state';
+            const isIdle = (line.state === 'idle');
+            // For idle, don't show time suffix (more human, less noisy)
             const bits = [line.state];
-            if(line.age) bits.push(line.age);
+            if(line.age && !isIdle) bits.push(line.age);
             state.textContent = bits.join(' · ');
             row.appendChild(agent);
             row.appendChild(state);
