@@ -318,6 +318,25 @@ export default {
       return safeRoomId(id) ? id : defaultRoomId;
     };
 
+    // --- Retention (per-active-room) ---
+    const RETENTION_DEFAULT_MS = 604800000; // 7 days
+
+    const readRetention = async (roomId: string): Promise<number> => {
+      try {
+        const txt = await fs.readFile(roomPath(roomId, "retention.json"), "utf8");
+        const obj = JSON.parse(txt);
+        if (typeof (obj as any).retentionMs === "number" && (obj as any).retentionMs > 0) {
+          return (obj as any).retentionMs;
+        }
+      } catch {}
+      return RETENTION_DEFAULT_MS;
+    };
+
+    const writeRetention = async (roomId: string, retentionMs: number) => {
+      await fs.mkdir(roomPath(roomId, ""), { recursive: true });
+      await fs.writeFile(roomPath(roomId, "retention.json"), JSON.stringify({ retentionMs }, null, 2));
+    };
+
     // --- HTTP: dynamic handler (prefix routing) ---
     // OpenClaw 2026.3.13 removed registerHttpHandler; use a prefix route instead.
     registerSafePluginRoute(api, {
@@ -454,6 +473,35 @@ export default {
             } catch {}
 
             sendJson(res, 200, { ok: true, activeRoomId: idx.activeRoomId });
+          } catch (err: any) {
+            sendJson(res, 400, { ok: false, error: String(err?.message || err) });
+          }
+          return true;
+        }
+
+        res.statusCode = 405;
+        res.end("method_not_allowed");
+        return true;
+      }
+
+      // Retention API (per-active-room)
+      if (p === "/lobster-room/api/retention") {
+        const roomId = await getActiveRoomId();
+
+        if ((req.method || "GET").toUpperCase() === "GET") {
+          const retentionMs = await readRetention(roomId);
+          sendJson(res, 200, { ok: true, retentionMs });
+          return true;
+        }
+
+        if ((req.method || "GET").toUpperCase() === "POST") {
+          try {
+            const buf = await readBody(req, 128 * 1024);
+            const obj = JSON.parse(buf.toString("utf8"));
+            const retentionMs = Number(obj?.retentionMs);
+            if (!Number.isFinite(retentionMs) || retentionMs <= 0) throw new Error("bad_retention_ms");
+            await writeRetention(roomId, retentionMs);
+            sendJson(res, 200, { ok: true, retentionMs });
           } catch (err: any) {
             sendJson(res, 400, { ok: false, error: String(err?.message || err) });
           }
