@@ -1076,7 +1076,8 @@ export default {
       | "message_sending"
       | "message_sent"
       | "agent_end"
-      | "presence";
+      | "presence"
+      | "conversation_turn";
 
     type FeedItem = {
       ts: number;
@@ -1523,6 +1524,27 @@ export default {
       return `"${out}"`;
     };
 
+    const scrubConversationPreview = (raw: unknown, maxLen = 72): string => scrubReplyPreview(raw, maxLen) || "";
+
+    const extractMessageText = (content: unknown): string => {
+      const parts = Array.isArray(content) ? content : [content];
+      for (const part of parts) {
+        if (typeof part === "string" && part.trim()) return part.trim();
+        if (!part || typeof part !== "object") continue;
+        const type = typeof (part as any).type === "string" ? String((part as any).type) : "";
+        if (type && type !== "text" && type !== "input_text" && type !== "output_text") continue;
+        const text = typeof (part as any).text === "string"
+          ? (part as any).text
+          : typeof (part as any)?.text?.value === "string"
+            ? (part as any).text.value
+            : typeof (part as any)?.value === "string"
+              ? (part as any).value
+              : "";
+        if (text && text.trim()) return text.trim();
+      }
+      return "";
+    };
+
     const isInternalTransportToken = (raw: unknown): boolean => {
       if (typeof raw !== "string") return false;
       const out = raw.trim().toLowerCase();
@@ -1711,6 +1733,14 @@ export default {
       return target ? `Replying to ${target}` : "Replying";
     };
 
+    const conversationTurnSummary = (details: any): string => {
+      const role = typeof details?.role === "string" ? String(details.role).trim().toLowerCase() : "";
+      const preview = scrubConversationPreview(details?.contentPreview || details?.text || details?.content, role === "user" ? 64 : 72);
+      if (role === "user") return preview ? `User asked — ${preview}` : "User asked a question";
+      if (role === "assistant") return preview ? `Assistant replied — ${preview}` : "Assistant replied";
+      return preview ? `Conversation update — ${preview}` : "Conversation update";
+    };
+
     const workContextSummary = (details: any, recentEvents?: any[]): string => {
       const ctx = inferWorkContext(details || {});
       const label = detailTaskLabel(details || {}, recentEvents);
@@ -1724,17 +1754,18 @@ export default {
       if (!cmd) return "Running a command";
       const lower = cmd.toLowerCase();
       const tests: Array<[RegExp, string]> = [
-        [/\bgit\s+status\b/, "Checking repo status for current task"],
-        [/\bgit\s+diff\b/, "Reviewing code changes for current task"],
-        [/\bgit\s+log\b/, "Reviewing commit history for current task"],
-        [/\bgit\s+(branch|checkout|switch)\b/, "Managing git branches for current task"],
-        [/\b(npm|pnpm|yarn|bun)\s+(test|run\s+test)\b/, "Running tests for current task"],
-        [/\b(pytest|jest|vitest|mocha|go\s+test|cargo\s+test)\b/, "Running tests for current task"],
-        [/\b(npm|pnpm|yarn|bun)\s+(install|add)\b/, "Installing dependencies for current task"],
-        [/\b(npm|pnpm|yarn|bun)\s+run\s+build\b|\b(make|cargo|go|python)\b.*\bbuild\b/, "Building the project for current task"],
-        [/\b(npm|pnpm|yarn|bun)\s+run\s+dev\b|\b(npm|pnpm|yarn|bun)\s+start\b/, "Starting the app for current task"],
-        [/\b(ls|find|tree)\b/, "Reviewing project files for current task"],
-        [/\b(cat|sed|awk|head|tail|grep)\b/, "Reviewing file contents for current task"],
+        [/\bgit\s+status\b/, "Checking repo status"],
+        [/\bgit\s+diff\b|\bgit\s+show\b|\bgit\s+diff\s+--stat\b/, "Reviewing code changes"],
+        [/\bgit\s+log\b/, "Reviewing commit history"],
+        [/\bgit\s+(branch|checkout|switch)\b/, "Managing git branches"],
+        [/\b(npm|pnpm|yarn|bun)\s+(test|run\s+test)\b/, "Running tests"],
+        [/\b(pytest|jest|vitest|mocha|go\s+test|cargo\s+test|phpunit)\b/, "Running tests"],
+        [/\b(npm|pnpm|yarn|bun)\s+(install|add|ci)\b/, "Installing dependencies"],
+        [/\b(npm|pnpm|yarn|bun)\s+run\s+build\b|\b(make|cargo|go|python)\b.*\bbuild\b|\btsc\b/, "Building project"],
+        [/\b(npm|pnpm|yarn|bun)\s+run\s+dev\b|\b(npm|pnpm|yarn|bun)\s+start\b/, "Starting the app"],
+        [/\b(ls|find|tree|fd)\b/, "Reviewing project files"],
+        [/\b(cat|sed|awk|head|tail|bat|less|more)\b/, "Reviewing file contents"],
+        [/\b(grep|rg)\b/, "Searching project files"],
       ];
       for (const [re, label] of tests) {
         if (re.test(lower)) return label;
@@ -1749,16 +1780,17 @@ export default {
       const lower = cmd.toLowerCase();
       const tests: Array<[RegExp, string]> = [
         [/\bgit\s+status\b/, "Checked repo status"],
-        [/\bgit\s+diff\b/, "Reviewed code changes"],
+        [/\bgit\s+diff\b|\bgit\s+show\b|\bgit\s+diff\s+--stat\b/, "Reviewed code changes"],
         [/\bgit\s+log\b/, "Reviewed commit history"],
-        [/\bgit\s+(branch|checkout|switch)\b/, "Updated git branch state"],
+        [/\bgit\s+(branch|checkout|switch)\b/, "Managed git branches"],
         [/\b(npm|pnpm|yarn|bun)\s+(test|run\s+test)\b/, "Ran tests"],
-        [/\b(pytest|jest|vitest|mocha|go\s+test|cargo\s+test)\b/, "Ran tests"],
-        [/\b(npm|pnpm|yarn|bun)\s+(install|add)\b/, "Installed dependencies"],
-        [/\b(npm|pnpm|yarn|bun)\s+run\s+build\b|\b(make|cargo|go|python)\b.*\bbuild\b/, "Built the project"],
+        [/\b(pytest|jest|vitest|mocha|go\s+test|cargo\s+test|phpunit)\b/, "Ran tests"],
+        [/\b(npm|pnpm|yarn|bun)\s+(install|add|ci)\b/, "Installed dependencies"],
+        [/\b(npm|pnpm|yarn|bun)\s+run\s+build\b|\b(make|cargo|go|python)\b.*\bbuild\b|\btsc\b/, "Built the project"],
         [/\b(npm|pnpm|yarn|bun)\s+run\s+dev\b|\b(npm|pnpm|yarn|bun)\s+start\b/, "Started the app"],
-        [/\b(ls|find|tree)\b/, "Reviewed project files"],
-        [/\b(cat|sed|awk|head|tail|grep)\b/, "Reviewed file contents"],
+        [/\b(ls|find|tree|fd)\b/, "Reviewed project files"],
+        [/\b(cat|sed|awk|head|tail|bat|less|more)\b/, "Reviewed file contents"],
+        [/\b(grep|rg)\b/, "Searched project files"],
       ];
       for (const [re, label] of tests) {
         if (re.test(lower)) return label;
@@ -1945,6 +1977,8 @@ export default {
     const rowSentenceHuman = (it: FeedItem): { kind: FeedRowV3["kind"]; what: string } | null => {
       const tn = (it.toolName || "tool").trim();
 
+      if (it.kind === "conversation_turn") return { kind: it.kind, what: conversationTurnSummary(it.details || {}) };
+
       if (it.kind === "presence") {
         if (!shouldRenderPresenceRow(it)) return null;
         const stRaw = typeof (it.details as any)?.state === "string" ? String((it.details as any).state) : "";
@@ -1978,6 +2012,79 @@ export default {
 
       // Fallback: omit other raw events in default feed.
       return null;
+    };
+
+    let conversationFeedCache: { at: number; items: FeedItem[] } = { at: 0, items: [] };
+    const CONVERSATION_FEED_CACHE_MS = 3000;
+
+    const mergeConversationFeed = async (items: FeedItem[]): Promise<FeedItem[]> => {
+      const now = nowMs();
+      if (now - conversationFeedCache.at < CONVERSATION_FEED_CACHE_MS) return items.concat(conversationFeedCache.items);
+
+      let mainSession = (await deriveActivitySnapshot().catch(() => null))?.agents?.main?.details?.sessionKey;
+      const gatewayToken: string | null = typeof api.config?.gateway?.auth?.token === "string" ? api.config.gateway.auth.token : null;
+      const invokeUrl = "http://127.0.0.1:18789/tools/invoke";
+      const invoke = async (tool: string, args: any) => {
+        const headers: Record<string, string> = { "content-type": "application/json" };
+        if (gatewayToken) headers.authorization = `Bearer ${gatewayToken}`;
+        const resp = await fetch(invokeUrl, { method: "POST", headers, body: JSON.stringify({ tool, args }) });
+        const data = await resp.json();
+        if (!data?.ok) throw new Error(String(data?.error || "invoke_failed"));
+        return data;
+      };
+
+      try {
+        if (typeof mainSession !== "string" || !mainSession.trim()) {
+          const listResp = await invoke("sessions_list", {});
+          const sessions = Array.isArray(listResp?.result?.details?.sessions) ? listResp.result.details.sessions : [];
+          const topMain = sessions
+            .filter((s: any) => typeof s?.key === "string" && /^agent:main:/i.test(String(s.key)))
+            .sort((a: any, b: any) => Number(b?.updatedAt || 0) - Number(a?.updatedAt || 0))[0];
+          mainSession = typeof topMain?.key === "string" ? topMain.key : "";
+        }
+        if (typeof mainSession !== "string" || !mainSession.trim()) {
+          conversationFeedCache = { at: now, items: [] };
+          return items;
+        }
+
+        const r = await invoke("sessions_history", { sessionKey: mainSession, limit: 12 });
+        const msgs = Array.isArray(r?.result?.details?.messages) ? r.result.details.messages : [];
+        const synthetic: FeedItem[] = [];
+        for (const msg of msgs.slice().reverse()) {
+          const role = typeof msg?.role === "string" ? String(msg.role).trim().toLowerCase() : "";
+          if (role !== "user" && role !== "assistant") continue;
+          const text = extractMessageText(msg?.content);
+          const preview = scrubConversationPreview(text, role === "user" ? 64 : 72);
+          if (!preview) continue;
+          const tsRaw = msg?.createdAtMs ?? msg?.createdAt ?? msg?.timestampMs ?? msg?.timestamp ?? msg?.ts ?? msg?.time;
+          const tsNum = Number(tsRaw);
+          const ts = Number.isFinite(tsNum) && tsNum > 0 ? tsNum : now;
+          const dup = items.some((it) => {
+            if (Math.abs(it.ts - ts) > 8000) return false;
+            if (role === "assistant" && (it.kind === "message_sending" || it.kind === "message_sent")) {
+              const existing = scrubConversationPreview(replyPreviewValue(it.details || {}, (it.details as any)?.recentEvents), 72);
+              return !existing || existing === preview;
+            }
+            return false;
+          });
+          if (dup) continue;
+          synthetic.push({
+            ts,
+            kind: "conversation_turn",
+            agentId: role === "assistant" ? "main" : "user",
+            sessionKey: mainSession,
+            details: {
+              role,
+              contentPreview: preview,
+            },
+          });
+        }
+        conversationFeedCache = { at: now, items: synthetic.slice(-6) };
+        return items.concat(conversationFeedCache.items);
+      } catch {
+        conversationFeedCache = { at: now, items: [] };
+        return items;
+      }
     };
 
     const buildFeedV3Rows = (items: FeedItem[]): FeedRowV3[] => {
@@ -2938,6 +3045,9 @@ export default {
               if (agentId) items = items.filter((x) => x.agentId === agentId);
               if (kind) items = items.filter((x) => x.kind === (kind as any));
               items = items.slice(-limit);
+              if (!kind || kind === "conversation_turn") items = await mergeConversationFeed(items);
+              items.sort((a, b) => a.ts - b.ts);
+              items = items.slice(-Math.max(limit, 12));
 
               const tasks = groupFeedIntoTasks(items, { includeRaw });
 
