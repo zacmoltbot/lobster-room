@@ -9,6 +9,7 @@ type PluginApi = {
   logger: { info: (msg: string, meta?: any) => void; warn: (msg: string, meta?: any) => void };
   registerHttpRoute: (params: {
     path: string;
+    method?: string;
     handler: (req: IncomingMessage, res: ServerResponse) => void | Promise<void>;
   }) => void;
   on: (hookName: string, handler: (event: any, ctx: any) => any, opts?: { priority?: number }) => void;
@@ -288,30 +289,24 @@ export default {
       await fs.writeFile(roomPath(roomId, "retention.json"), JSON.stringify({ retentionMs }, null, 2));
     };
 
-    // --- HTTP: dynamic handler (prefix routing) ---
-    // OpenClaw plugin httpRoutes are exact-path matches; use httpHandler for prefix routes like static assets.
-    api.registerHttpHandler(async (req, res) => {
-      const url = readRequestUrl(req);
-      // Normalize trailing slashes so routes work with or without a final '/'
-      const pRaw = url.pathname || "/";
-      const p = (pRaw !== "/") ? pRaw.replace(/\/+$/, "") : "/";
-
-      // Static assets: /lobster-room/assets/** → <pluginDir>/assets/**
-      const assetsPrefix = "/lobster-room/assets/";
-      if (p.startsWith(assetsPrefix)) {
-        let rel = p.slice(assetsPrefix.length);
+    // --- Static assets: /lobster-room/assets/** → <pluginDir>/assets/** ---
+    api.registerHttpRoute({
+      path: "/lobster-room/assets/",
+      handler: async (req, res) => {
+        const url = readRequestUrl(req);
+        let rel = url.pathname?.slice("/lobster-room/assets/".length) || "";
         try { rel = decodeURIComponent(rel); } catch {}
         rel = rel.replace(/^\/+/, "");
         if (!rel || rel.includes("..") || rel.includes("\\")) {
           res.statusCode = 400;
           res.end("bad_request");
-          return true;
+          return;
         }
         const ct = contentTypeByExt(extname(rel));
         if (!ct) {
           res.statusCode = 415;
           res.end("unsupported_media_type");
-          return true;
+          return;
         }
         try {
           const buf = await fs.readFile(join(pluginDir, "assets", rel));
@@ -323,15 +318,17 @@ export default {
           res.statusCode = 404;
           res.end("not_found");
         }
-        return true;
-      }
+      },
+    });
 
-      // Agent label mapping API
-      if (p === "/lobster-room/api/agent-labels") {
+    // --- Agent labels API ---
+    api.registerHttpRoute({
+      path: "/lobster-room/api/agent-labels",
+      handler: async (req, res) => {
         if ((req.method || "GET").toUpperCase() === "GET") {
           const m = await readAgentLabels();
           sendJson(res, 200, { ok: true, labels: m });
-          return true;
+          return;
         }
         if ((req.method || "GET").toUpperCase() === "POST") {
           try {
@@ -353,21 +350,31 @@ export default {
           } catch (err: any) {
             sendJson(res, 400, { ok: false, error: String(err?.message || err) });
           }
-          return true;
+          return;
         }
         res.statusCode = 405;
         res.end("method_not_allowed");
-        return true;
-      }
+      },
+    });
 
-      // Rooms API
-      if (p === "/lobster-room/api/rooms" || p === "/lobster-room/api/rooms/active" || p === "/lobster-room/api/rooms/delete") {
+    // --- Rooms API ---
+    api.registerHttpRoute({
+      path: "/lobster-room/api/rooms",
+      handler: async (req, res) => {
         if ((req.method || "GET").toUpperCase() === "GET") {
           const idx = (await readRoomsIndex()) || { activeRoomId: defaultRoomId, rooms: [{ id: defaultRoomId, name: "Default", createdAt: 0, updatedAt: 0 }] };
           sendJson(res, 200, { ok: true, ...idx });
-          return true;
+          return;
         }
-        if ((req.method || "GET").toUpperCase() === "POST" && p.endsWith("/active")) {
+        res.statusCode = 405;
+        res.end("method_not_allowed");
+      },
+    });
+
+    api.registerHttpRoute({
+      path: "/lobster-room/api/rooms/active",
+      handler: async (req, res) => {
+        if ((req.method || "GET").toUpperCase() === "POST") {
           try {
             const buf = await readBody(req, 128 * 1024);
             const obj = JSON.parse(buf.toString("utf8"));
@@ -381,10 +388,17 @@ export default {
           } catch (err: any) {
             sendJson(res, 400, { ok: false, error: String(err?.message || err) });
           }
-          return true;
+          return;
         }
+        res.statusCode = 405;
+        res.end("method_not_allowed");
+      },
+    });
 
-        if ((req.method || "GET").toUpperCase() === "POST" && p.endsWith("/delete")) {
+    api.registerHttpRoute({
+      path: "/lobster-room/api/rooms/delete",
+      handler: async (req, res) => {
+        if ((req.method || "GET").toUpperCase() === "POST") {
           try {
             const buf = await readBody(req, 128 * 1024);
             const obj = JSON.parse(buf.toString("utf8"));
@@ -393,40 +407,33 @@ export default {
             if (roomId === defaultRoomId) throw new Error("cannot_delete_default");
             const idx = (await readRoomsIndex()) || { activeRoomId: defaultRoomId, rooms: [{ id: defaultRoomId, name: "Default", createdAt: 0, updatedAt: 0 }] };
             if (!idx.rooms.find((r) => r.id === roomId)) throw new Error("room_not_found");
-
-            // Remove from index
             idx.rooms = idx.rooms.filter((r) => r.id !== roomId);
             if (idx.activeRoomId === roomId) idx.activeRoomId = defaultRoomId;
             await writeRoomsIndex(idx);
-
-            // Delete directory best-effort
             try {
-              // Node 22: fs.rm available
               await fs.rm(roomPath(roomId, ""), { recursive: true, force: true });
             } catch {}
-
             sendJson(res, 200, { ok: true, activeRoomId: idx.activeRoomId });
           } catch (err: any) {
             sendJson(res, 400, { ok: false, error: String(err?.message || err) });
           }
-          return true;
+          return;
         }
-
         res.statusCode = 405;
         res.end("method_not_allowed");
-        return true;
-      }
+      },
+    });
 
-      // Retention API (per-active-room)
-      if (p === "/lobster-room/api/retention") {
+    // --- Retention API ---
+    api.registerHttpRoute({
+      path: "/lobster-room/api/retention",
+      handler: async (req, res) => {
         const roomId = await getActiveRoomId();
-
         if ((req.method || "GET").toUpperCase() === "GET") {
           const retentionMs = await readRetention(roomId);
           sendJson(res, 200, { ok: true, retentionMs });
-          return true;
+          return;
         }
-
         if ((req.method || "GET").toUpperCase() === "POST") {
           try {
             const buf = await readBody(req, 128 * 1024);
@@ -438,34 +445,38 @@ export default {
           } catch (err: any) {
             sendJson(res, 400, { ok: false, error: String(err?.message || err) });
           }
-          return true;
+          return;
         }
-
         res.statusCode = 405;
         res.end("method_not_allowed");
-        return true;
-      }
+      },
+    });
 
-      // Manual map API (user painted walkable zones) (per-active-room)
-      if (p === "/lobster-room/api/manual-map" || p === "/lobster-room/api/manual-map/reset") {
+    // --- Manual map API ---
+    api.registerHttpRoute({
+      path: "/lobster-room/api/manual-map/reset",
+      handler: async (req, res) => {
+        if ((req.method || "GET").toUpperCase() !== "POST") {
+          res.statusCode = 405;
+          res.end("method_not_allowed");
+          return;
+        }
         const roomId = await getActiveRoomId();
         const mapPath = roomPath(roomId, "manual-map.json");
-
-        if (p.endsWith("/reset")) {
-          if ((req.method || "GET").toUpperCase() !== "POST") {
-            res.statusCode = 405;
-            res.end("method_not_allowed");
-            return true;
-          }
-          try {
-            await fs.unlink(mapPath).catch(() => undefined);
-            sendJson(res, 200, { ok: true });
-          } catch (err: any) {
-            sendJson(res, 500, { ok: false, error: String(err?.message || err) });
-          }
-          return true;
+        try {
+          await fs.unlink(mapPath).catch(() => undefined);
+          sendJson(res, 200, { ok: true });
+        } catch (err: any) {
+          sendJson(res, 500, { ok: false, error: String(err?.message || err) });
         }
+      },
+    });
 
+    api.registerHttpRoute({
+      path: "/lobster-room/api/manual-map",
+      handler: async (req, res) => {
+        const roomId = await getActiveRoomId();
+        const mapPath = roomPath(roomId, "manual-map.json");
         if ((req.method || "GET").toUpperCase() === "GET") {
           try {
             const txt = await fs.readFile(mapPath, "utf8");
@@ -477,22 +488,19 @@ export default {
             res.statusCode = 404;
             res.end("not_found");
           }
-          return true;
+          return;
         }
-
         if ((req.method || "GET").toUpperCase() === "POST") {
           try {
             await fs.mkdir(dirname(mapPath), { recursive: true });
             const buf = await readBody(req, 512 * 1024);
             const txt = buf.toString("utf8");
             const obj = JSON.parse(txt);
-            // lightweight validation
             if (!obj || typeof obj !== "object") throw new Error("bad_json");
             if (typeof (obj as any).tx !== "number" || typeof (obj as any).ty !== "number" || !Array.isArray((obj as any).cells)) {
               throw new Error("bad_shape");
             }
             await fs.writeFile(mapPath, JSON.stringify(obj, null, 2));
-            // update room updatedAt
             const idx = await readRoomsIndex();
             if (idx) {
               const r = idx.rooms.find((x) => x.id === roomId);
@@ -503,33 +511,36 @@ export default {
           } catch (err: any) {
             sendJson(res, 400, { ok: false, error: String(err?.message || err) });
           }
-          return true;
+          return;
         }
-
         res.statusCode = 405;
         res.end("method_not_allowed");
-        return true;
-      }
+      },
+    });
 
-      // Room layout API (inferred regions)
-      if (p === "/lobster-room/api/room-layout" || p === "/lobster-room/api/room-layout/reset") {
-        const layoutPath = join(rootUserDir, "room-layout.json");
-
-        if (p.endsWith("/reset")) {
-          if ((req.method || "GET").toUpperCase() !== "POST") {
-            res.statusCode = 405;
-            res.end("method_not_allowed");
-            return true;
-          }
-          try {
-            await fs.unlink(layoutPath).catch(() => undefined);
-            sendJson(res, 200, { ok: true });
-          } catch (err: any) {
-            sendJson(res, 500, { ok: false, error: String(err?.message || err) });
-          }
-          return true;
+    // --- Room layout API ---
+    api.registerHttpRoute({
+      path: "/lobster-room/api/room-layout/reset",
+      handler: async (req, res) => {
+        if ((req.method || "GET").toUpperCase() !== "POST") {
+          res.statusCode = 405;
+          res.end("method_not_allowed");
+          return;
         }
+        const layoutPath = join(rootUserDir, "room-layout.json");
+        try {
+          await fs.unlink(layoutPath).catch(() => undefined);
+          sendJson(res, 200, { ok: true });
+        } catch (err: any) {
+          sendJson(res, 500, { ok: false, error: String(err?.message || err) });
+        }
+      },
+    });
 
+    api.registerHttpRoute({
+      path: "/lobster-room/api/room-layout",
+      handler: async (req, res) => {
+        const layoutPath = join(rootUserDir, "room-layout.json");
         if ((req.method || "GET").toUpperCase() === "GET") {
           try {
             const txt = await fs.readFile(layoutPath, "utf8");
@@ -541,15 +552,13 @@ export default {
             res.statusCode = 404;
             res.end("not_found");
           }
-          return true;
+          return;
         }
-
         if ((req.method || "GET").toUpperCase() === "POST") {
           try {
             await fs.mkdir(rootUserDir, { recursive: true });
             const buf = await readBody(req, 512 * 1024);
             const txt = buf.toString("utf8");
-            // validate JSON shape lightly
             const obj = JSON.parse(txt);
             if (!obj || typeof obj !== "object") throw new Error("bad_json");
             await fs.writeFile(layoutPath, JSON.stringify(obj, null, 2));
@@ -557,34 +566,39 @@ export default {
           } catch (err: any) {
             sendJson(res, 400, { ok: false, error: String(err?.message || err) });
           }
-          return true;
+          return;
         }
-
         res.statusCode = 405;
         res.end("method_not_allowed");
-        return true;
-      }
+      },
+    });
 
-      // Room image API (per-active-room)
-      if (p === "/lobster-room/api/room-image/info" || p === "/lobster-room/api/room-image" || p === "/lobster-room/api/room-image/reset") {
-        const roomId = await getActiveRoomId();
-        const imgPath = roomPath(roomId, "room.jpg");
-
-        // info
-        if (p.endsWith("/info")) {
+    // --- Room image API ---
+    api.registerHttpRoute({
+      path: "/lobster-room/api/room-image/info",
+      handler: async (req, res) => {
+        if ((req.method || "GET").toUpperCase() === "GET") {
+          const roomId = await getActiveRoomId();
           const idx = await readRoomsIndex();
           const room = idx?.rooms?.find((r) => r.id === roomId) || { id: roomId, name: roomId, createdAt: 0, updatedAt: 0 };
           sendJson(res, 200, { ok: true, exists: true, roomId, roomName: room.name, updatedAt: room.updatedAt || null });
-          return true;
+          return;
         }
+        res.statusCode = 405;
+        res.end("method_not_allowed");
+      },
+    });
 
-        // reset = switch to default (do not delete)
-        if (p.endsWith("/reset")) {
-          if ((req.method || "GET").toUpperCase() !== "POST") {
-            res.statusCode = 405;
-            res.end("method_not_allowed");
-            return true;
-          }
+    api.registerHttpRoute({
+      path: "/lobster-room/api/room-image/reset",
+      handler: async (req, res) => {
+        if ((req.method || "GET").toUpperCase() !== "POST") {
+          res.statusCode = 405;
+          res.end("method_not_allowed");
+          return;
+        }
+        const roomId = await getActiveRoomId();
+        if (roomId !== defaultRoomId) {
           try {
             const idx = (await readRoomsIndex()) || { activeRoomId: defaultRoomId, rooms: [{ id: defaultRoomId, name: "Default", createdAt: 0, updatedAt: 0 }] };
             idx.activeRoomId = defaultRoomId;
@@ -593,30 +607,32 @@ export default {
           } catch (err: any) {
             sendJson(res, 500, { ok: false, error: String(err?.message || err) });
           }
-          return true;
+          return;
         }
+        sendJson(res, 200, { ok: true, activeRoomId: defaultRoomId });
+      },
+    });
 
+    api.registerHttpRoute({
+      path: "/lobster-room/api/room-image",
+      handler: async (req, res) => {
+        const roomId = await getActiveRoomId();
+        const imgPath = roomPath(roomId, "room.jpg");
         // GET image bytes
-        // Cache strategy A: serve the image with a long-lived immutable cache.
-        // Frontend uses a versioned query param (?v=<updatedAt>) so this is safe.
         if ((req.method || "GET").toUpperCase() === "GET") {
           try {
             const st = await fs.stat(imgPath);
             const etag = `W/"${st.size}-${Math.floor(st.mtimeMs)}"`;
-
             res.setHeader("content-type", "image/jpeg");
             res.setHeader("cache-control", "public, max-age=31536000, immutable");
             res.setHeader("etag", etag);
             res.setHeader("last-modified", st.mtime.toUTCString());
-
-            // Conditional GET: if the browser already has this exact content cached.
             const inm = String(req.headers["if-none-match"] || "");
             if (inm && inm === etag) {
               res.statusCode = 304;
               res.end();
-              return true;
+              return;
             }
-
             const buf = await fs.readFile(imgPath);
             res.statusCode = 200;
             res.end(buf);
@@ -624,16 +640,15 @@ export default {
             res.statusCode = 404;
             res.end("not_found");
           }
-          return true;
+          return;
         }
-
         // POST upload multipart: create new room, set active, create empty manual map
         if ((req.method || "GET").toUpperCase() === "POST") {
           const ct = String(req.headers["content-type"] || "");
           const m = ct.match(/multipart\/form-data;\s*boundary=([^;]+)/i);
           if (!m) {
             sendJson(res, 400, { ok: false, error: "expected_multipart" });
-            return true;
+            return;
           }
           const boundary = m[1];
           try {
@@ -642,34 +657,26 @@ export default {
             const ext = extFromContentType(filePart.contentType) || extname(filePart.filename).toLowerCase();
             if (![".png", ".jpg", ".jpeg", ".webp"].includes(ext)) {
               sendJson(res, 415, { ok: false, error: "unsupported_image_type", contentType: filePart.contentType });
-              return true;
+              return;
             }
-
             const id = `room-${Date.now()}`;
             await fs.mkdir(roomPath(id, ""), { recursive: true });
-            // Store as JPEG to simplify; keep bytes as-is (we don't transcode here).
             await fs.writeFile(roomPath(id, "room.jpg"), filePart.data);
             const empty = { version: 1, tx: 32, ty: 20, cells: new Array(32 * 20).fill(null), updatedAt: Date.now() };
             await fs.writeFile(roomPath(id, "manual-map.json"), JSON.stringify(empty, null, 2));
-
             const idx = (await readRoomsIndex()) || { activeRoomId: defaultRoomId, rooms: [{ id: defaultRoomId, name: "Default", createdAt: 0, updatedAt: 0 }] };
             idx.rooms.push({ id, name: filePart.filename?.slice(0, 32) || id, createdAt: Date.now(), updatedAt: Date.now() });
             idx.activeRoomId = id;
             await writeRoomsIndex(idx);
-
             sendJson(res, 200, { ok: true, roomId: id, activeRoomId: id });
           } catch (err: any) {
             sendJson(res, 500, { ok: false, error: String(err?.message || err) });
           }
-          return true;
+          return;
         }
-
         res.statusCode = 405;
         res.end("method_not_allowed");
-        return true;
-      }
-
-      return false;
+      },
     });
 
     const cooldownMs = Number.parseInt((process.env.LOBSTER_ROOM_IDLE_COOLDOWN_MS || "1500").trim(), 10) || 1500;
