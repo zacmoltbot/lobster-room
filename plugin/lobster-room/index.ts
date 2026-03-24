@@ -1176,7 +1176,11 @@ export default {
         const d = typeof it.durationMs === "number" ? ` (${Math.round(it.durationMs)}ms)` : "";
         return `${agent} ${tn} done${d}`.trim();
       }
-      if (it.kind === "tool_result_persist") return `${agent} tool result persisted`;
+      if (it.kind === "tool_result_persist") {
+        // tool_result_persist is an internal storage hook — do not surface raw event name.
+        // Show a neutral, user-facing label instead.
+        return `${agent} Working`.trim();
+      }
       if (it.kind === "message_sending") {
         const to = it.to ? redactSecretsInText(it.to) : "(unknown)";
         return `sending message → ${to}`;
