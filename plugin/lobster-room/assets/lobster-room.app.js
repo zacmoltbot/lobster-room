@@ -2472,7 +2472,7 @@
     function feedIsGenericTaskLabel(raw){
       try{
         const out = String(raw || '').trim().toLowerCase();
-        return ['scheduled task', 'task', 'run a command', 'running a command', 'command', 'shell command', 'terminal command'].includes(out);
+        return ['scheduled task', 'task', 'run a command', 'running a command', 'command', 'shell command', 'terminal command', 'subagent', 'spawn'].includes(out);
       }catch{return false}
     }
 
@@ -2699,6 +2699,10 @@
     function feedNormalizeAgentId(v){
       const id0 = String(v || '').trim();
       if(!id0) return '';
+      // Suppress internal agent IDs
+      const lower = id0.toLowerCase();
+      if(lower === 'subagent' || lower === 'spawn') return '';
+      if(/^(agent|spawn):/i.test(id0)) return '';
       const m = id0.match(/^[^@]+@(.+)$/);
       return m ? m[1] : id0;
     }

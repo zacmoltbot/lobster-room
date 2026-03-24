@@ -1645,6 +1645,8 @@ export default {
         "command",
         "shell command",
         "terminal command",
+        "subagent",
+        "spawn",
       ].includes(out);
     };
 
