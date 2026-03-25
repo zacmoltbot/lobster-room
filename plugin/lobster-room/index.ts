@@ -1683,6 +1683,7 @@ export default {
                   summary: t.summary,
                   items: t.items ? t.items.map((it) => ({ ...it, preview: feedPreview(it) })) : undefined,
                 })),
+                rows: items.slice().reverse().map((it) => ({ ...it, preview: feedPreview(it) })),
                 items: includeRaw ? items.slice().reverse().map((it) => ({ ...it, preview: feedPreview(it) })) : undefined,
               });
               api.logger.info("[lobster-room] feedGet sent", { itemsLen: items.length, tasksLen: tasks.length });
