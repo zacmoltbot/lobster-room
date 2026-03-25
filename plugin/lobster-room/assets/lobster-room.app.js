@@ -1,5 +1,16 @@
     // UI build stamp (bump this when you deploy so we can confirm which frontend is running).
-    const UI_VERSION = 'feed-v3-20260316.2';
+    const UI_VERSION = 'feed-v3-20260323.1';
+
+    // Soft muted color palette for agent name coloring (deterministic, dark-background friendly).
+    const AGENT_COLORS = ['#7eb8da','#b4a7d6','#8dd49e','#e6b89c','#d4a5c9','#8ecfc9','#d4c88a'];
+
+    // Deterministic hash → color index (same agent name always gets same color).
+    function agentColor(name){
+      if(!name) return '';
+      let h = 0;
+      for(let i=0;i<name.length;i++) h = (h*31 + name.charCodeAt(i)) >>> 0;
+      return AGENT_COLORS[h % AGENT_COLORS.length];
+    }
 
     const STATES = [
       {key:'reply', cls:'b-reply', label:'💬 replying'},
@@ -1177,11 +1188,38 @@
     function renderLegend(){
       const el = document.getElementById('legend');
       el.innerHTML = '';
+      MODEL._legendChips = {};
       for(const s of STATES){
         const chip = document.createElement('div');
         chip.className = 'chip';
-        chip.innerHTML = `<b>${s.label.split(' ')[0]}</b> ${s.label.split(' ').slice(1).join(' ')}`;
+        chip.dataset.key = s.key;
+        const icon = s.label.split(' ')[0];
+        const labelText = s.label.split(' ').slice(1).join(' ');
+        chip.innerHTML = `<b>${icon}</b> ${labelText} <span class="chip-count"></span>`;
         el.appendChild(chip);
+        MODEL._legendChips[s.key] = chip;
+      }
+    }
+
+    function refreshLegend(){
+      const agents = Array.isArray(MODEL.agents) ? MODEL.agents : [];
+      const counts = { reply: 0, think: 0, tool: 0, build: 0, wait: 0, err: 0 };
+      for(const a of agents){
+        const st = String(a && a.state || 'idle').toLowerCase();
+        // Map UI states to legend keys
+        if(st === 'reply' || st === 'replying') counts.reply++;
+        else if(st === 'think' || st === 'thinking') counts.think++;
+        else if(st === 'tool' || st === 'tools') counts.tool++;
+        else if(st === 'build' || st === 'building') counts.build++;
+        else if(st === 'wait' || st === 'idle') counts.wait++;
+        else if(st === 'err' || st === 'error' || st === 'failed') counts.err++;
+      }
+      if(MODEL._legendChips){
+        for(const [key, chip] of Object.entries(MODEL._legendChips)){
+          const cnt = counts[key] || 0;
+          const countEl = chip.querySelector('.chip-count');
+          if(countEl) countEl.textContent = cnt > 0 ? `(${cnt})` : '';
+        }
       }
     }
 
@@ -1849,41 +1887,39 @@
           let txt = '';
 
           if(show){
-            // Prefer statusText from backend (session_status), if present.
-            const st = a && a.meta && typeof a.meta.statusText === 'string' ? a.meta.statusText : '';
-            if(st) txt = st;
-
-            // Otherwise, try to infer from most recent event.
-            if(!txt){
-              const evs = a && a.debug && a.debug.decision && Array.isArray(a.debug.decision.recentEvents) ? a.debug.decision.recentEvents : [];
-              const last = evs && evs.length ? evs[evs.length-1] : null;
-              const kind = last && last.kind ? String(last.kind) : '';
-              const d = last && last.data ? last.data : null;
-              if(kind === 'message_sending' && d && (d.contentPreview||d.content)){
-                const pv = String(d.contentPreview||d.content||'').trim();
-                txt = pv ? ('send: ' + pv.slice(0, 60)) : '';
-              }else if(kind === 'before_tool_call' && d && d.toolName){
-                txt = 'tool: ' + d.toolName;
-                if(d.toolName==='exec' && d.command) txt += ' · ' + String(d.command).slice(0, 60);
-                if(d.toolName==='sessions_spawn' && d.task) txt += ' · ' + String(d.task).slice(0, 60);
-                if(d.toolName==='message' && d.message) txt += ' · ' + String(d.message).slice(0, 60);
-                if(d.toolName==='web_fetch' && d.url) txt += ' · ' + String(d.url).slice(0, 60);
-              }else if(stNorm==='tool'){
+            // Do not surface raw backend/debug tool strings in the footer/detail area.
+            // Build a short end-user-readable status from the latest event instead.
+            const evs = a && a.debug && a.debug.decision && Array.isArray(a.debug.decision.recentEvents) ? a.debug.decision.recentEvents : [];
+            const last = evs && evs.length ? evs[evs.length-1] : null;
+            const kind = last && last.kind ? String(last.kind) : '';
+            const d = last && last.data ? last.data : null;
+            if(kind === 'message_sending' && d){
+              txt = feedReplyingText(d, evs);
+            }else if(kind === 'before_tool_call' && d && d.toolName){
+              const tool = String(d.toolName || '').trim();
+              if(tool === 'browser') txt = 'Inspecting in browser';
+              else if(tool === 'exec') txt = feedCommandIntent(d.command||'');
+              else if(tool === 'read') txt = 'Reading project files';
+              else if(tool === 'write') txt = 'Updating project files';
+              else if(tool === 'edit') txt = 'Updating project files';
+              else if(tool === 'sessions_spawn') { const label = feedDetailTaskLabel(d, evs); txt = label ? ('Starting a helper task — ' + label) : 'Starting a helper task'; }
+              else if(tool === 'message') txt = 'Preparing a reply';
+              else if(tool === 'web_fetch') txt = 'Checking a page';
+              else txt = 'Working';
+            }else if(stNorm==='tool'){
                 // avoid redundant detail; state bubble already shows tool
                 txt = '';
               }else if(stNorm==='thinking'){
                 // avoid redundant detail; state bubble already shows thinking
                 txt = '';
               }else if(stNorm==='replying'){
-                // avoid redundant detail; state bubble already shows replying
-                txt = '';
+                txt = feedReplyingText((a && a.debug && a.debug.decision && a.debug.decision.details) || {}, evs);
               }else if(stNorm==='building'){
                 // avoid redundant detail; state bubble already shows building
                 txt = '';
               }else if(stNorm==='error'){
                 txt = 'error';
               }
-            }
           }
 
           txt = (txt||'').replace(/\s+/g,' ').trim();
@@ -2077,9 +2113,7 @@
     }
 
     async function refreshActivity(){
-      // Lightweight build/activity monitor. If file exists, show it; otherwise keep blank.
-      const el = document.getElementById('activity');
-      if(!el) return;
+      // Lightweight build/activity monitor. Keep MODEL.activity fresh, but do not render agent status in the footer.
       if(MODEL.activityPollDisabled) return;
       try{
         const r = await fetch('./api/lobster-room', {
@@ -2090,12 +2124,11 @@
         });
         if(!r.ok){
           if(r.status === 404){ MODEL.activityPollDisabled = true; }
-          el.textContent = '';
           return;
         }
         const data = await r.json();
         const snap = (data && data.snapshot) ? data.snapshot : null;
-        if(!data || !data.ok || !snap || !snap.agents){ el.textContent=''; MODEL.activity=null; return; }
+        if(!data || !data.ok || !snap || !snap.agents){ MODEL.activity=null; return; }
 
         const agents = snap.agents || {};
         let agentId = 'main';
@@ -2104,7 +2137,7 @@
           agentId = ids[0] || '';
         }
         const row = agentId ? agents[agentId] : null;
-        if(!row || !row.state){ el.textContent=''; MODEL.activity=null; return; }
+        if(!row || !row.state){ MODEL.activity=null; return; }
 
         const updatedAt = (typeof snap.updatedAtMs === 'number') ? snap.updatedAtMs : null;
         const ageMs = (updatedAt!=null) ? (Date.now() - updatedAt) : null;
@@ -2112,29 +2145,27 @@
         const fresh = (ageMs!=null && isFinite(ageMs) && ageMs < 45*1000);
         const rawState = String(row.state||'');
         const effectiveStatus = (rawState === 'idle') ? 'paused' : (rawState === 'error' ? 'blocked' : 'working');
-        const ageTxt = (ageSec==null) ? '' : (' · ' + ageSec + 's ago');
+        const ageTxt = (ageSec==null) ? '' : (' · updated ' + ageSec + 's ago');
 
         const who = MODEL.selfName || 'Zac';
-        const detail = (row.details && (row.details.toolName || row.details.statusText)) ? (row.details.toolName || row.details.statusText) : '';
         let msg = '';
         if(effectiveStatus === 'working'){
-          msg = `${who}: WORKING ${detail||''}${ageTxt}`;
+          msg = `${who}: WORKING${ageTxt}`;
         }else if(effectiveStatus === 'blocked'){
-          msg = `${who}: BLOCKED ${detail||''}${ageTxt}`;
+          msg = `${who}: BLOCKED${ageTxt}`;
         }else{
-          msg = `${who}: PAUSED ${detail||''}${ageTxt}`;
+          msg = `${who}: PAUSED${ageTxt}`;
         }
 
-        el.textContent = msg.replace(/\s+/g,' ').trim();
         MODEL.activity = {
           status: effectiveStatus,
           task: null,
           step: null,
-          detail: detail || null,
+          detail: null,
           updatedAt,
           fresh,
         };
-      }catch{ el.textContent=''; MODEL.activity = null; }
+      }catch{ MODEL.activity = null; }
     }
 
     async function tick(){
@@ -2220,6 +2251,7 @@
           }
 
           renderAgents();
+          refreshLegend();
           refreshActivity();
           document.getElementById('ts').textContent = 'Updated: ' + new Date().toLocaleString();
           document.getElementById('api').textContent = 'API: /api/lobster-room';
@@ -2240,7 +2272,7 @@
 
     // --- Message Feed ---
     const FEED = {
-      show: false,
+      show: true, // feed always visible
 
       // v3: human-friendly rows (newest-first) with folded low-level ops.
       rows: [],
@@ -2268,6 +2300,7 @@
       _pollInFlightAt: 0,
       _pollTimer: null,
       _lastOkMs: 0,
+      _knownAgents: [],
 
       // "since last viewed" anchor (set when panel opens; persisted when panel closes)
       lastViewedMs: null,
@@ -2305,6 +2338,298 @@
         const day = Math.round(hr/24);
         return day + 'd ago';
       }catch{return ''}
+    }
+
+    function feedUpdatedAge(ts){
+      const age = feedAge(ts);
+      return age ? age : ''; // "Xs ago" without "updated" prefix - more human
+    }
+
+    function feedReplyPreviewValue(details, recentEvents){
+      const pick = (v)=> (typeof v === 'string' && v.trim()) ? v : '';
+      const from = (obj)=>{
+        if(!obj || typeof obj !== 'object') return '';
+        return pick(obj.contentPreview)
+          || pick(obj.preview)
+          || pick(obj.message)
+          || pick(obj.content)
+          || pick(obj.text)
+          || pick(obj.outputPreview)
+          || '';
+      };
+      const direct = from(details);
+      if(direct) return direct;
+      const evs = Array.isArray(recentEvents) ? recentEvents : [];
+      for(let i=evs.length-1;i>=0;i--){
+        const ev = evs[i];
+        const kind = String((ev && ev.kind) || '');
+        if(kind !== 'message_sending' && kind !== 'message_sent') continue;
+        const data = ev.data && typeof ev.data === 'object' ? ev.data : null;
+        const val = from(data) || from(ev.details);
+        if(val) return val;
+      }
+      return '';
+    }
+
+    function feedScrubReplyPreview(raw, maxLen){
+      try{
+        if(typeof raw !== 'string') return '';
+        let out = feedRedact(raw).replace(/[\r\n\t]+/g, ' ').replace(/\s+/g, ' ').trim();
+        if(!out) return '';
+        out = out
+          .replace(/^(["'“”‘’])\s*(.*?)\s*\1$/u, '$2')
+          .replace(/\b[\w.+-]+@[\w.-]+\.[A-Za-z]{2,}\b/g, '[redacted email]')
+          .replace(/\b(?:\+?\d[\d\s().-]{6,}\d)\b/g, '[redacted number]')
+          .replace(/\b\d{4,}\b/g, '[redacted]')
+          .trim();
+        if(!out || /^\[(?:redacted|hex_redacted|url|session)\]$/i.test(out)) return '';
+        if(/^(replying|reply|message|sent)$/i.test(out)) return '';
+        const lim = Math.max(8, Number(maxLen||48));
+        if(out.length > lim) out = out.slice(0, lim - 1).trimEnd() + '…';
+        return '"' + out + '"';
+      }catch{return ''}
+    }
+
+    function feedIsInternalTransportToken(raw){
+      const out = String(raw || '').trim().toLowerCase();
+      if(!out) return false;
+      if(/^(discord|slack|telegram|whatsapp)(?:[:/._-]|$)/i.test(out)) return true;
+      return ['discord','slack','telegram','whatsapp','channel','conversation','thread','session','provider','transport','messageprovider'].includes(out);
+    }
+
+    function feedLooksInternalSlugLabel(raw){
+      const s = String(raw || '').trim();
+      if(!s) return false;
+      const lower = s.toLowerCase();
+      if(feedIsInternalTransportToken(lower)) return true;
+      if(/^(agent|spawn|cron|scheduled|schedule|session|provider|transport|messageprovider)([:/_-]|$)/i.test(lower)) return true;
+      if(/^agent:[^:]+:/i.test(s) || /^spawn:/i.test(s)) return true;
+      if(/^[a-z0-9]+(?:[-_][a-z0-9]+){3,}$/i.test(s)) return true;
+      if(/\bcanonical\b|\bcleanup\b|\bfinal\b|\bpass\b/.test(lower) && /[-_]/.test(s) && !/\s/.test(s)) return true;
+      return false;
+    }
+
+    function feedReplyTarget(details, recentEvents){
+      const pick = (v)=> (typeof v === 'string' && v.trim()) ? v.trim() : '';
+      const candidates = [
+        pick(details && details.to),
+        pick(details && details.target),
+        pick(details && details.user),
+        pick(details && details.name),
+        pick(details && details.recipient),
+        pick(details && details.channel),
+        pick(details && details.messageProvider),
+      ];
+      const evs = Array.isArray(recentEvents) ? recentEvents : [];
+      for(let i=evs.length-1;i>=0 && candidates.length < 8;i--){
+        const ev = evs[i];
+        if(!ev || String(ev.kind||'') !== 'message_sending') continue;
+        const data = ev.data && typeof ev.data === 'object' ? ev.data : null;
+        const details2 = ev.details && typeof ev.details === 'object' ? ev.details : null;
+        candidates.push(
+          pick(data && data.to), pick(details2 && details2.to),
+          pick(data && data.target), pick(details2 && details2.target),
+          pick(data && data.recipient), pick(details2 && details2.recipient),
+          pick(data && data.channel), pick(details2 && details2.channel),
+          pick(data && data.messageProvider), pick(details2 && details2.messageProvider)
+        );
+      }
+      for(const raw of candidates){
+        if(!raw) continue;
+        const cleaned = raw
+          .replace(/^[@#]+/, '')
+          .replace(/^[^A-Za-z\u00C0-\u024F\u4E00-\u9FFF\u3400-\u4DBF]+/, '')
+          .replace(/[^A-Za-z0-9\u00C0-\u024F\u4E00-\u9FFF\u3400-\u4DBF._ -]+$/g, '')
+          .trim();
+        if(!cleaned) continue;
+        if(feedIsInternalTransportToken(cleaned)) continue;
+        if(/^[-_a-f0-9]{8,}$/i.test(cleaned)) continue;
+        if(/^\d+$/.test(cleaned)) continue;
+        if(cleaned.length > 32) continue;
+        return cleaned;
+      }
+      return '';
+    }
+
+    function feedReplyingText(details, recentEvents){
+      const target = feedReplyTarget(details, recentEvents);
+      const pv = feedScrubReplyPreview(feedReplyPreviewValue(details, recentEvents), 48);
+      if(target && pv) return 'replying to ' + target + ' — ' + pv;
+      if(pv) return 'replying — ' + pv;
+      return target ? ('replying to ' + target) : 'replying';
+    }
+
+    function feedReplyingNow(details, recentEvents){
+      return feedReplyingText(details, recentEvents);
+    }
+
+    function feedSpecificLabel(raw, maxLen){
+      try{
+        if(typeof raw !== 'string') return '';
+        if(feedLooksInternalSlugLabel(raw)) return '';
+        let out = feedRedact(raw).replace(/\s+/g, ' ').trim();
+        if(!out) return '';
+        out = out.replace(/^[\s:;,.\-–—]+/, '').replace(/[\s:;,.\-–—]+$/, '').trim();
+        if(!out) return '';
+        if(/^(tool|command|task|session|agent|cron|scheduled|schedule|spawn|channel|conversation|thread|provider|transport|messageprovider)$/i.test(out)) return '';
+        if(feedIsInternalTransportToken(out)) return '';
+        if(feedLooksInternalSlugLabel(out)) return '';
+        const lim = Math.max(12, Number(maxLen||96));
+        if(out.length > lim) out = out.slice(0, lim - 1).trimEnd() + '…';
+        return out;
+      }catch{return ''}
+    }
+
+    function feedSessionTaskLabel(raw){
+      try{
+        const sk = String(raw || '').trim();
+        if(!sk) return '';
+        const parts = sk.split(':').map(s=>String(s||'').trim()).filter(Boolean);
+        for(let i=parts.length-1;i>=0;i--){
+          const part = parts[i];
+          if(/^(agent|spawn|cron|scheduled|schedule|main)$/i.test(part)) continue;
+          if(/^[a-f0-9-]{8,}$/i.test(part) || /^\d+$/.test(part)) continue;
+          if(part.length < 3) continue;
+          const label = feedSpecificLabel(part.replace(/[_-]+/g, ' '), 80);
+          if(label) return label;
+        }
+      }catch{}
+      return '';
+    }
+
+    function feedIsGenericTaskLabel(raw){
+      try{
+        const out = String(raw || '').trim().toLowerCase();
+        return ['scheduled task', 'task', 'run a command', 'running a command', 'command', 'shell command', 'terminal command', 'subagent', 'spawn'].includes(out);
+      }catch{return false}
+    }
+
+    function feedDetailTaskLabel(details, recentEvents){
+      const d = details && typeof details === 'object' ? details : {};
+      const candidates = [d.label, d.task, d.title, d.summary, d.purpose, d.name, d.prompt, feedSessionTaskLabel(d.sessionKey), feedSessionTaskLabel(d.parentSessionKey)];
+      for(const value of candidates){
+        const label = feedSpecificLabel(value, 96);
+        if(label && !feedIsGenericTaskLabel(label)) return label;
+      }
+      const evs = Array.isArray(recentEvents) ? recentEvents : [];
+      for(let i=evs.length-1;i>=0;i--){
+        const ev = evs[i];
+        const data = ev && ev.data && typeof ev.data === 'object' ? ev.data : (ev && ev.details && typeof ev.details === 'object' ? ev.details : null);
+        if(!data) continue;
+        for(const value of [data.label, data.task, data.title, data.summary, data.purpose, data.name, feedSessionTaskLabel(data.sessionKey)]){
+          const label = feedSpecificLabel(value, 96);
+          if(label && !feedIsGenericTaskLabel(label)) return label;
+        }
+      }
+      return '';
+    }
+
+    function feedInferWorkContext(details){
+      const d = details && typeof details === 'object' ? details : {};
+      const sk = String(d.sessionKey || '').toLowerCase();
+      const mp = String(d.messageProvider || '').toLowerCase();
+      if(d.spawnedBy) return 'helper';
+      if(sk.startsWith('spawn:')) return 'helper';
+      if(/cron|schedule|scheduled/.test(sk) || /cron|schedule|scheduled/.test(mp)) return 'scheduled';
+      return '';
+    }
+
+    function feedThinkingText(details, recentEvents){
+      const ctx = feedInferWorkContext(details);
+      const label = feedDetailTaskLabel(details, recentEvents);
+      if(ctx === 'helper') return label ? ('working on helper task — ' + label) : 'working on helper task';
+      if(ctx === 'scheduled') return label ? ('running scheduled task — ' + label) : 'running scheduled task';
+      return label || '';
+    }
+
+    function feedCommandIntent(raw){
+      try{
+        const cmd = String(raw || '').replace(/\s+/g, ' ').trim();
+        if(!cmd) return 'running a command';
+        const tests = [
+          [/\bgit\s+status\b/i, 'running a command — check repo status'],
+          [/\bgit\s+diff\b/i, 'running a command — inspect code changes'],
+          [/\bgit\s+log\b/i, 'running a command — review commit history'],
+          [/\bgit\s+(branch|checkout|switch)\b/i, 'running a command — manage git branches'],
+          [/\b(npm|pnpm|yarn|bun)\s+(test|run\s+test)\b/i, 'running a command — run tests'],
+          [/\b(pytest|jest|vitest|mocha|go\s+test|cargo\s+test)\b/i, 'running a command — run tests'],
+          [/\b(npm|pnpm|yarn|bun)\s+(install|add)\b/i, 'running a command — install dependencies'],
+          [/\b(npm|pnpm|yarn|bun)\s+run\s+build\b|\b(make|cargo|go|python)\b.*\bbuild\b/i, 'running a command — build the project'],
+          [/\b(npm|pnpm|yarn|bun)\s+run\s+dev\b|\b(npm|pnpm|yarn|bun)\s+start\b/i, 'running a command — start the app'],
+          [/\b(ls|find|tree)\b/i, 'running a command — inspect project files'],
+          [/\b(cat|sed|awk|head|tail|grep)\b/i, 'running a command — inspect file contents'],
+        ];
+        for(const [re, label] of tests){ if(re.test(cmd)) return label; }
+        const safe = feedRedact(cmd).slice(0, 80).trim();
+        return safe ? ('running a command — ' + safe) : 'running a command';
+      }catch{return 'running a command'}
+    }
+
+    function feedCommandActivity(raw){
+      try{
+        const cmd = String(raw || '').replace(/\s+/g, ' ').trim();
+        if(!cmd) return 'running a command';
+        const tests = [
+          [/\bgit\s+status\b/i, 'checking repo status'],
+          [/\bgit\s+diff\b/i, 'reviewing code changes'],
+          [/\bgit\s+log\b/i, 'reviewing commit history'],
+          [/\bgit\s+(branch|checkout|switch)\b/i, 'switching git branches'],
+          [/\b(npm|pnpm|yarn|bun)\s+(test|run\s+test)\b/i, 'running tests'],
+          [/\b(pytest|jest|vitest|mocha|go\s+test|cargo\s+test)\b/i, 'running tests'],
+          [/\b(npm|pnpm|yarn|bun)\s+(install|add)\b/i, 'installing dependencies'],
+          [/\b(npm|pnpm|yarn|bun)\s+run\s+build\b|\b(make|cargo|go|python)\b.*\bbuild\b/i, 'building the project'],
+          [/\b(npm|pnpm|yarn|bun)\s+run\s+dev\b|\b(npm|pnpm|yarn|bun)\s+start\b/i, 'starting the app'],
+          [/\b(ls|find|tree)\b/i, 'reviewing project files'],
+          [/\b(cat|sed|awk|head|tail)\b/i, 'reviewing file contents'],
+          [/\bgrep\b/i, 'searching project files'],
+        ];
+        for(const [re, label] of tests){ if(re.test(cmd)) return label; }
+        return 'running a command';
+      }catch{return 'running a command'}
+    }
+
+    function feedActivityFromTool(toolName, details, recentEvents, opts){
+      const compact = !!(opts && opts.compact);
+      const tn = String(toolName || '').trim().toLowerCase();
+      if(tn === 'channel' || tn === 'conversation' || tn === 'thread' || tn === 'session') return '';
+      if(tn === 'browser') return compact ? 'checking in browser' : 'inspecting in browser';
+      if(tn === 'exec') return compact ? feedCommandActivity(details && details.command) : feedCommandIntent(details && details.command);
+      if(tn === 'read') return compact ? 'reviewing project files' : 'reading project files';
+      if(tn === 'write' || tn === 'edit') return compact ? 'updating project files' : 'updating project files';
+      if(tn === 'message') return compact ? feedReplyingNow(details, recentEvents) : 'preparing a reply';
+      if(tn === 'web_fetch') return compact ? 'checking a page' : 'checking a page';
+      if(tn === 'sessions_spawn'){ const label = feedDetailTaskLabel(details, recentEvents); return label ? ('starting a helper task — ' + label) : 'starting a helper task'; }
+      return compact ? 'using tools' : 'using tool';
+    }
+
+    function feedInferRecentActivity(details, recentEvents){
+      const directTool = details && details.toolName;
+      if(directTool) return feedActivityFromTool(directTool, details, recentEvents, {compact:true});
+      const evs = Array.isArray(recentEvents) ? recentEvents : [];
+      for(let i=evs.length-1;i>=0;i--){
+        const ev = evs[i];
+        if(!ev) continue;
+        const kind = String(ev.kind || '').trim().toLowerCase();
+        const data = ev.data && typeof ev.data === 'object' ? ev.data : (ev.details && typeof ev.details === 'object' ? ev.details : {});
+        if(kind === 'message_sending') return feedReplyingNow(data, recentEvents);
+        if(kind === 'before_tool_call' || kind === 'after_tool_call' || kind === 'tool_result_persist'){
+          const evTool = String((ev.toolName || data.toolName || '')).trim();
+          if(evTool) return feedActivityFromTool(evTool, data, recentEvents, {compact:true});
+        }
+      }
+      return '';
+    }
+
+    function feedHumanState(state, toolName, details, recentEvents){
+      const st = String(state || '').trim().toLowerCase();
+      const tn = String(toolName || '').trim().toLowerCase();
+      if(st === 'tool') return feedActivityFromTool(tn, details, recentEvents, {compact:true}) || 'working';
+      if(st === 'reply') return feedReplyingNow(details, recentEvents);
+      if(st === 'thinking') return feedThinkingText(details, recentEvents) || feedInferRecentActivity(details, recentEvents) || 'thinking';
+      if(st === 'error') return 'error';
+      if(st === 'idle' || st === 'wait') return 'idle';
+      if(/^(channel|conversation|thread|session)$/i.test(st)) return '';
+      return st || 'idle';
     }
 
     function feedMaskUrls(s){
@@ -2399,6 +2724,23 @@
       return (t && Array.isArray(t.items)) ? t.items : [];
     }
 
+    function feedNormalizeAgentId(v){
+      const id0 = String(v || '').trim();
+      if(!id0) return '';
+      // Suppress internal agent IDs
+      const lower = id0.toLowerCase();
+      if(lower === 'subagent' || lower === 'spawn') return '';
+      if(/^(agent|spawn):/i.test(id0)) return '';
+      const m = id0.match(/^[^@]+@(.+)$/);
+      return m ? m[1] : id0;
+    }
+
+    function feedMatchesAgentFilter(v){
+      const want = feedNormalizeAgentId(FEED._agentFilter || '');
+      if(!want) return true;
+      return feedNormalizeAgentId(v) === want;
+    }
+
     function feedRender(){
       const listEl = document.getElementById('feed-list');
       const detailEl = document.getElementById('feed-detail');
@@ -2409,14 +2751,27 @@
       const nowEl = document.getElementById('feed-now');
       if(!listEl) return;
 
-      const rows = Array.isArray(FEED.rows) ? FEED.rows : [];
+      const rows = (Array.isArray(FEED.rows) ? FEED.rows : []).filter(r=> feedMatchesAgentFilter(r && r.agentId));
 
       if(statusEl){
         const base = rows.length ? (String(rows.length) + ' rows') : '—';
-        const age = FEED.latest && FEED.latest.ts ? feedAge(FEED.latest.ts) : '';
-        const ageText = age ? ' · last event: ' + age : '';
-        const extra = [(FEED.pollStatus||'').trim(), (FEED.devSpawnStatus||'').trim()].filter(Boolean).join(' · ');
-        statusEl.textContent = extra ? (base + ageText + ' · ' + extra) : (base + ageText);
+        const agentLabel = FEED._agentFilter ? ('filter: @' + FEED._agentFilter) : 'filter: all agents';
+        const extra = [agentLabel, (FEED.pollStatus||'').trim(), (FEED.devSpawnStatus||'').trim()].filter(Boolean).join(' · ');
+        statusEl.textContent = extra ? (base + ' · ' + extra) : base;
+      }
+
+      const feedPanelEl = document.getElementById('feed-panel');
+      if(feedPanelEl){
+        const knownAgentLabels = [...new Set(
+          ([]).concat(
+            FEED._knownAgents || [],
+            rows.map(r=> feedNormalizeAgentId(r && r.agentId)),
+            (MODEL.agents||[]).map(a=> feedNormalizeAgentId(a && a.id))
+          ).filter(Boolean).map(id=> '@' + id)
+        )];
+        const longestAgentLabel = knownAgentLabels.reduce((max, label)=> Math.max(max, String(label || '').length), 0);
+        const agentColCh = Math.min(Math.max(longestAgentLabel + 1, 7), 12);
+        feedPanelEl.style.setProperty('--feed-agent-col-ch', String(agentColCh) + 'ch');
       }
 
       // "Now" section (per-agent activity snapshot)
@@ -2426,19 +2781,21 @@
         for(const a of agents){
           const id0 = String(a && a.id || '').trim();
           if(!id0) continue;
-          // Strip any prefix like "resident@" to show clean agent names (@main, @qa_agent, etc)
-          const m = id0.match(/^[^@]+@(.+)$/);
-          const id = m ? m[1] : id0;
+          const id = feedNormalizeAgentId(id0);
+          if(!feedMatchesAgentFilter(id)) continue;
           const st = (a && a.debug && a.debug.decision) ? String(a.debug.decision.activityState||'idle') : 'idle';
-          // Optional detail: current tool name
-          const tn = (a && a.debug && a.debug.decision && a.debug.decision.details && a.debug.decision.details.toolName)
-            ? String(a.debug.decision.details.toolName)
+          const details = (a && a.debug && a.debug.decision && a.debug.decision.details) ? a.debug.decision.details : null;
+          const recentEvents = (a && a.debug && a.debug.decision && Array.isArray(a.debug.decision.recentEvents))
+            ? a.debug.decision.recentEvents
+            : [];
+          const tn = (details && details.toolName)
+            ? String(details.toolName)
             : '';
           const lastMs = (a && a.debug && a.debug.decision && typeof a.debug.decision.lastEventMs === 'number')
             ? a.debug.decision.lastEventMs
             : ((a && a.meta && typeof a.meta.maxUpdatedAt === 'number') ? a.meta.maxUpdatedAt : null);
-          const age = lastMs ? feedAge(lastMs) : '';
-          lines.push({ agent: '@' + id, state: st, tool: tn, age });
+          const age = lastMs ? feedUpdatedAge(lastMs) : '';
+          lines.push({ agent: '@' + id, state: feedHumanState(st, tn, details, recentEvents), age });
         }
         lines.sort((a, b)=> String(a.agent).localeCompare(String(b.agent)));
         if(lines.length){
@@ -2454,11 +2811,13 @@
             const agent = document.createElement('span');
             agent.className = 'feed-now-agent';
             agent.textContent = line.agent;
+            agent.style.color = agentColor(line.agent);
             const state = document.createElement('span');
             state.className = 'feed-now-state';
+            const isIdle = (line.state === 'idle');
+            // For idle, don't show time suffix (more human, less noisy)
             const bits = [line.state];
-            if(line.tool) bits.push(line.tool);
-            if(line.age) bits.push(line.age);
+            if(line.age && !isIdle) bits.push(line.age);
             state.textContent = bits.join(' · ');
             row.appendChild(agent);
             row.appendChild(state);
@@ -2479,7 +2838,7 @@
 
       const fmtWhat = (r)=>{
         if(!r || typeof r !== 'object') return '(event)';
-        let txt = String(r.what || r.plain || r.action || '').trim();
+        let txt = String(r.what || r.plain || r.action || r.preview || '').trim();
         if(!txt) txt = '(event)';
         if(r.rowType === 'fold') txt = 'tools · ' + txt;
         return txt;
@@ -2504,6 +2863,7 @@
         const agent = document.createElement('span');
         agent.className = 'feed-v3-agent';
         agent.textContent = r.agentId ? ('@' + r.agentId) : '—';
+        if(r.agentId) agent.style.color = agentColor('@' + r.agentId);
 
         const what = document.createElement('span');
         what.className = 'feed-v3-what';
@@ -2586,8 +2946,20 @@
           FEED.tasks = Array.isArray(data.tasks) ? data.tasks : [];
           FEED.items = [];
 
-          // Build filter list from tasks; always include current selection.
-          const agents = [...new Set((FEED.tasks||[]).map(x=>x.agentId).filter(Boolean))].sort();
+          // Build filter list from known agent ids so selecting one agent doesn't hide the others.
+          const agents = [...new Set(
+            ([]).concat(
+              FEED._knownAgents || [],
+              (FEED.tasks||[]).map(x=>x.agentId),
+              (MODEL.agents||[]).map(x=> {
+                const id0 = String(x && x.id || '').trim();
+                const m = id0.match(/^[^@]+@(.+)$/);
+                return m ? m[1] : id0;
+              }),
+              agentId || ''
+            ).filter(Boolean)
+          )].sort();
+          FEED._knownAgents = agents.slice();
           if(agentSel){
             const cur = agentSel.value;
             const opts = [''].concat(agents);
@@ -2595,7 +2967,7 @@
             for(const a of opts){
               const o = document.createElement('option');
               o.value = a;
-              o.textContent = a ? a : 'All agents';
+              o.textContent = a ? ('@' + a) : 'All agents';
               agentSel.appendChild(o);
             }
             agentSel.value = opts.includes(cur) ? cur : '';
@@ -2698,12 +3070,18 @@
 
       if(btnOpen) btnOpen.addEventListener('click', ()=> setShow(!FEED.show));
       if(btnToggle) btnToggle.addEventListener('click', ()=> setShow(false));
-      if(agentSel) agentSel.addEventListener('change', ()=> feedPollOnce());
+      if(agentSel) agentSel.addEventListener('change', ()=> {
+        FEED._agentFilter = agentSel.value || '';
+        feedRender();
+        feedPollOnce();
+      });
 
-      setShow(false);
+      setShow(true);
     }
 
     function init(){
+      // Support ?moveDebug=1 URL param to show the move debug panel
+      try{ if(/(?:\?|&)moveDebug=1\b/.test(location.search || '') || localStorage.getItem('lobsterRoom.mvdbg.visible')==='1'){ MVDBG.visible = true; } }catch{}
       feedInit();
       renderLegend();
       bindZoneHover();
@@ -2741,6 +3119,8 @@
       const agentLabelsStatus = document.getElementById('agent-labels-status');
       const agentLabelsTa = document.getElementById('agent-labels-ta');
       const btnAgentLabelsOpen = document.getElementById('btn-agent-labels-open');
+      const retentionSelect = document.getElementById('retention-select');
+      const retentionStatus = document.getElementById('retention-status');
 
       // Labels modal
       const labelsBackdrop = document.getElementById('labels-backdrop');
@@ -2761,6 +3141,17 @@
       const openSettings = ()=>{
         if(backdrop && backdrop.classList) backdrop.classList.add('show');
         refreshRoomsList();
+        // Load retention setting
+        (async ()=>{
+          if(!retentionSelect) return;
+          try{
+            const r = await fetch('./api/retention?ts=' + Date.now(), {cache:'no-store'});
+            const j = r.ok ? await r.json() : null;
+            if(j && j.retentionMs != null){
+              retentionSelect.value = String(j.retentionMs);
+            }
+          }catch{}
+        })();
         // Load agent label mapping
         (async ()=>{
           if(!agentLabelsTa) return;
@@ -2881,6 +3272,27 @@
         applyLobsterSize();
         if(lobsterSize) lobsterSize.addEventListener('input', applyLobsterSize);
         if(lobsterSize) lobsterSize.addEventListener('change', applyLobsterSize);
+      })();
+
+      (function initRetention(){
+        if(!retentionSelect) return;
+        if(retentionSelect) retentionSelect.addEventListener('change', async ()=>{
+          if(!retentionSelect) return;
+          const val = retentionSelect.value;
+          if(retentionStatus) retentionStatus.textContent = 'Saving…';
+          try{
+            const r = await fetch('./api/retention', {method:'POST', headers:{'content-type':'application/json'}, body: JSON.stringify({retentionMs: Number(val)})});
+            const j = r.ok ? await r.json().catch(()=>null) : null;
+            if(j && j.ok){
+              if(retentionStatus) retentionStatus.textContent = 'Saved.';
+            }else{
+              if(retentionStatus) retentionStatus.textContent = 'Save failed.';
+            }
+          }catch{
+            if(retentionStatus) retentionStatus.textContent = 'Save failed.';
+          }
+          setTimeout(()=>{ if(retentionStatus) retentionStatus.textContent = ''; }, 2500);
+        });
       })();
 
 
@@ -3243,8 +3655,8 @@
         if(!f){ statusEl.textContent = 'Choose an image first.'; return; }
         if(f.size > 8*1024*1024){ statusEl.textContent = 'File too large (max 8MB).'; return; }
 
-        // Aspect ratio guard: require landscape-ish images.
-        // This room view expects wide backgrounds; portrait images look odd.
+        // Aspect ratio guard: 4:3 is recommended, but slightly wider/taller images are still allowed.
+        // The manualMap / cell grid (32×20) aligns best with ~4:3 backgrounds.
         try{
           const bmp = await createImageBitmap(f);
           const w = bmp.width || 0;
@@ -3252,14 +3664,20 @@
           bmp.close && bmp.close();
           if(w>0 && h>0){
             const ratio = w / h;
-            if(ratio < 1.15){
-              statusEl.textContent = `Upload rejected: image is too portrait (w/h=${ratio.toFixed(2)}). Please use a wider image.`;
+            const RECOMMENDED_MIN = 1.25, RECOMMENDED_MAX = 1.45;
+            const ALLOWED_MIN = 1.15, ALLOWED_MAX = 1.55;
+            if(ratio < ALLOWED_MIN || ratio > ALLOWED_MAX){
+              statusEl.textContent = `⚠️ This image is too far from the recommended 4:3 ratio (w/h=${ratio.toFixed(2)}). Please upload an image closer to 4:3 for accurate zone alignment.`;
               return;
+            }
+            if(ratio < RECOMMENDED_MIN || ratio > RECOMMENDED_MAX){
+              statusEl.textContent = `⚠️ This image isn't the recommended 4:3 ratio, but you can still use it (w/h=${ratio.toFixed(2)}). Zone alignment may be less accurate.`;
             }
           }
         }catch{}
 
-        statusEl.textContent = 'Uploading…';
+        if(!statusEl.textContent || statusEl.textContent === 'Choose an image first.') statusEl.textContent = 'Uploading…';
+        else if(!statusEl.textContent.includes("isn't the recommended 4:3 ratio")) statusEl.textContent = 'Uploading…';
         const fd = new FormData();
         fd.append('file', f, f.name);
         try{

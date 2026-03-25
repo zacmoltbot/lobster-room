@@ -24,6 +24,28 @@ function sendJson(res: ServerResponse, status: number, body: unknown) {
   res.end(text);
 }
 
+// Maps tool names to user-facing labels for feed preview filtering.
+// Returns undefined for internal/noisy tools that should not appear in the feed label.
+const TOOL_LABELS: Record<string, string | undefined> = {
+  browser: "browser.land",
+  web_fetch: "web_fetch",
+  sessions_spawn: "sessions_spawn",
+  exec: "exec",
+  read: "read",
+  write: "write",
+  edit: "edit",
+  image: "image",
+  process: "process",
+  summarize: "summarize",
+  weather: "weather",
+  himalaya: "himalaya",
+  message: "message",
+};
+
+function genericToolLabel(toolName: string): string | undefined {
+  return TOOL_LABELS[toolName];
+}
+
 type PluginRoute = {
   path: string;
   auth?: "gateway" | "plugin";
@@ -171,7 +193,7 @@ const BUILD_TAG = "2026-03-08-debug-hooks-1";
 export default {
   id: "lobster-room",
   register(api: PluginApi) {
-    api.logger.info("[lobster-room] register", { buildTag: BUILD_TAG });
+    // api.logger.info("[lobster-room] register", { buildTag: BUILD_TAG });
     // Resolve asset path relative to this plugin module (NOT the gateway cwd).
     const pluginDir = dirname(fileURLToPath(import.meta.url));
     const portalHtmlPath = join(pluginDir, "assets", "lobster-room.html");
@@ -1182,7 +1204,7 @@ export default {
 
     api.on("before_agent_start", (_event, ctx) => {
       const agentId = resolveAgentId(ctx);
-      api.logger.info("[lobster-room] hook before_agent_start", { buildTag: BUILD_TAG, agentId, sessionKey: ctx?.sessionKey });
+      // api.logger.info("[lobster-room] hook before_agent_start", { buildTag: BUILD_TAG, agentId, sessionKey: ctx?.sessionKey });
       pushEvent("before_agent_start", { agentId, data: { sessionKey: ctx?.sessionKey, messageProvider: ctx?.messageProvider } });
       pushFeed({ ts: nowMs(), kind: "before_agent_start", agentId, sessionKey: typeof ctx?.sessionKey === "string" ? ctx.sessionKey : undefined });
       setState(agentId, "thinking", { sessionKey: ctx?.sessionKey, messageProvider: ctx?.messageProvider });
@@ -1191,7 +1213,7 @@ export default {
     api.on("before_tool_call", (event, ctx) => {
       const agentId = resolveAgentId(ctx);
       const toolName = event?.toolName || event?.tool || event?.name;
-      api.logger.info("[lobster-room] hook before_tool_call", { buildTag: BUILD_TAG, agentId, toolName, sessionKey: ctx?.sessionKey });
+      // api.logger.info("[lobster-room] hook before_tool_call", { buildTag: BUILD_TAG, agentId, toolName, sessionKey: ctx?.sessionKey });
 
       // Capture high-value params for debugging (truncate aggressively).
       let toolData: any = { toolName, sessionKey: ctx?.sessionKey };
@@ -1620,6 +1642,8 @@ export default {
 
             // --- Message Feed ops (multiplexed) ---
             if (op === "feedGet") {
+              // api.logger.info("[lobster-room] feedGet ENTERED", { op, payload });
+              try {
               const limit = Math.max(1, Math.min(500, Number(payload?.limit) || 120));
               const agentId = typeof payload?.agentId === "string" ? payload.agentId.trim() : "";
               const kind = typeof payload?.kind === "string" ? payload.kind.trim() : "";
@@ -1643,6 +1667,7 @@ export default {
               // Latest preview = most recent event.
               const last = items.length ? items[items.length - 1] : null;
 
+              // api.logger.info("[lobster-room] feedGet before sendJson", { itemsLen: items.length, tasksLen: tasks.length });
               sendJson(res, 200, {
                 ok: true,
                 buildTagFeed: "feed-v2",
@@ -1658,8 +1683,14 @@ export default {
                   summary: t.summary,
                   items: t.items ? t.items.map((it) => ({ ...it, preview: feedPreview(it) })) : undefined,
                 })),
+                rows: items.slice().reverse().map((it) => ({ ...it, preview: feedPreview(it) })),
                 items: includeRaw ? items.slice().reverse().map((it) => ({ ...it, preview: feedPreview(it) })) : undefined,
               });
+              // api.logger.info("[lobster-room] feedGet sent", { itemsLen: items.length, tasksLen: tasks.length });
+              } catch (err: any) {
+                api.logger.warn("[lobster-room] feedGet failed", { error: String(err?.message || err), stack: err?.stack });
+                sendJson(res, 500, { ok: false, error: "feedGet_failed: " + String(err?.message || err), path: "/lobster-room/api/lobster-room" });
+              }
               return true;
             }
 
@@ -2218,16 +2249,9 @@ export default {
       },
     });
 
-    // Convenience redirect
-    registerSafePluginRoute(api, {
-      path: "/lobster-room",
-      handler: async (_req, res) => {
-        res.statusCode = 301;
-        res.setHeader("location", "/lobster-room/");
-        res.end();
-        return true;
-      },
-    });
+    // NOTE: no redirect from /lobster-room → /lobster-room/ needed;
+    // the prefix match on /lobster-room/ handles both /lobster-room and /lobster-room/
+    // to avoid redirect loop when gateway route ordering causes exact /lobster-room to shadow prefix /lobster-room/
 
     api.logger.info("[lobster-room] plugin routes registered", {
       portalHtmlPath,
