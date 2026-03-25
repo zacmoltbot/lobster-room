@@ -1188,11 +1188,38 @@
     function renderLegend(){
       const el = document.getElementById('legend');
       el.innerHTML = '';
+      MODEL._legendChips = {};
       for(const s of STATES){
         const chip = document.createElement('div');
         chip.className = 'chip';
-        chip.innerHTML = `<b>${s.label.split(' ')[0]}</b> ${s.label.split(' ').slice(1).join(' ')}`;
+        chip.dataset.key = s.key;
+        const icon = s.label.split(' ')[0];
+        const labelText = s.label.split(' ').slice(1).join(' ');
+        chip.innerHTML = `<b>${icon}</b> ${labelText} <span class="chip-count"></span>`;
         el.appendChild(chip);
+        MODEL._legendChips[s.key] = chip;
+      }
+    }
+
+    function refreshLegend(){
+      const agents = Array.isArray(MODEL.agents) ? MODEL.agents : [];
+      const counts = { reply: 0, think: 0, tool: 0, build: 0, wait: 0, err: 0 };
+      for(const a of agents){
+        const st = String(a && a.state || 'idle').toLowerCase();
+        // Map UI states to legend keys
+        if(st === 'reply' || st === 'replying') counts.reply++;
+        else if(st === 'think' || st === 'thinking') counts.think++;
+        else if(st === 'tool' || st === 'tools') counts.tool++;
+        else if(st === 'build' || st === 'building') counts.build++;
+        else if(st === 'wait' || st === 'idle') counts.wait++;
+        else if(st === 'err' || st === 'error' || st === 'failed') counts.err++;
+      }
+      if(MODEL._legendChips){
+        for(const [key, chip] of Object.entries(MODEL._legendChips)){
+          const cnt = counts[key] || 0;
+          const countEl = chip.querySelector('.chip-count');
+          if(countEl) countEl.textContent = cnt > 0 ? `(${cnt})` : '';
+        }
       }
     }
 
@@ -2224,6 +2251,7 @@
           }
 
           renderAgents();
+          refreshLegend();
           refreshActivity();
           document.getElementById('ts').textContent = 'Updated: ' + new Date().toLocaleString();
           document.getElementById('api').textContent = 'API: /api/lobster-room';
@@ -2810,7 +2838,7 @@
 
       const fmtWhat = (r)=>{
         if(!r || typeof r !== 'object') return '(event)';
-        let txt = String(r.what || r.plain || r.action || '').trim();
+        let txt = String(r.what || r.plain || r.action || r.preview || '').trim();
         if(!txt) txt = '(event)';
         if(r.rowType === 'fold') txt = 'tools · ' + txt;
         return txt;

@@ -46,6 +46,11 @@ function genericToolLabel(toolName: string): string | undefined {
   return TOOL_LABELS[toolName];
 }
 
+const LOW_SIGNAL_OBSERVATION_TOOLS = new Set(["sessions_history", "sessions_list", "session_status"]);
+function isLowSignalObservationTool(toolName: unknown): boolean {
+  return typeof toolName === "string" && LOW_SIGNAL_OBSERVATION_TOOLS.has(toolName.trim());
+}
+
 type PluginRoute = {
   path: string;
   auth?: "gateway" | "plugin";
@@ -193,7 +198,7 @@ const BUILD_TAG = "2026-03-08-debug-hooks-1";
 export default {
   id: "lobster-room",
   register(api: PluginApi) {
-    api.logger.info("[lobster-room] register", { buildTag: BUILD_TAG });
+    // api.logger.info("[lobster-room] register", { buildTag: BUILD_TAG });
     // Resolve asset path relative to this plugin module (NOT the gateway cwd).
     const pluginDir = dirname(fileURLToPath(import.meta.url));
     const portalHtmlPath = join(pluginDir, "assets", "lobster-room.html");
@@ -947,7 +952,7 @@ export default {
         const d = typeof it.durationMs === "number" ? ` (${Math.round(it.durationMs)}ms)` : "";
         return `${agent} ${tn} done${d}`.trim();
       }
-      if (it.kind === "tool_result_persist") return `${agent} tool result persisted`;
+      if (it.kind === "tool_result_persist") return `${agent} Working`;
       if (it.kind === "message_sending") {
         const to = it.to ? redactSecretsInText(it.to) : "(unknown)";
         return `sending message → ${to}`;
@@ -1024,7 +1029,7 @@ export default {
         return bits.length ? e + " · " + bits.join(" · ") : e;
       }
 
-      return bits.length ? "Completed · " + bits.join(" · ") : "Completed";
+      return bits.length ? "Completed · " + bits.join(" · ") : "Done";
     };
 
     const groupFeedIntoTasks = (items: FeedItem[], opts?: { includeRaw?: boolean }): FeedTask[] => {
@@ -1204,7 +1209,7 @@ export default {
 
     api.on("before_agent_start", (_event, ctx) => {
       const agentId = resolveAgentId(ctx);
-      api.logger.info("[lobster-room] hook before_agent_start", { buildTag: BUILD_TAG, agentId, sessionKey: ctx?.sessionKey });
+      // api.logger.info("[lobster-room] hook before_agent_start", { buildTag: BUILD_TAG, agentId, sessionKey: ctx?.sessionKey });
       pushEvent("before_agent_start", { agentId, data: { sessionKey: ctx?.sessionKey, messageProvider: ctx?.messageProvider } });
       pushFeed({ ts: nowMs(), kind: "before_agent_start", agentId, sessionKey: typeof ctx?.sessionKey === "string" ? ctx.sessionKey : undefined });
       setState(agentId, "thinking", { sessionKey: ctx?.sessionKey, messageProvider: ctx?.messageProvider });
@@ -1213,7 +1218,7 @@ export default {
     api.on("before_tool_call", (event, ctx) => {
       const agentId = resolveAgentId(ctx);
       const toolName = event?.toolName || event?.tool || event?.name;
-      api.logger.info("[lobster-room] hook before_tool_call", { buildTag: BUILD_TAG, agentId, toolName, sessionKey: ctx?.sessionKey });
+      // api.logger.info("[lobster-room] hook before_tool_call", { buildTag: BUILD_TAG, agentId, toolName, sessionKey: ctx?.sessionKey });
 
       // Capture high-value params for debugging (truncate aggressively).
       let toolData: any = { toolName, sessionKey: ctx?.sessionKey };
@@ -1245,20 +1250,22 @@ export default {
       }
 
       pushEvent("before_tool_call", { agentId, data: toolData });
-      pushFeed({
-        ts: nowMs(),
-        kind: "before_tool_call",
-        agentId,
-        sessionKey: typeof ctx?.sessionKey === "string" ? ctx.sessionKey : undefined,
-        toolName: typeof toolName === "string" ? toolName : undefined,
-        details: {
-          command: toolName === "exec" ? coerceStr(toolData.command, 240) : undefined,
-          url: toolName === "web_fetch" ? coerceStr(toolData.url, 240) : undefined,
-          label: toolName === "sessions_spawn" ? coerceStr(toolData.label, 120) : undefined,
-          task: toolName === "sessions_spawn" ? coerceStr(toolData.task, 180) : undefined,
-          spawnAgentId: toolName === "sessions_spawn" ? coerceStr(toolData.spawnAgentId, 80) : undefined,
-        },
-      });
+      if (!isLowSignalObservationTool(toolName)) {
+        pushFeed({
+          ts: nowMs(),
+          kind: "before_tool_call",
+          agentId,
+          sessionKey: typeof ctx?.sessionKey === "string" ? ctx.sessionKey : undefined,
+          toolName: typeof toolName === "string" ? toolName : undefined,
+          details: {
+            command: toolName === "exec" ? coerceStr(toolData.command, 240) : undefined,
+            url: toolName === "web_fetch" ? coerceStr(toolData.url, 240) : undefined,
+            label: toolName === "sessions_spawn" ? coerceStr(toolData.label, 120) : undefined,
+            task: toolName === "sessions_spawn" ? coerceStr(toolData.task, 180) : undefined,
+            spawnAgentId: toolName === "sessions_spawn" ? coerceStr(toolData.spawnAgentId, 80) : undefined,
+          },
+        });
+      }
       setState(agentId, "tool", { toolName, sessionKey: ctx?.sessionKey });
     });
 
@@ -1286,15 +1293,17 @@ export default {
         }
       }
 
-      pushFeed({
-        ts: nowMs(),
-        kind: "after_tool_call",
-        agentId,
-        sessionKey: typeof ctx?.sessionKey === "string" ? ctx.sessionKey : undefined,
-        toolName: typeof event?.toolName === "string" ? event.toolName : undefined,
-        durationMs: typeof event?.durationMs === "number" ? event.durationMs : undefined,
-        details: outputPreview ? { outputPreview } : undefined,
-      });
+      if (!isLowSignalObservationTool(event?.toolName)) {
+        pushFeed({
+          ts: nowMs(),
+          kind: "after_tool_call",
+          agentId,
+          sessionKey: typeof ctx?.sessionKey === "string" ? ctx.sessionKey : undefined,
+          toolName: typeof event?.toolName === "string" ? event.toolName : undefined,
+          durationMs: typeof event?.durationMs === "number" ? event.durationMs : undefined,
+          details: outputPreview ? { outputPreview } : undefined,
+        });
+      }
       setState(agentId, "thinking", { sessionKey: ctx?.sessionKey });
     });
 
@@ -1642,7 +1651,7 @@ export default {
 
             // --- Message Feed ops (multiplexed) ---
             if (op === "feedGet") {
-              api.logger.info("[lobster-room] feedGet ENTERED", { op, payload });
+              // api.logger.info("[lobster-room] feedGet ENTERED", { op, payload });
               try {
               const limit = Math.max(1, Math.min(500, Number(payload?.limit) || 120));
               const agentId = typeof payload?.agentId === "string" ? payload.agentId.trim() : "";
@@ -1667,7 +1676,7 @@ export default {
               // Latest preview = most recent event.
               const last = items.length ? items[items.length - 1] : null;
 
-              api.logger.info("[lobster-room] feedGet before sendJson", { itemsLen: items.length, tasksLen: tasks.length });
+              // api.logger.info("[lobster-room] feedGet before sendJson", { itemsLen: items.length, tasksLen: tasks.length });
               sendJson(res, 200, {
                 ok: true,
                 buildTagFeed: "feed-v2",
@@ -1686,7 +1695,7 @@ export default {
                 rows: items.slice().reverse().map((it) => ({ ...it, preview: feedPreview(it) })),
                 items: includeRaw ? items.slice().reverse().map((it) => ({ ...it, preview: feedPreview(it) })) : undefined,
               });
-              api.logger.info("[lobster-room] feedGet sent", { itemsLen: items.length, tasksLen: tasks.length });
+              // api.logger.info("[lobster-room] feedGet sent", { itemsLen: items.length, tasksLen: tasks.length });
               } catch (err: any) {
                 api.logger.warn("[lobster-room] feedGet failed", { error: String(err?.message || err), stack: err?.stack });
                 sendJson(res, 500, { ok: false, error: "feedGet_failed: " + String(err?.message || err), path: "/lobster-room/api/lobster-room" });
