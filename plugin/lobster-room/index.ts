@@ -46,6 +46,11 @@ function genericToolLabel(toolName: string): string | undefined {
   return TOOL_LABELS[toolName];
 }
 
+const LOW_SIGNAL_OBSERVATION_TOOLS = new Set(["sessions_history", "sessions_list", "session_status"]);
+function isLowSignalObservationTool(toolName: unknown): boolean {
+  return typeof toolName === "string" && LOW_SIGNAL_OBSERVATION_TOOLS.has(toolName.trim());
+}
+
 type PluginRoute = {
   path: string;
   auth?: "gateway" | "plugin";
@@ -947,7 +952,7 @@ export default {
         const d = typeof it.durationMs === "number" ? ` (${Math.round(it.durationMs)}ms)` : "";
         return `${agent} ${tn} done${d}`.trim();
       }
-      if (it.kind === "tool_result_persist") return `${agent} tool result persisted`;
+      if (it.kind === "tool_result_persist") return `${agent} Working`;
       if (it.kind === "message_sending") {
         const to = it.to ? redactSecretsInText(it.to) : "(unknown)";
         return `sending message → ${to}`;
@@ -1024,7 +1029,7 @@ export default {
         return bits.length ? e + " · " + bits.join(" · ") : e;
       }
 
-      return bits.length ? "Completed · " + bits.join(" · ") : "Completed";
+      return bits.length ? "Completed · " + bits.join(" · ") : "Done";
     };
 
     const groupFeedIntoTasks = (items: FeedItem[], opts?: { includeRaw?: boolean }): FeedTask[] => {
@@ -1160,10 +1165,10 @@ export default {
       if (row.state !== next) {
         row.state = next;
         row.sinceMs = t;
-      }
-
-      if (next !== "idle") {
-        row.holdUntilMs = t + minDwellMs;
+        // Only reset hold when state actually transitions (not on every call).
+        if (next !== "idle") {
+          row.holdUntilMs = t + minDwellMs;
+        }
       }
 
       row.details = details ?? row.details ?? null;
@@ -1206,7 +1211,7 @@ export default {
       const agentId = resolveAgentId(ctx);
       // api.logger.info("[lobster-room] hook before_agent_start", { buildTag: BUILD_TAG, agentId, sessionKey: ctx?.sessionKey });
       pushEvent("before_agent_start", { agentId, data: { sessionKey: ctx?.sessionKey, messageProvider: ctx?.messageProvider } });
-      pushFeed({ ts: nowMs(), kind: "before_agent_start", agentId, sessionKey: typeof ctx?.sessionKey === "string" ? ctx.sessionKey : undefined });
+      // pushFeed({ ts: nowMs(), kind: "before_agent_start", agentId, sessionKey: typeof ctx?.sessionKey === "string" ? ctx.sessionKey : undefined }); // suppressed: internal lifecycle, not user-facing
       setState(agentId, "thinking", { sessionKey: ctx?.sessionKey, messageProvider: ctx?.messageProvider });
     });
 
@@ -1214,6 +1219,15 @@ export default {
       const agentId = resolveAgentId(ctx);
       const toolName = event?.toolName || event?.tool || event?.name;
       // api.logger.info("[lobster-room] hook before_tool_call", { buildTag: BUILD_TAG, agentId, toolName, sessionKey: ctx?.sessionKey });
+
+      // Defensive: if previous tool didn't emit after_tool_call (common for
+      // observation tools like session_status/sessions_history), state may be
+      // stuck at "tool". Reset to "thinking" before setting to "tool" again so
+      // rapid tool sequences don't accumulate stuck states.
+      const row = activity.get(agentId);
+      if (row && row.state === "tool") {
+        setState(agentId, "thinking", { sessionKey: ctx?.sessionKey, stuckToolReset: true });
+      }
 
       // Capture high-value params for debugging (truncate aggressively).
       let toolData: any = { toolName, sessionKey: ctx?.sessionKey };
@@ -1245,21 +1259,23 @@ export default {
       }
 
       pushEvent("before_tool_call", { agentId, data: toolData });
-      pushFeed({
-        ts: nowMs(),
-        kind: "before_tool_call",
-        agentId,
-        sessionKey: typeof ctx?.sessionKey === "string" ? ctx.sessionKey : undefined,
-        toolName: typeof toolName === "string" ? toolName : undefined,
-        details: {
-          command: toolName === "exec" ? coerceStr(toolData.command, 240) : undefined,
-          url: toolName === "web_fetch" ? coerceStr(toolData.url, 240) : undefined,
-          label: toolName === "sessions_spawn" ? coerceStr(toolData.label, 120) : undefined,
-          task: toolName === "sessions_spawn" ? coerceStr(toolData.task, 180) : undefined,
-          spawnAgentId: toolName === "sessions_spawn" ? coerceStr(toolData.spawnAgentId, 80) : undefined,
-        },
-      });
-      setState(agentId, "tool", { toolName, sessionKey: ctx?.sessionKey });
+      if (!isLowSignalObservationTool(toolName)) {
+        pushFeed({
+          ts: nowMs(),
+          kind: "before_tool_call",
+          agentId,
+          sessionKey: typeof ctx?.sessionKey === "string" ? ctx.sessionKey : undefined,
+          toolName: typeof toolName === "string" ? toolName : undefined,
+          details: {
+            command: toolName === "exec" ? coerceStr(toolData.command, 240) : undefined,
+            url: toolName === "web_fetch" ? coerceStr(toolData.url, 240) : undefined,
+            label: toolName === "sessions_spawn" ? coerceStr(toolData.label, 120) : undefined,
+            task: toolName === "sessions_spawn" ? coerceStr(toolData.task, 180) : undefined,
+            spawnAgentId: toolName === "sessions_spawn" ? coerceStr(toolData.spawnAgentId, 80) : undefined,
+          },
+        });
+        setState(agentId, "tool", { toolName, sessionKey: ctx?.sessionKey });
+      }
     });
 
     api.on("after_tool_call", (event, ctx) => {
@@ -1286,16 +1302,18 @@ export default {
         }
       }
 
-      pushFeed({
-        ts: nowMs(),
-        kind: "after_tool_call",
-        agentId,
-        sessionKey: typeof ctx?.sessionKey === "string" ? ctx.sessionKey : undefined,
-        toolName: typeof event?.toolName === "string" ? event.toolName : undefined,
-        durationMs: typeof event?.durationMs === "number" ? event.durationMs : undefined,
-        details: outputPreview ? { outputPreview } : undefined,
-      });
-      setState(agentId, "thinking", { sessionKey: ctx?.sessionKey });
+      if (!isLowSignalObservationTool(event?.toolName)) {
+        pushFeed({
+          ts: nowMs(),
+          kind: "after_tool_call",
+          agentId,
+          sessionKey: typeof ctx?.sessionKey === "string" ? ctx.sessionKey : undefined,
+          toolName: typeof event?.toolName === "string" ? event.toolName : undefined,
+          durationMs: typeof event?.durationMs === "number" ? event.durationMs : undefined,
+          details: outputPreview ? { outputPreview } : undefined,
+        });
+        setState(agentId, "thinking", { sessionKey: ctx?.sessionKey });
+      }
     });
 
     // Some tools may not reliably fire after_tool_call in all paths; use persist as a backup.
@@ -1361,14 +1379,7 @@ export default {
     api.on("agent_end", (event, ctx) => {
       const agentId = resolveAgentId(ctx);
       pushEvent("agent_end", { agentId, data: { success: event?.success, error: event?.error, sessionKey: ctx?.sessionKey } });
-      pushFeed({
-        ts: nowMs(),
-        kind: "agent_end",
-        agentId,
-        sessionKey: typeof ctx?.sessionKey === "string" ? ctx.sessionKey : undefined,
-        success: typeof event?.success === "boolean" ? event.success : undefined,
-        error: typeof event?.error === "string" ? redactSecretsInText(event.error) : undefined,
-      });
+      // pushFeed({ ts: nowMs(), kind: "agent_end", agentId, sessionKey: typeof ctx?.sessionKey === "string" ? ctx.sessionKey : undefined, success: typeof event?.success === "boolean" ? event.success : undefined, error: typeof event?.error === "string" ? redactSecretsInText(event.error) : undefined }); // suppressed: internal lifecycle, not user-facing
 
       if (event?.success === false) {
         setState(agentId, "error", { error: event?.error || "agent_end: unsuccessful" });
