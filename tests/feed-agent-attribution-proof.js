@@ -36,48 +36,92 @@ function canonicalVisibleAgentId(value) {
 }
 
 const spawnedSessionAgentIds = new Map();
-const pendingSpawnAgentIds = new Map();
-const pendingSpawnAgentIdsByResident = new Map();
+const pendingSpawnAttributionsByParent = new Map();
+const pendingSpawnAttributionsByResident = new Map();
 
-function enqueuePendingSpawnAgent(bucket, key, visible) {
-  bucket.set(key, (bucket.get(key) || []).concat([visible]));
+function normalizeSpawnText(value, maxLen = 240) {
+  if (typeof value !== 'string') return '';
+  return value.replace(/\s+/g, ' ').trim().slice(0, maxLen);
 }
 
-function dequeuePendingSpawnAgent(bucket, key) {
-  const queue = bucket.get(key) || [];
-  const next = queue.shift() || '';
-  if (queue.length) bucket.set(key, queue);
-  else bucket.delete(key);
+function resolveExplicitSpawnAgentId(payload) {
+  for (const candidate of [payload && payload.agentId, payload && payload.spawnAgentId, payload && payload.requestedAgentId]) {
+    const visible = canonicalVisibleAgentId(candidate);
+    if (visible) return visible;
+  }
+  return '';
+}
+
+function inferSpawnActorId(payload) {
+  const explicit = resolveExplicitSpawnAgentId(payload);
+  if (explicit) return explicit;
+  const text = [payload && payload.label, payload && payload.task, payload && payload.prompt, payload && payload.instructions]
+    .map((part) => normalizeSpawnText(part, 400).toLowerCase())
+    .filter(Boolean)
+    .join('\n');
+  if (!text) return '';
+  const actorHints = [
+    { actorId: 'qa_agent', patterns: [/\bqa[_ -]?agent\b/i, /\byou are\s+qa[_ -]?agent\b/i, /你是\s*qa[_ -]?agent/i, /角色[:：]?\s*qa[_ -]?agent/i] },
+    { actorId: 'coding_agent', patterns: [/\bcoding[_ -]?agent\b/i, /\byou are\s+coding[_ -]?agent\b/i, /你是\s*coding[_ -]?agent/i, /角色[:：]?\s*coding[_ -]?agent/i] },
+  ];
+  for (const hint of actorHints) {
+    if (hint.patterns.some((pattern) => pattern.test(text))) return hint.actorId;
+  }
+  return '';
+}
+
+function rememberPendingSpawnAttribution(parentSessionKey, payload) {
+  const sk = typeof parentSessionKey === 'string' ? String(parentSessionKey).trim() : '';
+  if (!sk) return undefined;
+  const actorId = inferSpawnActorId(payload);
+  if (!actorId) return undefined;
+  const residentAgentId = canonicalResidentAgentId(sk);
+  if (!residentAgentId) return undefined;
+  const entry = {
+    actorId,
+    parentSessionKey: sk,
+    residentAgentId,
+    label: normalizeSpawnText(payload && payload.label, 120) || undefined,
+    task: normalizeSpawnText(payload && payload.task, 240) || undefined,
+    source: resolveExplicitSpawnAgentId(payload) ? 'explicit' : 'inferred',
+  };
+  pendingSpawnAttributionsByParent.set(sk, (pendingSpawnAttributionsByParent.get(sk) || []).concat([entry]));
+  pendingSpawnAttributionsByResident.set(residentAgentId, (pendingSpawnAttributionsByResident.get(residentAgentId) || []).concat([entry]));
+  return entry;
+}
+
+function consumePendingSpawnAttribution(parentSessionKey) {
+  const sk = typeof parentSessionKey === 'string' ? String(parentSessionKey).trim() : '';
+  if (!sk) return undefined;
+  const queue = pendingSpawnAttributionsByParent.get(sk) || [];
+  const next = queue.shift();
+  if (queue.length) pendingSpawnAttributionsByParent.set(sk, queue);
+  else pendingSpawnAttributionsByParent.delete(sk);
+  if (!next) return undefined;
+  const residentQueue = pendingSpawnAttributionsByResident.get(next.residentAgentId) || [];
+  const filtered = residentQueue.filter((candidate) => candidate !== next);
+  if (filtered.length) pendingSpawnAttributionsByResident.set(next.residentAgentId, filtered);
+  else pendingSpawnAttributionsByResident.delete(next.residentAgentId);
   return next;
 }
 
-function rememberPendingSpawnAgent(parentSessionKey, agentId) {
-  const sk = typeof parentSessionKey === 'string' ? String(parentSessionKey).trim() : '';
-  const visible = canonicalVisibleAgentId(agentId);
-  if (!sk || !visible) return;
-  enqueuePendingSpawnAgent(pendingSpawnAgentIds, sk, visible);
-  const resident = canonicalResidentAgentId(sk);
-  if (resident) enqueuePendingSpawnAgent(pendingSpawnAgentIdsByResident, resident, visible);
-}
-
-function consumePendingSpawnAgent(parentSessionKey) {
-  const sk = typeof parentSessionKey === 'string' ? String(parentSessionKey).trim() : '';
-  if (!sk) return '';
-  const next = dequeuePendingSpawnAgent(pendingSpawnAgentIds, sk);
-  if (!next) return '';
-  const resident = canonicalResidentAgentId(sk);
-  if (resident) dequeuePendingSpawnAgent(pendingSpawnAgentIdsByResident, resident);
-  return next;
-}
-
-function adoptPendingSpawnAgentForSession(sessionKey, residentAgentId) {
+function adoptPendingSpawnAttributionForSession(sessionKey, residentAgentId) {
   const sk = typeof sessionKey === 'string' ? String(sessionKey).trim() : '';
-  if (!sk || spawnedSessionAgentIds.has(sk)) return spawnedSessionAgentIds.get(sk) || '';
+  if (!sk) return undefined;
+  const existingActorId = spawnedSessionAgentIds.get(sk);
+  if (existingActorId) return { actorId: existingActorId, residentAgentId: canonicalResidentAgentId(residentAgentId) };
   const resident = canonicalVisibleAgentId(residentAgentId);
-  if (!resident) return '';
-  const adopted = dequeuePendingSpawnAgent(pendingSpawnAgentIdsByResident, resident);
-  if (!adopted) return '';
-  spawnedSessionAgentIds.set(sk, adopted);
+  if (!resident) return undefined;
+  const queue = pendingSpawnAttributionsByResident.get(resident) || [];
+  const adopted = queue.shift();
+  if (queue.length) pendingSpawnAttributionsByResident.set(resident, queue);
+  else pendingSpawnAttributionsByResident.delete(resident);
+  if (!adopted) return undefined;
+  spawnedSessionAgentIds.set(sk, adopted.actorId);
+  const parentQueue = pendingSpawnAttributionsByParent.get(adopted.parentSessionKey) || [];
+  const filtered = parentQueue.filter((candidate) => candidate !== adopted);
+  if (filtered.length) pendingSpawnAttributionsByParent.set(adopted.parentSessionKey, filtered);
+  else pendingSpawnAttributionsByParent.delete(adopted.parentSessionKey);
   return adopted;
 }
 
@@ -88,22 +132,14 @@ function rememberSpawnedSessionAgent(sessionKey, agentId) {
   spawnedSessionAgentIds.set(sk, visible);
 }
 
-function resolveRequestedSpawnAgentId(payload) {
-  for (const candidate of [payload && payload.agentId, payload && payload.spawnAgentId, payload && payload.requestedAgentId]) {
-    const visible = canonicalVisibleAgentId(candidate);
-    if (visible) return visible;
-  }
-  return '';
-}
-
 function resolveFeedAgentIdentity(ctx) {
   const parsed = parseSessionIdentity(ctx && ctx.sessionKey, ctx && ctx.agentId);
   const rawSessionAgentId = parsed.agentId;
   const childSessionKey = typeof (ctx && ctx.sessionKey) === 'string' ? ctx.sessionKey.trim() : '';
-  const spawnedVisible = childSessionKey
-    ? (spawnedSessionAgentIds.get(childSessionKey)
-      || (parsed.lane !== 'main' ? adoptPendingSpawnAgentForSession(childSessionKey, parsed.residentAgentId) : ''))
-    : '';
+  const adopted = childSessionKey && parsed.lane !== 'main'
+    ? adoptPendingSpawnAttributionForSession(childSessionKey, parsed.residentAgentId)
+    : undefined;
+  const spawnedVisible = childSessionKey ? (spawnedSessionAgentIds.get(childSessionKey) || (adopted && adopted.actorId) || '') : '';
   if (spawnedVisible) {
     return {
       agentId: spawnedVisible,
@@ -123,35 +159,30 @@ const childSessionKey = 'agent:main:subagent:qa-proof';
 const sessionsSpawnBeforeToolEvent = {
   toolName: 'sessions_spawn',
   params: {
-    spawnAgentId: 'qa_agent',
-    label: 'qa-lobster-final-agent-attribution-truth-20260326',
-    task: 'Run final acceptance checks',
+    label: 'qa-lobster-final-agent-attribution-truth-20260327',
+    task: '你是 qa_agent。請做 final acceptance checks，驗證 lobster room actor attribution。',
   },
 };
 const childBeforeAgentStartCtx = { sessionKey: childSessionKey, agentId: 'main' };
 const childBeforeToolCtx = { sessionKey: childSessionKey, agentId: 'main' };
 const sessionsSpawnAfterToolEvent = {
   toolName: 'sessions_spawn',
-  params: { spawnAgentId: 'qa_agent' },
+  params: {
+    label: sessionsSpawnBeforeToolEvent.params.label,
+    task: sessionsSpawnBeforeToolEvent.params.task,
+  },
   result: { childSessionKey },
 };
 
-console.log('TRACE before rememberPendingSpawnAgent', {
-  parentSessionKey,
-  eventParamsAgentId: sessionsSpawnBeforeToolEvent.params.agentId || null,
-  eventParamsSpawnAgentId: sessionsSpawnBeforeToolEvent.params.spawnAgentId || null,
-});
-
-rememberPendingSpawnAgent(parentSessionKey, resolveRequestedSpawnAgentId(sessionsSpawnBeforeToolEvent.params));
-
-console.log('TRACE after rememberPendingSpawnAgent', {
-  pendingSpawnAgentIds: pendingSpawnAgentIds.get(parentSessionKey) || [],
-  pendingSpawnAgentIdsByResident: pendingSpawnAgentIdsByResident.get('main') || [],
-});
+const pending = rememberPendingSpawnAttribution(parentSessionKey, sessionsSpawnBeforeToolEvent.params);
+console.log('TRACE pending attribution', pending);
+assert.equal(pending && pending.actorId, 'qa_agent', 'parent spawn should infer qa_agent truth linkage even without requested actor fields');
+assert.equal(pending && pending.source, 'inferred', 'truth linkage should record inferred source when payload lacks explicit actor ids');
 
 const beforeAgentStartIdentity = resolveFeedAgentIdentity(childBeforeAgentStartCtx);
 const beforeToolIdentity = resolveFeedAgentIdentity(childBeforeToolCtx);
-rememberSpawnedSessionAgent(sessionsSpawnAfterToolEvent.result.childSessionKey, resolveRequestedSpawnAgentId(sessionsSpawnAfterToolEvent.params) || consumePendingSpawnAgent(parentSessionKey));
+const consumed = consumePendingSpawnAttribution(parentSessionKey);
+rememberSpawnedSessionAgent(sessionsSpawnAfterToolEvent.result.childSessionKey, inferSpawnActorId(sessionsSpawnAfterToolEvent.params) || (consumed && consumed.actorId));
 const afterSpawnIdentity = resolveFeedAgentIdentity(childBeforeToolCtx);
 
 console.log('TRACE child ctx', {
@@ -161,10 +192,12 @@ console.log('TRACE child ctx', {
   firstBeforeAgentStart: beforeAgentStartIdentity,
   followupBeforeTool: beforeToolIdentity,
   afterSpawnResult: afterSpawnIdentity,
+  spawnedSessionAgentIds: Array.from(spawnedSessionAgentIds.entries()),
 });
 
 assert.equal(beforeAgentStartIdentity.agentId, 'qa_agent', 'first before_agent_start for subagent must resolve to qa_agent');
 assert.equal(beforeToolIdentity.agentId, 'qa_agent', 'follow-up before_tool_call must stay on qa_agent before spawn result lands');
 assert.equal(afterSpawnIdentity.agentId, 'qa_agent', 'post-result events must stay on qa_agent');
+assert.equal(beforeAgentStartIdentity.rawAgentId, 'main/subagent:qa-proof', 'raw/debug lineage should stay internal only');
 
 console.log('feed-agent-attribution proof: PASS');
