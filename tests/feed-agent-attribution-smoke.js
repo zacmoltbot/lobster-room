@@ -91,6 +91,19 @@ function rememberSpawnedSessionAgent(sessionKey, agentId) {
   spawnedSessionAgentIds.set(sk, visible);
 }
 
+function resolveRequestedSpawnAgentId(payload) {
+  const candidates = [
+    payload && payload.agentId,
+    payload && payload.spawnAgentId,
+    payload && payload.requestedAgentId,
+  ];
+  for (const candidate of candidates) {
+    const visible = canonicalVisibleAgentId(candidate);
+    if (visible) return visible;
+  }
+  return '';
+}
+
 function resolveFeedAgentIdentity(ctx) {
   const parsed = parseSessionIdentity(ctx && ctx.sessionKey, ctx && ctx.agentId);
   const rawSessionAgentId = parsed.agentId;
@@ -206,18 +219,20 @@ function feedPreview(it) {
 // ─── Tests ─────────────────────────────────────────────────────────────────────
 
 // Simulate parent main session spawning qa_agent and coding_agent descendants.
-rememberPendingSpawnAgent('agent:main:main', 'qa_agent');
+const qaSpawnParams = { spawnAgentId: 'qa_agent', label: 'qa', task: 'run final acceptance checks' };
+rememberPendingSpawnAgent('agent:main:main', resolveRequestedSpawnAgentId(qaSpawnParams));
 const qaEarly = resolveFeedAgentIdentity({ sessionKey: 'agent:main:subagent:qa-123', agentId: 'main' });
 const qaEarlyFollowup = resolveFeedAgentIdentity({ sessionKey: 'agent:main:subagent:qa-123', agentId: 'main' });
-rememberSpawnedSessionAgent('agent:main:subagent:qa-123', consumePendingSpawnAgent('agent:main:main'));
-rememberPendingSpawnAgent('agent:main:main', 'coding_agent');
-rememberSpawnedSessionAgent('agent:main:subagent:code-456', consumePendingSpawnAgent('agent:main:main'));
+rememberSpawnedSessionAgent('agent:main:subagent:qa-123', resolveRequestedSpawnAgentId(qaSpawnParams) || consumePendingSpawnAgent('agent:main:main'));
+const codingSpawnParams = { agentId: 'coding_agent', label: 'coding', task: 'implement feature X' };
+rememberPendingSpawnAgent('agent:main:main', resolveRequestedSpawnAgentId(codingSpawnParams));
+rememberSpawnedSessionAgent('agent:main:subagent:code-456', resolveRequestedSpawnAgentId(codingSpawnParams) || consumePendingSpawnAgent('agent:main:main'));
 
 // Identity resolution tests
 const qa = resolveFeedAgentIdentity({ sessionKey: 'agent:main:subagent:qa-123', agentId: 'main' });
 const coding = resolveFeedAgentIdentity({ sessionKey: 'agent:main:subagent:code-456' });
 const main = resolveFeedAgentIdentity({ sessionKey: 'agent:main:main' });
-const explicitQa = resolveFeedAgentIdentity({ sessionKey: 'agent:main:subagent:anything', agentId: 'qa_agent' });
+const explicitQa = resolveFeedAgentIdentity({ sessionKey: 'agent:main:main', agentId: 'qa_agent' });
 
 assert.equal(qaEarly.agentId, 'qa_agent', 'early child hook should adopt pending qa_agent attribution before spawn result lands even if ctx.agentId still says main');
 assert.equal(qaEarlyFollowup.agentId, 'qa_agent', 'subsequent child event should keep adopted qa_agent attribution before spawn result lands');

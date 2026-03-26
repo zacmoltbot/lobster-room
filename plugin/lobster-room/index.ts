@@ -1245,6 +1245,19 @@ export default {
       spawnedSessionAgentIds.set(sk, visible);
     };
 
+    const resolveRequestedSpawnAgentId = (payload: any): string => {
+      const candidates = [
+        payload?.agentId,
+        payload?.spawnAgentId,
+        payload?.requestedAgentId,
+      ];
+      for (const candidate of candidates) {
+        const visible = canonicalVisibleAgentId(candidate);
+        if (visible) return visible;
+      }
+      return "";
+    };
+
     const resolveFeedAgentIdentity = (ctx: any): { agentId: string; rawAgentId?: string } => {
       const parsed = parseSessionIdentity(ctx?.sessionKey, ctx?.agentId);
       const rawSessionAgentId = parsed.agentId;
@@ -1434,11 +1447,12 @@ export default {
 
       // Show what spawned the subagent.
       if (toolName === "sessions_spawn") {
-        toolData.spawnAgentId = p?.agentId;
+        const requestedSpawnAgentId = resolveRequestedSpawnAgentId(p);
+        toolData.spawnAgentId = requestedSpawnAgentId || p?.agentId || p?.spawnAgentId;
         toolData.label = p?.label;
         const task = typeof p?.task === "string" ? p.task : "";
         toolData.task = task ? task.slice(0, 160) : undefined;
-        rememberPendingSpawnAgent(ctx?.sessionKey, p?.agentId);
+        rememberPendingSpawnAgent(ctx?.sessionKey, requestedSpawnAgentId);
       }
 
       // Show message preview when using the message tool.
@@ -1494,7 +1508,10 @@ export default {
       // This helps surface sub-agent completions even when no message_sent hook is emitted.
       let outputPreview: string | undefined = undefined;
       if (toolName === "sessions_spawn") {
-        const requestedSpawnAgentId = event?.params?.agentId ?? event?.result?.agentId ?? event?.agentId ?? consumePendingSpawnAgent(ctx?.sessionKey);
+        const requestedSpawnAgentId = resolveRequestedSpawnAgentId(event?.params)
+          || resolveRequestedSpawnAgentId(event?.result)
+          || resolveRequestedSpawnAgentId(event)
+          || consumePendingSpawnAgent(ctx?.sessionKey);
         rememberSpawnedSessionAgent(
           event?.result?.childSessionKey
             ?? event?.result?.sessionKey
