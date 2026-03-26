@@ -94,6 +94,17 @@ function rememberSpawnedSessionAgent(sessionKey, agentId) {
 function resolveFeedAgentIdentity(ctx) {
   const parsed = parseSessionIdentity(ctx && ctx.sessionKey, ctx && ctx.agentId);
   const rawSessionAgentId = parsed.agentId;
+  const childSessionKey = typeof (ctx && ctx.sessionKey) === 'string' ? ctx.sessionKey.trim() : '';
+  const spawnedVisible = childSessionKey
+    ? (spawnedSessionAgentIds.get(childSessionKey)
+      || (parsed.lane !== 'main' ? adoptPendingSpawnAgentForSession(childSessionKey, parsed.residentAgentId) : ''))
+    : '';
+  if (spawnedVisible) {
+    return {
+      agentId: spawnedVisible,
+      rawAgentId: rawSessionAgentId && rawSessionAgentId !== spawnedVisible ? rawSessionAgentId : undefined,
+    };
+  }
   const explicitCandidates = [
     ctx && ctx.agentId,
     ctx && ctx.agent && ctx.agent.id,
@@ -107,15 +118,6 @@ function resolveFeedAgentIdentity(ctx) {
       const raw = typeof candidate === 'string' ? String(candidate).trim() : '';
       return { agentId: visible, rawAgentId: raw && raw !== visible ? raw : rawSessionAgentId !== visible ? rawSessionAgentId : undefined };
     }
-  }
-  const childSessionKey = typeof (ctx && ctx.sessionKey) === 'string' ? ctx.sessionKey.trim() : '';
-  const spawnedVisible = spawnedSessionAgentIds.get(childSessionKey)
-    || (parsed.lane !== 'main' ? adoptPendingSpawnAgentForSession(childSessionKey, parsed.residentAgentId) : '');
-  if (spawnedVisible) {
-    return {
-      agentId: spawnedVisible,
-      rawAgentId: rawSessionAgentId && rawSessionAgentId !== spawnedVisible ? rawSessionAgentId : undefined,
-    };
   }
   const fallback = canonicalVisibleAgentId(rawSessionAgentId) || canonicalVisibleAgentId(parsed.residentAgentId) || 'main';
   return { agentId: fallback, rawAgentId: rawSessionAgentId && rawSessionAgentId !== fallback ? rawSessionAgentId : undefined };
@@ -205,19 +207,21 @@ function feedPreview(it) {
 
 // Simulate parent main session spawning qa_agent and coding_agent descendants.
 rememberPendingSpawnAgent('agent:main:main', 'qa_agent');
-const qaEarly = resolveFeedAgentIdentity({ sessionKey: 'agent:main:subagent:qa-123' });
+const qaEarly = resolveFeedAgentIdentity({ sessionKey: 'agent:main:subagent:qa-123', agentId: 'main' });
+const qaEarlyFollowup = resolveFeedAgentIdentity({ sessionKey: 'agent:main:subagent:qa-123', agentId: 'main' });
 rememberSpawnedSessionAgent('agent:main:subagent:qa-123', consumePendingSpawnAgent('agent:main:main'));
 rememberPendingSpawnAgent('agent:main:main', 'coding_agent');
 rememberSpawnedSessionAgent('agent:main:subagent:code-456', consumePendingSpawnAgent('agent:main:main'));
 
 // Identity resolution tests
-const qa = resolveFeedAgentIdentity({ sessionKey: 'agent:main:subagent:qa-123' });
+const qa = resolveFeedAgentIdentity({ sessionKey: 'agent:main:subagent:qa-123', agentId: 'main' });
 const coding = resolveFeedAgentIdentity({ sessionKey: 'agent:main:subagent:code-456' });
 const main = resolveFeedAgentIdentity({ sessionKey: 'agent:main:main' });
 const explicitQa = resolveFeedAgentIdentity({ sessionKey: 'agent:main:subagent:anything', agentId: 'qa_agent' });
 
-assert.equal(qaEarly.agentId, 'qa_agent', 'early child hook should adopt pending qa_agent attribution before spawn result lands');
-assert.equal(qa.agentId, 'qa_agent', 'qa_agent activity should stay attributed to qa_agent');
+assert.equal(qaEarly.agentId, 'qa_agent', 'early child hook should adopt pending qa_agent attribution before spawn result lands even if ctx.agentId still says main');
+assert.equal(qaEarlyFollowup.agentId, 'qa_agent', 'subsequent child event should keep adopted qa_agent attribution before spawn result lands');
+assert.equal(qa.agentId, 'qa_agent', 'qa_agent activity should stay attributed to qa_agent after spawn result lands');
 assert.equal(coding.agentId, 'coding_agent', 'coding_agent activity should stay attributed to coding_agent');
 assert.equal(main.agentId, 'main', 'main activity should stay attributed to main');
 assert.equal(explicitQa.agentId, 'qa_agent', 'explicit actual agent should override resident lineage');

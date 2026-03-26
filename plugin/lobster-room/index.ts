@@ -1248,6 +1248,17 @@ export default {
     const resolveFeedAgentIdentity = (ctx: any): { agentId: string; rawAgentId?: string } => {
       const parsed = parseSessionIdentity(ctx?.sessionKey, ctx?.agentId);
       const rawSessionAgentId = parsed.agentId;
+      const childSessionKey = typeof ctx?.sessionKey === "string" ? ctx.sessionKey.trim() : "";
+      const spawnedVisible = childSessionKey
+        ? (spawnedSessionAgentIds.get(childSessionKey)
+          || (parsed.lane !== "main" ? adoptPendingSpawnAgentForSession(childSessionKey, parsed.residentAgentId) : ""))
+        : "";
+      if (spawnedVisible) {
+        return {
+          agentId: spawnedVisible,
+          rawAgentId: rawSessionAgentId && rawSessionAgentId !== spawnedVisible ? rawSessionAgentId : undefined,
+        };
+      }
       const explicitCandidates = [
         ctx?.agentId,
         ctx?.agent?.id,
@@ -1261,15 +1272,6 @@ export default {
           const raw = typeof candidate === "string" ? String(candidate).trim() : "";
           return { agentId: visible, rawAgentId: raw && raw !== visible ? raw : rawSessionAgentId !== visible ? rawSessionAgentId : undefined };
         }
-      }
-      const childSessionKey = typeof ctx?.sessionKey === "string" ? ctx.sessionKey.trim() : "";
-      const spawnedVisible = spawnedSessionAgentIds.get(childSessionKey)
-        || (parsed.lane !== "main" ? adoptPendingSpawnAgentForSession(childSessionKey, parsed.residentAgentId) : "");
-      if (spawnedVisible) {
-        return {
-          agentId: spawnedVisible,
-          rawAgentId: rawSessionAgentId && rawSessionAgentId !== spawnedVisible ? rawSessionAgentId : undefined,
-        };
       }
       const fallback = canonicalVisibleAgentId(rawSessionAgentId) || canonicalVisibleAgentId(parsed.residentAgentId) || "main";
       return { agentId: fallback, rawAgentId: rawSessionAgentId && rawSessionAgentId !== fallback ? rawSessionAgentId : undefined };
