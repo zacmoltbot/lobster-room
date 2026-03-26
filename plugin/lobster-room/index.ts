@@ -24,7 +24,7 @@ function sendJson(res: ServerResponse, status: number, body: unknown) {
   res.end(text);
 }
 
-const FEED_UI_VERSION = "feed-v3-20260326.1";
+const FEED_UI_VERSION = "feed-v3-20260326.2";
 
 // Maps tool names to user-facing labels for feed preview filtering.
 // Returns undefined for internal/noisy tools that should not appear in the feed label.
@@ -894,6 +894,7 @@ export default {
       ts: number;
       kind: FeedKind;
       agentId?: string;
+      rawAgentId?: string;
       sessionKey?: string;
       channelId?: string;
       to?: string;
@@ -1134,6 +1135,38 @@ export default {
       return (slash >= 0 ? stripped.slice(0, slash) : stripped).trim();
     };
 
+    const canonicalVisibleAgentId = (value: unknown): string => {
+      if (typeof value !== "string") return "";
+      const raw = String(value).trim();
+      if (!raw) return "";
+      const canonical = canonicalResidentAgentId(raw);
+      if (!canonical) return "";
+      const lower = canonical.toLowerCase();
+      if (lower === "subagent" || lower === "spawn" || lower === "cron" || lower === "discord") return "";
+      return canonical;
+    };
+
+    const resolveFeedAgentIdentity = (ctx: any): { agentId: string; rawAgentId?: string } => {
+      const parsed = parseSessionIdentity(ctx?.sessionKey, ctx?.agentId);
+      const rawSessionAgentId = parsed.agentId;
+      const explicitCandidates = [
+        ctx?.agentId,
+        ctx?.agent?.id,
+        ctx?.agent?.agentId,
+        ctx?.session?.agentId,
+        ctx?.residentAgentId,
+      ];
+      for (const candidate of explicitCandidates) {
+        const visible = canonicalVisibleAgentId(candidate);
+        if (visible) {
+          const raw = typeof candidate === "string" ? String(candidate).trim() : "";
+          return { agentId: visible, rawAgentId: raw && raw !== visible ? raw : rawSessionAgentId !== visible ? rawSessionAgentId : undefined };
+        }
+      }
+      const fallback = canonicalVisibleAgentId(rawSessionAgentId) || canonicalVisibleAgentId(parsed.residentAgentId) || "main";
+      return { agentId: fallback, rawAgentId: rawSessionAgentId && rawSessionAgentId !== fallback ? rawSessionAgentId : undefined };
+    };
+
     const ensure = (agentId: string): AgentActivity => {
       const existing = activity.get(agentId);
       if (existing) return existing;
@@ -1260,20 +1293,22 @@ export default {
 
     // Hooks → real runtime state
     const resolveAgentId = (ctx: any): string => {
-      const identity = parseSessionIdentity(ctx?.sessionKey, ctx?.agentId);
+      const identity = resolveFeedAgentIdentity(ctx);
       return identity.agentId;
     };
 
     api.on("before_agent_start", (_event, ctx) => {
-      const agentId = resolveAgentId(ctx);
+      const agentIdentity = resolveFeedAgentIdentity(ctx);
+      const agentId = agentIdentity.agentId;
       // api.logger.info("[lobster-room] hook before_agent_start", { buildTag: BUILD_TAG, agentId, sessionKey: ctx?.sessionKey });
       pushEvent("before_agent_start", { agentId, data: { sessionKey: ctx?.sessionKey, messageProvider: ctx?.messageProvider } });
-      pushFeed({ ts: nowMs(), kind: "before_agent_start", agentId, sessionKey: typeof ctx?.sessionKey === "string" ? ctx.sessionKey : undefined });
+      pushFeed({ ts: nowMs(), kind: "before_agent_start", agentId, rawAgentId: agentIdentity.rawAgentId, sessionKey: typeof ctx?.sessionKey === "string" ? ctx.sessionKey : undefined });
       setState(agentId, "thinking", { sessionKey: ctx?.sessionKey, messageProvider: ctx?.messageProvider });
     });
 
     api.on("before_tool_call", (event, ctx) => {
-      const agentId = resolveAgentId(ctx);
+      const agentIdentity = resolveFeedAgentIdentity(ctx);
+      const agentId = agentIdentity.agentId;
       const toolName = event?.toolName || event?.tool || event?.name;
       const internalObservation = isInternalObservationToolCall(toolName, ctx);
       // api.logger.info("[lobster-room] hook before_tool_call", { buildTag: BUILD_TAG, agentId, toolName, sessionKey: ctx?.sessionKey });
@@ -1315,6 +1350,7 @@ export default {
           ts: nowMs(),
           kind: "before_tool_call",
           agentId,
+          rawAgentId: agentIdentity.rawAgentId,
           sessionKey: typeof ctx?.sessionKey === "string" ? ctx.sessionKey : undefined,
           toolName: typeof toolName === "string" ? toolName : undefined,
           details: {
@@ -1335,7 +1371,8 @@ export default {
     });
 
     api.on("after_tool_call", (event, ctx) => {
-      const agentId = resolveAgentId(ctx);
+      const agentIdentity = resolveFeedAgentIdentity(ctx);
+      const agentId = agentIdentity.agentId;
       const toolName = event?.toolName;
       const internalObservation = isInternalObservationToolCall(toolName, ctx);
       if (!internalObservation) {
@@ -1367,6 +1404,7 @@ export default {
           ts: nowMs(),
           kind: "after_tool_call",
           agentId,
+          rawAgentId: agentIdentity.rawAgentId,
           sessionKey: typeof ctx?.sessionKey === "string" ? ctx.sessionKey : undefined,
           toolName: typeof toolName === "string" ? toolName : undefined,
           durationMs: typeof event?.durationMs === "number" ? event.durationMs : undefined,
@@ -1379,7 +1417,8 @@ export default {
 
     // Some tools may not reliably fire after_tool_call in all paths; use persist as a backup.
     api.on("tool_result_persist", (event, ctx) => {
-      const agentId = resolveAgentId(ctx);
+      const agentIdentity = resolveFeedAgentIdentity(ctx);
+      const agentId = agentIdentity.agentId;
       const toolName = event?.toolName;
       const internalObservation = isInternalObservationToolCall(toolName, ctx);
       if (!internalObservation) {
@@ -1391,6 +1430,7 @@ export default {
           ts: nowMs(),
           kind: "tool_result_persist",
           agentId,
+          rawAgentId: agentIdentity.rawAgentId,
           sessionKey: typeof ctx?.sessionKey === "string" ? ctx.sessionKey : undefined,
           toolName: typeof toolName === "string" ? toolName : undefined,
           details: {
@@ -1443,12 +1483,14 @@ export default {
     });
 
     api.on("agent_end", (event, ctx) => {
-      const agentId = resolveAgentId(ctx);
+      const agentIdentity = resolveFeedAgentIdentity(ctx);
+      const agentId = agentIdentity.agentId;
       pushEvent("agent_end", { agentId, data: { success: event?.success, error: event?.error, sessionKey: ctx?.sessionKey } });
       pushFeed({
         ts: nowMs(),
         kind: "agent_end",
         agentId,
+        rawAgentId: agentIdentity.rawAgentId,
         sessionKey: typeof ctx?.sessionKey === "string" ? ctx.sessionKey : undefined,
         success: typeof event?.success === "boolean" ? event.success : undefined,
         error: typeof event?.error === "string" ? redactSecretsInText(event.error) : undefined,
@@ -1768,9 +1810,9 @@ export default {
                   status: t.status,
                   title: t.title,
                   summary: t.summary,
-                  items: t.items ? t.items.map((it) => ({ ...it, preview: feedPreview(it) })) : undefined,
+                  items: t.items ? t.items.map((it) => (includeRaw ? { ...it, preview: feedPreview(it) } : { ts: it.ts, kind: it.kind, agentId: it.agentId, sessionKey: it.sessionKey, channelId: it.channelId, to: it.to, toolName: it.toolName, durationMs: it.durationMs, success: it.success, error: it.error, details: it.details, preview: feedPreview(it) })) : undefined,
                 })),
-                rows: items.slice().reverse().map((it) => ({ ...it, preview: feedPreview(it) })),
+                rows: items.slice().reverse().map((it) => ({ ts: it.ts, kind: it.kind, agentId: it.agentId, sessionKey: it.sessionKey, channelId: it.channelId, to: it.to, toolName: it.toolName, durationMs: it.durationMs, success: it.success, error: it.error, details: it.details, preview: feedPreview(it) })),
                 items: includeRaw ? items.slice().reverse().map((it) => ({ ...it, preview: feedPreview(it) })) : undefined,
               });
               // api.logger.info("[lobster-room] feedGet sent", { itemsLen: items.length, tasksLen: tasks.length });

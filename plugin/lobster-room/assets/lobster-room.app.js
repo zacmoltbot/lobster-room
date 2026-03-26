@@ -8,7 +8,7 @@
         const v = cur && cur.searchParams ? cur.searchParams.get('v') : '';
         if(v) return String(v);
       }catch{}
-      return 'feed-v3-dev';
+      return 'feed-v3-20260326.2';
     })();
 
     // Soft muted color palette for agent name coloring (deterministic, dark-background friendly).
@@ -2743,14 +2743,21 @@
     }
 
     function feedNormalizeAgentId(v){
-      const id0 = String(v || '').trim();
+      let id0 = String(v || '').trim();
       if(!id0) return '';
-      // Suppress internal agent IDs
-      const lower = id0.toLowerCase();
-      if(lower === 'subagent' || lower === 'spawn') return '';
-      if(/^(agent|spawn):/i.test(id0)) return '';
       const m = id0.match(/^[^@]+@(.+)$/);
-      return m ? m[1] : id0;
+      if(m) id0 = String(m[1] || '').trim();
+      if(!id0) return '';
+      if(/^agent:/i.test(id0)){
+        const parts = id0.split(':').filter(Boolean);
+        if(parts.length >= 2) id0 = String(parts[1] || '').trim();
+      }
+      id0 = id0.replace(/^resident@/i, '').trim();
+      if(id0.includes('/')) id0 = id0.split('/')[0].trim();
+      const lower = id0.toLowerCase();
+      if(!id0) return '';
+      if(lower === 'subagent' || lower === 'spawn' || lower === 'cron' || lower === 'discord') return '';
+      return id0;
     }
 
     function feedMatchesAgentFilter(v){
