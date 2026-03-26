@@ -942,21 +942,67 @@ export default {
       return redactSecretsInText(t);
     };
 
+    // Build a natural-language fragment describing what the agent is doing,
+    // driven by tool intent (not raw tool names). Safe details (task label,
+    // url, spawnAgentId) are used to add context without exposing internals.
+    const humanizedWorkDescription = (toolName: string, details: Record<string, unknown> | null): string => {
+      const tn = String(toolName || "tool").trim();
+
+      // sessions_spawn: show the actual task the helper will run
+      if (tn === "sessions_spawn") {
+        const task = typeof details?.task === "string" ? details.task.trim() : "";
+        const label = typeof details?.label === "string" ? details.label.trim() : "";
+        const spawnId = typeof details?.spawnAgentId === "string" ? details.spawnAgentId.trim() : "";
+        if (task) {
+          const preview = task.length > 80 ? task.slice(0, 80) + "…" : task;
+          return `starting: ${preview}`;
+        }
+        if (label) return `starting ${label}`;
+        if (spawnId) return `starting helper (${spawnId})`;
+        return "starting helper task";
+      }
+
+      // File operations: show what kind of review/update is happening
+      if (tn === "read") {
+        const task = typeof details?.task === "string" ? details.task.trim() : "";
+        return task ? `reviewing: ${task}` : "reviewing files";
+      }
+      if (tn === "write") return "updating files";
+      if (tn === "edit") return "updating files";
+
+      // Browser / web: show checking live content
+      if (tn === "browser" || tn === "web_fetch") {
+        const url = typeof details?.url === "string" ? details.url.trim() : "";
+        return url ? "checking live page" : "checking page";
+      }
+
+      // Fallback: use the generic tool label in natural form
+      const base = genericToolLabel(tn) || "working";
+      return base.toLowerCase();
+    };
+
     const feedPreview = (it: FeedItem): string => {
-      const agent = it.agentId ? `@${it.agentId}` : "";
-      if (it.kind === "before_agent_start") return `${agent} started`;
+      // Always canonicalize agentId so internal descendant ids never leak into visible feed.
+      const canonicalAgentId = it.agentId ? canonicalVisibleAgentId(it.agentId) || "main" : "";
+      const agent = canonicalAgentId ? `@${canonicalAgentId}` : "";
+      const details = it.details as Record<string, unknown> | null;
+
+      if (it.kind === "before_agent_start") {
+        // No task context in before_agent_start details today; keep it simple.
+        return `${agent} started`;
+      }
       if (it.kind === "before_tool_call") {
         const tn = it.toolName || "tool";
-        const label = genericToolLabel(String(tn).trim()) || "Working";
-        return `${agent} ${label}`.trim();
+        const desc = humanizedWorkDescription(String(tn), details);
+        return `${agent} ${desc}`.trim();
       }
       if (it.kind === "after_tool_call") {
         const tn = it.toolName || "tool";
-        const label = genericToolLabel(String(tn).trim()) || "Task";
+        const desc = humanizedWorkDescription(String(tn), details).replace(/^starting:/, "started:");
         const d = typeof it.durationMs === "number" ? ` (${Math.round(it.durationMs)}ms)` : "";
-        return `${agent} ${label} done${d}`.trim();
+        return `${agent} ${desc} done${d}`.trim();
       }
-      if (it.kind === "tool_result_persist") return `${agent} Working`;
+      if (it.kind === "tool_result_persist") return `${agent} working`;
       if (it.kind === "message_sending") {
         const to = it.to ? redactSecretsInText(it.to) : "(unknown)";
         return `sending message → ${to}`;

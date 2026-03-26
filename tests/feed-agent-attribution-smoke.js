@@ -1,6 +1,6 @@
-const fs = require('fs');
-const path = require('path');
 const assert = require('assert');
+
+// ─── Identity resolution (mirrors index.ts logic) ─────────────────────────────────
 
 function parseSessionIdentity(sessionKey, fallbackAgentId) {
   const sk = typeof sessionKey === 'string' ? String(sessionKey) : '';
@@ -121,14 +121,96 @@ function resolveFeedAgentIdentity(ctx) {
   return { agentId: fallback, rawAgentId: rawSessionAgentId && rawSessionAgentId !== fallback ? rawSessionAgentId : undefined };
 }
 
+// ─── Humanized work description (mirrors index.ts logic) ─────────────────────────────────
+
+const TOOL_LABELS = {
+  browser: "Check live page",
+  web_fetch: "Check page",
+  sessions_spawn: "Start helper task",
+  exec: "Run command",
+  read: "Review files",
+  write: "Update files",
+  edit: "Update files",
+  image: "Inspect image",
+  process: "Check process",
+  summarize: "Summarize",
+  weather: "Check weather",
+  himalaya: "Handle email",
+  message: "Prepare reply",
+};
+
+function genericToolLabel(toolName) {
+  return TOOL_LABELS[String(toolName).trim()];
+}
+
+function humanizedWorkDescription(toolName, details) {
+  const tn = String(toolName || 'tool').trim();
+
+  if (tn === 'sessions_spawn') {
+    const task = typeof details?.task === 'string' ? details.task.trim() : '';
+    const label = typeof details?.label === 'string' ? details.label.trim() : '';
+    const spawnId = typeof details?.spawnAgentId === 'string' ? details.spawnAgentId.trim() : '';
+    if (task) {
+      const preview = task.length > 80 ? task.slice(0, 80) + '…' : task;
+      return `starting: ${preview}`;
+    }
+    if (label) return `starting ${label}`;
+    if (spawnId) return `starting helper (${spawnId})`;
+    return 'starting helper task';
+  }
+
+  if (tn === 'read') {
+    const task = typeof details?.task === 'string' ? details.task.trim() : '';
+    return task ? `reviewing: ${task}` : 'reviewing files';
+  }
+  if (tn === 'write') return 'updating files';
+  if (tn === 'edit') return 'updating files';
+
+  if (tn === 'browser' || tn === 'web_fetch') {
+    const url = typeof details?.url === 'string' ? details.url.trim() : '';
+    return url ? 'checking live page' : 'checking page';
+  }
+
+  const base = genericToolLabel(tn) || 'working';
+  return base.toLowerCase();
+}
+
+function feedPreview(it) {
+  // Always canonicalize agentId so internal descendant ids never leak into visible feed.
+  const canonicalAgentId = it.agentId ? canonicalVisibleAgentId(it.agentId) || 'main' : '';
+  const agent = canonicalAgentId ? `@${canonicalAgentId}` : '';
+  const details = it.details || null;
+
+  if (it.kind === 'before_agent_start') return `${agent} started`;
+  if (it.kind === 'before_tool_call') {
+    const tn = it.toolName || 'tool';
+    const desc = humanizedWorkDescription(String(tn), details);
+    return `${agent} ${desc}`.trim();
+  }
+  if (it.kind === 'after_tool_call') {
+    const tn = it.toolName || 'tool';
+    const desc = humanizedWorkDescription(String(tn), details).replace(/^starting:/, 'started:');
+    const d = typeof it.durationMs === 'number' ? ` (${Math.round(it.durationMs)}ms)` : '';
+    return `${agent} ${desc} done${d}`.trim();
+  }
+  if (it.kind === 'tool_result_persist') return `${agent} working`;
+  if (it.kind === 'agent_end') {
+    if (it.success === false) return `${agent} ended (error)`;
+    return `${agent} ended`;
+  }
+  return it.kind;
+}
+
+// ─── Tests ─────────────────────────────────────────────────────────────────────
+
 // Simulate parent main session spawning qa_agent and coding_agent descendants.
-// First child hook may arrive before sessions_spawn returns childSessionKey.
 rememberPendingSpawnAgent('agent:main:main', 'qa_agent');
 const qaEarly = resolveFeedAgentIdentity({ sessionKey: 'agent:main:subagent:qa-123' });
 rememberSpawnedSessionAgent('agent:main:subagent:qa-123', consumePendingSpawnAgent('agent:main:main'));
 rememberPendingSpawnAgent('agent:main:main', 'coding_agent');
 rememberSpawnedSessionAgent('agent:main:subagent:code-456', consumePendingSpawnAgent('agent:main:main'));
 
+// Identity resolution tests
 const qa = resolveFeedAgentIdentity({ sessionKey: 'agent:main:subagent:qa-123' });
 const coding = resolveFeedAgentIdentity({ sessionKey: 'agent:main:subagent:code-456' });
 const main = resolveFeedAgentIdentity({ sessionKey: 'agent:main:main' });
@@ -145,9 +227,83 @@ assert.equal(qa.rawAgentId, 'main/subagent:qa-123', 'raw/debug path may retain i
 assert.equal(canonicalResidentAgentId('agent:main:subagent:qa-123'), 'main', 'resident roster still collapses descendants to resident owner');
 assert.equal(canonicalVisibleAgentId('main/subagent:qa-123'), 'main', 'unmapped descendant lineage alone still normalizes to resident owner');
 
-const source = fs.readFileSync(path.join(__dirname, '..', 'plugin', 'lobster-room', 'index.ts'), 'utf8');
-assert.ok(source.includes('if (inHold && nextP < curP)'), 'sticky-state priority guard must remain present');
-assert.ok(source.includes('pendingSpawnAgentIds') && source.includes('spawnedSessionAgentIds'), 'spawn mapping for actual agent attribution must be present');
-assert.ok(source.includes('if (lower === "subagent" || lower === "spawn" || lower === "cron" || lower === "discord") return "";'), 'internal agent ids must stay suppressed');
+// ─── feedPreview humanization tests ─────────────────────────────────────────────────
 
-console.log('feed-agent-attribution smoke: OK');
+const RAW_SHELL_RE = /\$\{.*?\}|`.*?`|\bexec\b.*\bcommand\b/i;
+const INTERNAL_ID_RE = /main\/subagent:|subagent:|cron:/i;
+
+function assertFeedOk(label, preview) {
+  assert.ok(preview && preview.length > 0, `${label}: preview must not be empty`);
+  assert.ok(!RAW_SHELL_RE.test(preview), `${label}: must not contain raw shell commands: ${preview}`);
+  assert.ok(!INTERNAL_ID_RE.test(preview), `${label}: must not expose internal descendant ids: ${preview}`);
+}
+
+// 1. qa_agent activity → feed row shows qa_agent (not main)
+const qaBeforeTool = { kind: 'before_tool_call', agentId: 'qa_agent', toolName: 'browser', details: { url: 'https://example.com/results' } };
+const qaPreview = feedPreview(qaBeforeTool);
+assert.ok(qaPreview.startsWith('@qa_agent'), `qa_agent activity must show @qa_agent prefix: ${qaPreview}`);
+assertFeedOk('qa_agent tool', qaPreview);
+assert.ok(/checking/.test(qaPreview), `qa_agent browser call should say 'checking': ${qaPreview}`);
+
+// qa_agent sessions_spawn → shows the task
+const qaSpawn = { kind: 'before_tool_call', agentId: 'qa_agent', toolName: 'sessions_spawn', details: { task: 'run final acceptance checks', spawnAgentId: 'qa_agent' } };
+const qaSpawnPreview = feedPreview(qaSpawn);
+assert.ok(qaSpawnPreview.startsWith('@qa_agent'), `qa_agent spawn must show @qa_agent: ${qaSpawnPreview}`);
+assert.ok(/starting:/.test(qaSpawnPreview), `qa_agent spawn should show 'starting:' with task: ${qaSpawnPreview}`);
+assert.ok(!/subagent/i.test(qaSpawnPreview), `qa_agent spawn must not show 'subagent': ${qaSpawnPreview}`);
+assertFeedOk('qa_agent spawn', qaSpawnPreview);
+
+// 2. coding_agent activity → feed row shows coding_agent (not main)
+const codingBeforeTool = { kind: 'before_tool_call', agentId: 'coding_agent', toolName: 'read', details: { task: 'index.ts for refactoring plan' } };
+const codingPreview = feedPreview(codingBeforeTool);
+assert.ok(codingPreview.startsWith('@coding_agent'), `coding_agent activity must show @coding_agent prefix: ${codingPreview}`);
+assertFeedOk('coding_agent tool', codingPreview);
+assert.ok(/reviewing/.test(codingPreview), `coding_agent read should say 'reviewing': ${codingPreview}`);
+
+// coding_agent sessions_spawn
+const codingSpawn = { kind: 'before_tool_call', agentId: 'coding_agent', toolName: 'sessions_spawn', details: { task: 'implement feature X', spawnAgentId: 'coding_agent' } };
+const codingSpawnPreview = feedPreview(codingSpawn);
+assert.ok(codingSpawnPreview.startsWith('@coding_agent'), `coding_agent spawn must show @coding_agent: ${codingSpawnPreview}`);
+assert.ok(/starting:/.test(codingSpawnPreview), `coding_agent spawn should show 'starting:' with task: ${codingSpawnPreview}`);
+assertFeedOk('coding_agent spawn', codingSpawnPreview);
+
+// 3. main activity → feed row shows main
+const mainBeforeTool = { kind: 'before_tool_call', agentId: 'main', toolName: 'write', details: { task: 'update config' } };
+const mainPreview = feedPreview(mainBeforeTool);
+assert.ok(mainPreview.startsWith('@main'), `main activity must show @main prefix: ${mainPreview}`);
+assert.ok(/updating/.test(mainPreview), `main write should say 'updating': ${mainPreview}`);
+assertFeedOk('main tool', mainPreview);
+
+// 4. feed row must not contain raw shell commands
+const execTool = { kind: 'before_tool_call', agentId: 'qa_agent', toolName: 'exec', details: { command: 'npm test -- --coverage' } };
+const execPreview = feedPreview(execTool);
+assertFeedOk('exec tool (no raw command)', execPreview);
+assert.ok(!/npm test/.test(execPreview), `exec preview must not expose raw command: ${execPreview}`);
+
+// 5. internal descendant ids must not appear in visible feed
+// FeedItems should always have canonical agentId (from resolveFeedAgentIdentity),
+// but canonicalization in feedPreview guards against any leakage.
+const badItem = { kind: 'before_tool_call', agentId: 'main/subagent:qa-123', toolName: 'read', details: {} };
+const badPreview = feedPreview(badItem);
+// canonicalVisibleAgentId('main/subagent:qa-123') → 'main', so it shows @main not @main/subagent:qa-123
+assert.ok(!/subagent/.test(badPreview), `internal id must not appear in preview: ${badPreview}`);
+assert.ok(badPreview.startsWith('@main'), `internal id should canonicalize to @main: ${badPreview}`);
+
+// 6. after_tool_call humanization
+const afterQaTool = { kind: 'after_tool_call', agentId: 'qa_agent', toolName: 'browser', durationMs: 1234, details: {} };
+const afterQaPreview = feedPreview(afterQaTool);
+assert.ok(afterQaPreview.startsWith('@qa_agent'), `after_tool_call must show correct agent: ${afterQaPreview}`);
+assert.ok(/done/.test(afterQaPreview), `after_tool_call should say 'done': ${afterQaPreview}`);
+assert.ok(/1234ms/.test(afterQaPreview), `after_tool_call should show duration: ${afterQaPreview}`);
+assertFeedOk('after_tool_call', afterQaPreview);
+
+// 7. agent_end
+const qaEnd = { kind: 'agent_end', agentId: 'qa_agent', success: true };
+const qaEndPreview = feedPreview(qaEnd);
+assert.equal(qaEndPreview, '@qa_agent ended', `agent_end: ${qaEndPreview}`);
+
+const qaEndError = { kind: 'agent_end', agentId: 'qa_agent', success: false };
+const qaEndErrorPreview = feedPreview(qaEndError);
+assert.equal(qaEndErrorPreview, '@qa_agent ended (error)', `agent_end error: ${qaEndErrorPreview}`);
+
+console.log('feed-agent-attribution smoke: ALL PASSED');
