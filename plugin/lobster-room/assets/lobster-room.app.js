@@ -1,5 +1,15 @@
-    // UI build stamp (bump this when you deploy so we can confirm which frontend is running).
-    const UI_VERSION = 'feed-v3-20260323.1';
+    // UI build stamp injected by the HTML shell / backend source of truth.
+    const UI_VERSION = (function(){
+      try{
+        if(typeof window !== 'undefined' && window.__LOBSTER_ROOM_UI_VERSION) return String(window.__LOBSTER_ROOM_UI_VERSION);
+      }catch{}
+      try{
+        const cur = document.currentScript && document.currentScript.src ? new URL(document.currentScript.src, window.location.href) : null;
+        const v = cur && cur.searchParams ? cur.searchParams.get('v') : '';
+        if(v) return String(v);
+      }catch{}
+      return 'feed-v3-dev';
+    })();
 
     // Soft muted color palette for agent name coloring (deterministic, dark-background friendly).
     const AGENT_COLORS = ['#7eb8da','#b4a7d6','#8dd49e','#e6b89c','#d4a5c9','#8ecfc9','#d4c88a'];
@@ -42,14 +52,23 @@
     try { window.MODEL = MODEL; } catch {}
     try { window.UI_VERSION = UI_VERSION; } catch {}
 
+    function apiPath(path){
+      const raw = String(path || '');
+      if(!raw) return raw;
+      if(/^(?:https?:)?\/\//i.test(raw)) return raw;
+      const clean = raw.replace(/^\.\//, '').replace(/^\/+/, '');
+      const base = (typeof window !== 'undefined' && window.__LOBSTER_ROOM_API_BASE__) ? String(window.__LOBSTER_ROOM_API_BASE__) : '/lobster-room/';
+      return base.replace(/\/?$/, '/') + clean;
+    }
+
     async function apiGetJson(path){
-      const r = await fetch(path, {cache:'no-store'});
+      const r = await fetch(apiPath(path), {cache:'no-store'});
       if(!r.ok) throw new Error('HTTP ' + r.status);
       return await r.json();
     }
     async function apiPostJson(path, body, opts){
       const o = opts || {};
-      const r = await fetch(path, {method:'POST', headers:{'content-type':'application/json'}, body: JSON.stringify(body), signal: o.signal});
+      const r = await fetch(apiPath(path), {method:'POST', headers:{'content-type':'application/json'}, body: JSON.stringify(body), signal: o.signal});
       if(!r.ok) throw new Error('HTTP ' + r.status);
       return await r.json().catch(()=>({ok:true}));
     }
@@ -403,7 +422,7 @@
     async function saveLayout(layout){
       try{ localStorage.setItem('lobsterRoom.layout', JSON.stringify(layout)); }catch{}
       // best-effort persist to server if endpoint exists
-      try{ await fetch('./api/room-layout', {method:'POST', headers:{'content-type':'application/json'}, body: JSON.stringify(layout)}); }catch{}
+      try{ await fetch(apiPath('./api/room-layout'), {method:'POST', headers:{'content-type':'application/json'}, body: JSON.stringify(layout)}); }catch{}
     }
 
     function tileMetricsFromImage(img, TX, TY, scale=6){
@@ -1897,9 +1916,9 @@
               txt = feedReplyingText(d, evs);
             }else if(kind === 'before_tool_call' && d && d.toolName){
               const tool = String(d.toolName || '').trim();
-              if(tool === 'browser') txt = 'Inspecting in browser';
+              if(tool === 'browser') txt = 'Checking the live page';
               else if(tool === 'exec') txt = feedCommandIntent(d.command||'');
-              else if(tool === 'read') txt = 'Reading project files';
+              else if(tool === 'read') txt = 'Reviewing project files';
               else if(tool === 'write') txt = 'Updating project files';
               else if(tool === 'edit') txt = 'Updating project files';
               else if(tool === 'sessions_spawn') { const label = feedDetailTaskLabel(d, evs); txt = label ? ('Starting a helper task — ' + label) : 'Starting a helper task'; }
@@ -2116,7 +2135,7 @@
       // Lightweight build/activity monitor. Keep MODEL.activity fresh, but do not render agent status in the footer.
       if(MODEL.activityPollDisabled) return;
       try{
-        const r = await fetch('./api/lobster-room', {
+        const r = await fetch(apiPath('./api/lobster-room'), {
           method: 'POST',
           headers: {'content-type':'application/json'},
           cache: 'no-store',
@@ -2174,7 +2193,7 @@
         // to avoid initial "teleport/jitter" caused by placing with empty pools.
         if(MODEL.manualReady === false) return;
         // Use relative URL so Lobster Room can be mounted under a subpath (e.g. /lobster-room/).
-        const res = await fetch('./api/lobster-room', {cache:'no-store'});
+        const res = await fetch(apiPath('./api/lobster-room'), {cache:'no-store'});
         if(res.ok){
           const data = await res.json();
 
@@ -2560,8 +2579,7 @@
           [/\b(cat|sed|awk|head|tail|grep)\b/i, 'running a command — inspect file contents'],
         ];
         for(const [re, label] of tests){ if(re.test(cmd)) return label; }
-        const safe = feedRedact(cmd).slice(0, 80).trim();
-        return safe ? ('running a command — ' + safe) : 'running a command';
+        return 'running a command';
       }catch{return 'running a command'}
     }
 
@@ -2592,9 +2610,9 @@
       const compact = !!(opts && opts.compact);
       const tn = String(toolName || '').trim().toLowerCase();
       if(tn === 'channel' || tn === 'conversation' || tn === 'thread' || tn === 'session') return '';
-      if(tn === 'browser') return compact ? 'checking in browser' : 'inspecting in browser';
+      if(tn === 'browser') return compact ? 'checking the live page' : 'checking the live page';
       if(tn === 'exec') return compact ? feedCommandActivity(details && details.command) : feedCommandIntent(details && details.command);
-      if(tn === 'read') return compact ? 'reviewing project files' : 'reading project files';
+      if(tn === 'read') return compact ? 'reviewing project files' : 'reviewing project files';
       if(tn === 'write' || tn === 'edit') return compact ? 'updating project files' : 'updating project files';
       if(tn === 'message') return compact ? feedReplyingNow(details, recentEvents) : 'preparing a reply';
       if(tn === 'web_fetch') return compact ? 'checking a page' : 'checking a page';
@@ -3145,7 +3163,7 @@
         (async ()=>{
           if(!retentionSelect) return;
           try{
-            const r = await fetch('./api/retention?ts=' + Date.now(), {cache:'no-store'});
+            const r = await fetch(apiPath('./api/retention?ts=' + Date.now()), {cache:'no-store'});
             const j = r.ok ? await r.json() : null;
             if(j && j.retentionMs != null){
               retentionSelect.value = String(j.retentionMs);
@@ -3156,7 +3174,7 @@
         (async ()=>{
           if(!agentLabelsTa) return;
           try{
-            const r = await fetch('./api/agent-labels?ts=' + Date.now(), {cache:'no-store'});
+            const r = await fetch(apiPath('./api/agent-labels?ts=' + Date.now()), {cache:'no-store'});
             const j = r.ok ? await r.json() : null;
             if(j && j.ok && j.labels && typeof j.labels === 'object'){
               agentLabelsTa.value = JSON.stringify(j.labels, null, 2);
@@ -3181,7 +3199,7 @@
       async function refreshRoomBg(){
         applyBgOpacity();
         try{
-          const r = await fetch('./api/room-image/info', {cache:'no-store'});
+          const r = await fetch(apiPath('./api/room-image/info'), {cache:'no-store'});
           const j = r.ok ? await r.json() : null;
           const room = document.getElementById('room');
           const img = document.getElementById('room-bg');
@@ -3206,7 +3224,7 @@
           };
           // Cache-busting strategy A: use versioned URL param derived from room-image/info.updatedAt.
           // Backend serves ./api/room-image with long-lived immutable caching.
-          img.src = './api/room-image?v=' + ((j && j.updatedAt) ? j.updatedAt : 0);
+          img.src = apiPath('./api/room-image?v=' + ((j && j.updatedAt) ? j.updatedAt : 0));
           const nm = (j && j.roomName) ? j.roomName : '—';
           statusEl.textContent = 'Current room: ' + nm;
         }catch{
@@ -3281,7 +3299,7 @@
           const val = retentionSelect.value;
           if(retentionStatus) retentionStatus.textContent = 'Saving…';
           try{
-            const r = await fetch('./api/retention', {method:'POST', headers:{'content-type':'application/json'}, body: JSON.stringify({retentionMs: Number(val)})});
+            const r = await fetch(apiPath('./api/retention'), {method:'POST', headers:{'content-type':'application/json'}, body: JSON.stringify({retentionMs: Number(val)})});
             const j = r.ok ? await r.json().catch(()=>null) : null;
             if(j && j.ok){
               if(retentionStatus) retentionStatus.textContent = 'Saved.';
@@ -3384,7 +3402,7 @@
           labelsList.innerHTML = '';
           try{
             // Get known agentIds from the live API.
-            const r0 = await fetch('./api/lobster-room?ts=' + Date.now(), {cache:'no-store'});
+            const r0 = await fetch(apiPath('./api/lobster-room?ts=' + Date.now()), {cache:'no-store'});
             const j0 = r0.ok ? await r0.json() : null;
             const agentIds = new Set();
             if(j0 && Array.isArray(j0.agents)){
@@ -3396,7 +3414,7 @@
             }
 
             // Get existing mapping.
-            const r = await fetch('./api/agent-labels?ts=' + Date.now(), {cache:'no-store'});
+            const r = await fetch(apiPath('./api/agent-labels?ts=' + Date.now()), {cache:'no-store'});
             const j = r.ok ? await r.json() : null;
             const labels = (j && j.ok && j.labels && typeof j.labels === 'object') ? j.labels : {};
 
@@ -3444,7 +3462,7 @@
           if(agentLabelsStatus) agentLabelsStatus.textContent = 'Saving…';
           if(labelsStatus) labelsStatus.textContent = 'Saving…';
           try{
-            const r = await fetch('./api/agent-labels', {method:'POST', headers:{'content-type':'application/json'}, body: JSON.stringify({labels: obj})});
+            const r = await fetch(apiPath('./api/agent-labels'), {method:'POST', headers:{'content-type':'application/json'}, body: JSON.stringify({labels: obj})});
             const j = r.ok ? await r.json() : null;
             if(!j || !j.ok) throw new Error('save_failed');
             if(agentLabelsStatus) agentLabelsStatus.textContent = 'Saved.';
@@ -3463,7 +3481,7 @@
 
       async function loadManualMapFromServer(){
         try{
-          const r = await fetch('./api/manual-map?ts=' + Date.now(), {cache:'no-store'});
+          const r = await fetch(apiPath('./api/manual-map?ts=' + Date.now()), {cache:'no-store'});
           if(!r.ok) return false;
           const mm = await r.json();
           if(mm && mm.tx && mm.ty && Array.isArray(mm.cells)){
@@ -3635,7 +3653,7 @@
             try{ localStorage.setItem('lobsterRoom.manualMap', JSON.stringify(MODEL.manualMap)); }catch{}
             // Persist to server so all browsers/profiles see the same walkable map.
             try{
-              const r = await fetch('./api/manual-map', {method:'POST', headers:{'content-type':'application/json'}, body: JSON.stringify(MODEL.manualMap)});
+              const r = await fetch(apiPath('./api/manual-map'), {method:'POST', headers:{'content-type':'application/json'}, body: JSON.stringify(MODEL.manualMap)});
               if(!r.ok) throw new Error('HTTP ' + r.status);
               const j = await r.json().catch(()=>null);
               if(!j || !j.ok) throw new Error('save_failed');
@@ -3681,7 +3699,7 @@
         const fd = new FormData();
         fd.append('file', f, f.name);
         try{
-          const r = await fetch('./api/room-image', {method:'POST', body: fd});
+          const r = await fetch(apiPath('./api/room-image'), {method:'POST', body: fd});
           if(!r.ok){ statusEl.textContent = 'Upload failed (HTTP ' + r.status + ')'; return; }
           const j = await r.json().catch(()=>null);
           if(!j || !j.ok){ statusEl.textContent = 'Upload failed.'; return; }
@@ -3709,7 +3727,7 @@
       if(btnReset) btnReset.addEventListener('click', async ()=>{
         if(!confirm('Switch to Default room?')) return;
         statusEl.textContent = 'Switching…';
-        const r = await fetch('./api/room-image/reset', {method:'POST'});
+        const r = await fetch(apiPath('./api/room-image/reset'), {method:'POST'});
         if(!r.ok){ statusEl.textContent = 'Switch failed (HTTP ' + r.status + ')'; return; }
         MODEL.manualReady = false;
         await loadManualMapFromServer();

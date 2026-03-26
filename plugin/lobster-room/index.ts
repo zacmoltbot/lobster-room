@@ -24,22 +24,24 @@ function sendJson(res: ServerResponse, status: number, body: unknown) {
   res.end(text);
 }
 
+const FEED_UI_VERSION = "feed-v3-20260326.1";
+
 // Maps tool names to user-facing labels for feed preview filtering.
 // Returns undefined for internal/noisy tools that should not appear in the feed label.
 const TOOL_LABELS: Record<string, string | undefined> = {
-  browser: "browser.land",
-  web_fetch: "web_fetch",
-  sessions_spawn: "sessions_spawn",
-  exec: "exec",
-  read: "read",
-  write: "write",
-  edit: "edit",
-  image: "image",
-  process: "process",
-  summarize: "summarize",
-  weather: "weather",
-  himalaya: "himalaya",
-  message: "message",
+  browser: "Check live page",
+  web_fetch: "Check page",
+  sessions_spawn: "Start helper task",
+  exec: "Run command",
+  read: "Review files",
+  write: "Update files",
+  edit: "Update files",
+  image: "Inspect image",
+  process: "Check process",
+  summarize: "Summarize",
+  weather: "Check weather",
+  himalaya: "Handle email",
+  message: "Prepare reply",
 };
 
 function genericToolLabel(toolName: string): string | undefined {
@@ -942,15 +944,14 @@ export default {
       if (it.kind === "before_agent_start") return `${agent} started`;
       if (it.kind === "before_tool_call") {
         const tn = it.toolName || "tool";
-        const cmd = coerceStr((it.details as any)?.command, 180);
-        const url = coerceStr((it.details as any)?.url, 180);
-        const extra = cmd ? ` — ${cmd}` : url ? ` — ${url}` : "";
-        return `${agent} ${tn}${extra}`.trim();
+        const label = genericToolLabel(String(tn).trim()) || "Working";
+        return `${agent} ${label}`.trim();
       }
       if (it.kind === "after_tool_call") {
         const tn = it.toolName || "tool";
+        const label = genericToolLabel(String(tn).trim()) || "Task";
         const d = typeof it.durationMs === "number" ? ` (${Math.round(it.durationMs)}ms)` : "";
-        return `${agent} ${tn} done${d}`.trim();
+        return `${agent} ${label} done${d}`.trim();
       }
       if (it.kind === "tool_result_persist") return `${agent} Working`;
       if (it.kind === "message_sending") {
@@ -1006,9 +1007,9 @@ export default {
         if (x.kind !== "before_tool_call" || !x.toolName) return false;
         return !!genericToolLabel(String(x.toolName).trim());
       })?.toolName;
-      if (firstTool) return genericToolLabel(String(firstTool).trim()) || "Agent run";
+      if (firstTool) return genericToolLabel(String(firstTool).trim()) || "Working";
 
-      return "Agent run";
+      return "Working";
     };
 
     const taskSummaryFromItems = (items: FeedItem[], status: FeedTaskStatus): string => {
@@ -1016,20 +1017,23 @@ export default {
       const msgSent = items.filter((x) => x.kind === "message_sent" && x.success !== false).length;
       const msgFail = items.filter((x) => x.kind === "message_sent" && x.success === false).length;
       const errors = items.map((x) => (x.error ? String(x.error) : "")).filter(Boolean);
+      const firstTool = items.find((x) => x.kind === "before_tool_call" && x.toolName)?.toolName;
+      const firstLabel = firstTool ? genericToolLabel(String(firstTool).trim()) : undefined;
 
       const bits: string[] = [];
-      if (toolCalls) bits.push(String(toolCalls) + " tool call" + (toolCalls === 1 ? "" : "s"));
-      if (msgSent) bits.push(String(msgSent) + " message" + (msgSent === 1 ? "" : "s") + " sent");
-      if (msgFail) bits.push(String(msgFail) + " message" + (msgFail === 1 ? "" : "s") + " failed");
+      if (firstLabel) bits.push(firstLabel.toLowerCase());
+      if (toolCalls) bits.push(String(toolCalls) + " step" + (toolCalls === 1 ? "" : "s"));
+      if (msgSent) bits.push(String(msgSent) + " reply" + (msgSent === 1 ? "" : "ies") + " sent");
+      if (msgFail) bits.push(String(msgFail) + " reply" + (msgFail === 1 ? "" : "ies") + " failed");
 
-      if (status === "running") return bits.length ? "In progress · " + bits.join(" · ") : "In progress";
+      if (status === "running") return bits.length ? "Working · " + bits.join(" · ") : "Working";
 
       if (status === "error") {
         const e = errors[0] ? "Error: " + redactSecretsInText(errors[0]).slice(0, 160) : "Error";
         return bits.length ? e + " · " + bits.join(" · ") : e;
       }
 
-      return bits.length ? "Completed · " + bits.join(" · ") : "Done";
+      return bits.length ? "Done · " + bits.join(" · ") : "Done";
     };
 
     const groupFeedIntoTasks = (items: FeedItem[], opts?: { includeRaw?: boolean }): FeedTask[] => {
@@ -1437,10 +1441,13 @@ export default {
       handler: async (_req, res) => {
         try {
           const html = await fs.readFile(portalHtmlPath, "utf8");
+          const hydratedHtml = html
+            .replaceAll("__LOBSTER_ROOM_UI_VERSION__", FEED_UI_VERSION)
+            .replaceAll("__LOBSTER_ROOM_API_BASE__", "/lobster-room/");
           res.statusCode = 200;
           res.setHeader("content-type", "text/html; charset=utf-8");
           res.setHeader("cache-control", "no-store");
-          res.end(html);
+          res.end(hydratedHtml);
         } catch (err: any) {
           sendJson(res, 500, {
             ok: false,
@@ -1679,7 +1686,7 @@ export default {
               // api.logger.info("[lobster-room] feedGet before sendJson", { itemsLen: items.length, tasksLen: tasks.length });
               sendJson(res, 200, {
                 ok: true,
-                buildTagFeed: "feed-v2",
+                buildTagFeed: FEED_UI_VERSION,
                 latest: last ? { ...last, preview: feedPreview(last) } : null,
                 tasks: tasks.map((t) => ({
                   id: t.id,
