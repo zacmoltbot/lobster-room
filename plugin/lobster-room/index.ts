@@ -1148,22 +1148,48 @@ export default {
 
     const spawnedSessionAgentIds = new Map<string, string>();
     const pendingSpawnAgentIds = new Map<string, string[]>();
+    const pendingSpawnAgentIdsByResident = new Map<string, string[]>();
+
+    const enqueuePendingSpawnAgent = (bucket: Map<string, string[]>, key: string, visible: string) => {
+      bucket.set(key, (bucket.get(key) || []).concat([visible]));
+    };
+
+    const dequeuePendingSpawnAgent = (bucket: Map<string, string[]>, key: string): string => {
+      const queue = bucket.get(key) || [];
+      const next = queue.shift() || "";
+      if (queue.length) bucket.set(key, queue);
+      else bucket.delete(key);
+      return next;
+    };
 
     const rememberPendingSpawnAgent = (parentSessionKey: unknown, agentId: unknown) => {
       const sk = typeof parentSessionKey === "string" ? String(parentSessionKey).trim() : "";
       const visible = canonicalVisibleAgentId(agentId);
       if (!sk || !visible) return;
-      pendingSpawnAgentIds.set(sk, (pendingSpawnAgentIds.get(sk) || []).concat([visible]));
+      enqueuePendingSpawnAgent(pendingSpawnAgentIds, sk, visible);
+      const resident = canonicalResidentAgentId(sk);
+      if (resident) enqueuePendingSpawnAgent(pendingSpawnAgentIdsByResident, resident, visible);
     };
 
     const consumePendingSpawnAgent = (parentSessionKey: unknown): string => {
       const sk = typeof parentSessionKey === "string" ? String(parentSessionKey).trim() : "";
       if (!sk) return "";
-      const queue = pendingSpawnAgentIds.get(sk) || [];
-      const next = queue.shift() || "";
-      if (queue.length) pendingSpawnAgentIds.set(sk, queue);
-      else pendingSpawnAgentIds.delete(sk);
+      const next = dequeuePendingSpawnAgent(pendingSpawnAgentIds, sk);
+      if (!next) return "";
+      const resident = canonicalResidentAgentId(sk);
+      if (resident) dequeuePendingSpawnAgent(pendingSpawnAgentIdsByResident, resident);
       return next;
+    };
+
+    const adoptPendingSpawnAgentForSession = (sessionKey: unknown, residentAgentId: unknown): string => {
+      const sk = typeof sessionKey === "string" ? String(sessionKey).trim() : "";
+      if (!sk || spawnedSessionAgentIds.has(sk)) return spawnedSessionAgentIds.get(sk) || "";
+      const resident = canonicalVisibleAgentId(residentAgentId);
+      if (!resident) return "";
+      const adopted = dequeuePendingSpawnAgent(pendingSpawnAgentIdsByResident, resident);
+      if (!adopted) return "";
+      spawnedSessionAgentIds.set(sk, adopted);
+      return adopted;
     };
 
     const rememberSpawnedSessionAgent = (sessionKey: unknown, agentId: unknown) => {
@@ -1190,7 +1216,9 @@ export default {
           return { agentId: visible, rawAgentId: raw && raw !== visible ? raw : rawSessionAgentId !== visible ? rawSessionAgentId : undefined };
         }
       }
-      const spawnedVisible = spawnedSessionAgentIds.get(typeof ctx?.sessionKey === "string" ? ctx.sessionKey.trim() : "");
+      const childSessionKey = typeof ctx?.sessionKey === "string" ? ctx.sessionKey.trim() : "";
+      const spawnedVisible = spawnedSessionAgentIds.get(childSessionKey)
+        || (parsed.lane !== "main" ? adoptPendingSpawnAgentForSession(childSessionKey, parsed.residentAgentId) : "");
       if (spawnedVisible) {
         return {
           agentId: spawnedVisible,
