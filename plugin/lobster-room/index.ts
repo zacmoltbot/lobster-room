@@ -53,6 +53,8 @@ function isLowSignalObservationTool(toolName: unknown): boolean {
   return typeof toolName === "string" && LOW_SIGNAL_OBSERVATION_TOOLS.has(toolName.trim());
 }
 
+const INTERNAL_OBSERVATION_HEADER = "x-lobster-room-internal-observation";
+
 type PluginRoute = {
   path: string;
   auth?: "gateway" | "plugin";
@@ -1089,6 +1091,39 @@ export default {
       error: 4,
     };
 
+    const internalObservationDepth = new Map<string, number>();
+    const beginInternalObservation = (toolName: string) => {
+      internalObservationDepth.set(toolName, (internalObservationDepth.get(toolName) || 0) + 1);
+    };
+    const endInternalObservation = (toolName: string) => {
+      const cur = internalObservationDepth.get(toolName) || 0;
+      if (cur <= 1) internalObservationDepth.delete(toolName);
+      else internalObservationDepth.set(toolName, cur - 1);
+    };
+    const isInternalObservationToolCall = (toolName: unknown, ctx: any): boolean => {
+      if (!isLowSignalObservationTool(toolName)) return false;
+      const headerValue = ctx?.request?.headers?.[INTERNAL_OBSERVATION_HEADER]
+        ?? ctx?.headers?.[INTERNAL_OBSERVATION_HEADER]
+        ?? ctx?.req?.headers?.[INTERNAL_OBSERVATION_HEADER];
+      if (headerValue === "1" || headerValue === 1 || headerValue === true) return true;
+      return typeof toolName === "string" && (internalObservationDepth.get(toolName) || 0) > 0;
+    };
+
+    const parseSessionIdentity = (sessionKey: unknown, fallbackAgentId?: unknown): { agentId: string; residentAgentId: string; lane: string } => {
+      const sk = typeof sessionKey === "string" ? String(sessionKey) : "";
+      const parts = sk ? sk.split(":") : [];
+      if (parts.length >= 3 && parts[0] === "agent") {
+        const residentAgentId = parts[1] || "main";
+        const lane = parts[2] || "main";
+        if (lane === "main") return { agentId: residentAgentId, residentAgentId, lane };
+        const tail = parts.slice(3).filter(Boolean).join(":");
+        const scoped = tail ? `${residentAgentId}/${lane}:${tail}` : `${residentAgentId}/${lane}`;
+        return { agentId: scoped, residentAgentId, lane };
+      }
+      const id = typeof fallbackAgentId === "string" ? String(fallbackAgentId).trim() : "";
+      return { agentId: id || "main", residentAgentId: id || "main", lane: "main" };
+    };
+
     const ensure = (agentId: string): AgentActivity => {
       const existing = activity.get(agentId);
       if (existing) return existing;
@@ -1196,6 +1231,18 @@ export default {
         cur.sinceMs = t;
         cur.lastEventMs = t;
         cur.details = null;
+        try {
+          const prev = snap.agents[agentId];
+          snap.agents[agentId] = {
+            ...(prev || {}),
+            state: "idle",
+            sinceMs: t,
+            lastEventMs: t,
+            details: null,
+          };
+          snap.updatedAtMs = t;
+          writeSnapshotSoon();
+        } catch {}
       }, waitMs);
       // Update lastEvent so API knows something just happened.
       row.lastEventMs = scheduledAt;
@@ -1203,12 +1250,8 @@ export default {
 
     // Hooks → real runtime state
     const resolveAgentId = (ctx: any): string => {
-      const sk = typeof ctx?.sessionKey === "string" ? String(ctx.sessionKey) : "";
-      // Prefer sessionKey: "agent:<agentId>:..." is canonical even when ctx.agentId is inconsistent.
-      const m = sk.match(/^agent:([^:]+):/);
-      if (m && m[1]) return m[1];
-      const id = typeof ctx?.agentId === "string" ? String(ctx.agentId).trim() : "";
-      return id || "main";
+      const identity = parseSessionIdentity(ctx?.sessionKey, ctx?.agentId);
+      return identity.agentId;
     };
 
     api.on("before_agent_start", (_event, ctx) => {
@@ -1222,6 +1265,7 @@ export default {
     api.on("before_tool_call", (event, ctx) => {
       const agentId = resolveAgentId(ctx);
       const toolName = event?.toolName || event?.tool || event?.name;
+      const internalObservation = isInternalObservationToolCall(toolName, ctx);
       // api.logger.info("[lobster-room] hook before_tool_call", { buildTag: BUILD_TAG, agentId, toolName, sessionKey: ctx?.sessionKey });
 
       // Capture high-value params for debugging (truncate aggressively).
@@ -1253,8 +1297,10 @@ export default {
         toolData.url = p?.url;
       }
 
-      pushEvent("before_tool_call", { agentId, data: toolData });
-      if (!isLowSignalObservationTool(toolName)) {
+      if (!internalObservation) {
+        pushEvent("before_tool_call", { agentId, data: toolData });
+      }
+      if (!isLowSignalObservationTool(toolName) && !internalObservation) {
         pushFeed({
           ts: nowMs(),
           kind: "before_tool_call",
@@ -1270,17 +1316,26 @@ export default {
           },
         });
       }
+      if (internalObservation) return;
+      if (isLowSignalObservationTool(toolName)) {
+        setState(agentId, "thinking", { toolName, sessionKey: ctx?.sessionKey, lowSignal: true });
+        return;
+      }
       setState(agentId, "tool", { toolName, sessionKey: ctx?.sessionKey });
     });
 
     api.on("after_tool_call", (event, ctx) => {
       const agentId = resolveAgentId(ctx);
-      pushEvent("after_tool_call", { agentId, data: { toolName: event?.toolName, durationMs: event?.durationMs } });
+      const toolName = event?.toolName;
+      const internalObservation = isInternalObservationToolCall(toolName, ctx);
+      if (!internalObservation) {
+        pushEvent("after_tool_call", { agentId, data: { toolName, durationMs: event?.durationMs } });
+      }
 
       // Best-effort: capture a safe preview of sessions_spawn final assistant output (if the runtime provides it).
       // This helps surface sub-agent completions even when no message_sent hook is emitted.
       let outputPreview: string | undefined = undefined;
-      if (event?.toolName === "sessions_spawn") {
+      if (toolName === "sessions_spawn") {
         const candidates = [
           event?.result?.message,
           event?.result?.content,
@@ -1297,39 +1352,45 @@ export default {
         }
       }
 
-      if (!isLowSignalObservationTool(event?.toolName)) {
+      if (!isLowSignalObservationTool(toolName) && !internalObservation) {
         pushFeed({
           ts: nowMs(),
           kind: "after_tool_call",
           agentId,
           sessionKey: typeof ctx?.sessionKey === "string" ? ctx.sessionKey : undefined,
-          toolName: typeof event?.toolName === "string" ? event.toolName : undefined,
+          toolName: typeof toolName === "string" ? toolName : undefined,
           durationMs: typeof event?.durationMs === "number" ? event.durationMs : undefined,
           details: outputPreview ? { outputPreview } : undefined,
         });
       }
-      setState(agentId, "thinking", { sessionKey: ctx?.sessionKey });
+      if (internalObservation) return;
+      setState(agentId, "thinking", { sessionKey: ctx?.sessionKey, lowSignal: isLowSignalObservationTool(toolName) || undefined });
     });
 
     // Some tools may not reliably fire after_tool_call in all paths; use persist as a backup.
     api.on("tool_result_persist", (event, ctx) => {
       const agentId = resolveAgentId(ctx);
-      pushEvent("tool_result_persist", {
-        agentId,
-        data: { toolName: event?.toolName, toolCallId: event?.toolCallId, isSynthetic: event?.isSynthetic },
-      });
-      pushFeed({
-        ts: nowMs(),
-        kind: "tool_result_persist",
-        agentId,
-        sessionKey: typeof ctx?.sessionKey === "string" ? ctx.sessionKey : undefined,
-        toolName: typeof event?.toolName === "string" ? event.toolName : undefined,
-        details: {
-          toolCallId: typeof event?.toolCallId === "string" ? event.toolCallId : undefined,
-          isSynthetic: !!event?.isSynthetic,
-        },
-      });
-      setState(agentId, "thinking", { sessionKey: ctx?.sessionKey, persisted: true });
+      const toolName = event?.toolName;
+      const internalObservation = isInternalObservationToolCall(toolName, ctx);
+      if (!internalObservation) {
+        pushEvent("tool_result_persist", {
+          agentId,
+          data: { toolName, toolCallId: event?.toolCallId, isSynthetic: event?.isSynthetic },
+        });
+        pushFeed({
+          ts: nowMs(),
+          kind: "tool_result_persist",
+          agentId,
+          sessionKey: typeof ctx?.sessionKey === "string" ? ctx.sessionKey : undefined,
+          toolName: typeof toolName === "string" ? toolName : undefined,
+          details: {
+            toolCallId: typeof event?.toolCallId === "string" ? event?.toolCallId : undefined,
+            isSynthetic: !!event?.isSynthetic,
+          },
+        });
+      }
+      if (internalObservation) return;
+      setState(agentId, "thinking", { sessionKey: ctx?.sessionKey, persisted: true, lowSignal: isLowSignalObservationTool(toolName) || undefined });
     });
 
     api.on("message_sending", (event, ctx) => {
@@ -2081,10 +2142,19 @@ export default {
         const invoke = async (tool: string, args: any) => {
           const headers: Record<string, string> = { "content-type": "application/json" };
           if (gatewayToken) headers.authorization = `Bearer ${gatewayToken}`;
-          const resp = await fetch(invokeUrl, { method: "POST", headers, body: JSON.stringify({ tool, args }) });
-          const data = await resp.json();
-          if (!data?.ok) throw new Error(String(data?.error || "invoke_failed"));
-          return data;
+          const markInternalObservation = isLowSignalObservationTool(tool);
+          if (markInternalObservation) {
+            headers[INTERNAL_OBSERVATION_HEADER] = "1";
+            beginInternalObservation(tool);
+          }
+          try {
+            const resp = await fetch(invokeUrl, { method: "POST", headers, body: JSON.stringify({ tool, args }) });
+            const data = await resp.json();
+            if (!data?.ok) throw new Error(String(data?.error || "invoke_failed"));
+            return data;
+          } finally {
+            if (markInternalObservation) endInternalObservation(tool);
+          }
         };
 
         const skToAgentId = (sk: unknown): string | null => {
