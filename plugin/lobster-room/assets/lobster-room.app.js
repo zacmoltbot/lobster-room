@@ -2783,7 +2783,7 @@
           if(!id0) continue;
           const id = feedNormalizeAgentId(id0);
           if(!feedMatchesAgentFilter(id)) continue;
-          const st = (a && a.debug && a.debug.decision) ? String(a.debug.decision.activityState||'idle') : 'idle';
+          const st = String((a && a.state) || 'idle');
           const details = (a && a.debug && a.debug.decision && a.debug.decision.details) ? a.debug.decision.details : null;
           const recentEvents = (a && a.debug && a.debug.decision && Array.isArray(a.debug.decision.recentEvents))
             ? a.debug.decision.recentEvents
