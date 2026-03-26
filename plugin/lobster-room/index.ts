@@ -1146,6 +1146,33 @@ export default {
       return canonical;
     };
 
+    const spawnedSessionAgentIds = new Map<string, string>();
+    const pendingSpawnAgentIds = new Map<string, string[]>();
+
+    const rememberPendingSpawnAgent = (parentSessionKey: unknown, agentId: unknown) => {
+      const sk = typeof parentSessionKey === "string" ? String(parentSessionKey).trim() : "";
+      const visible = canonicalVisibleAgentId(agentId);
+      if (!sk || !visible) return;
+      pendingSpawnAgentIds.set(sk, (pendingSpawnAgentIds.get(sk) || []).concat([visible]));
+    };
+
+    const consumePendingSpawnAgent = (parentSessionKey: unknown): string => {
+      const sk = typeof parentSessionKey === "string" ? String(parentSessionKey).trim() : "";
+      if (!sk) return "";
+      const queue = pendingSpawnAgentIds.get(sk) || [];
+      const next = queue.shift() || "";
+      if (queue.length) pendingSpawnAgentIds.set(sk, queue);
+      else pendingSpawnAgentIds.delete(sk);
+      return next;
+    };
+
+    const rememberSpawnedSessionAgent = (sessionKey: unknown, agentId: unknown) => {
+      const sk = typeof sessionKey === "string" ? String(sessionKey).trim() : "";
+      const visible = canonicalVisibleAgentId(agentId);
+      if (!sk || !visible) return;
+      spawnedSessionAgentIds.set(sk, visible);
+    };
+
     const resolveFeedAgentIdentity = (ctx: any): { agentId: string; rawAgentId?: string } => {
       const parsed = parseSessionIdentity(ctx?.sessionKey, ctx?.agentId);
       const rawSessionAgentId = parsed.agentId;
@@ -1162,6 +1189,13 @@ export default {
           const raw = typeof candidate === "string" ? String(candidate).trim() : "";
           return { agentId: visible, rawAgentId: raw && raw !== visible ? raw : rawSessionAgentId !== visible ? rawSessionAgentId : undefined };
         }
+      }
+      const spawnedVisible = spawnedSessionAgentIds.get(typeof ctx?.sessionKey === "string" ? ctx.sessionKey.trim() : "");
+      if (spawnedVisible) {
+        return {
+          agentId: spawnedVisible,
+          rawAgentId: rawSessionAgentId && rawSessionAgentId !== spawnedVisible ? rawSessionAgentId : undefined,
+        };
       }
       const fallback = canonicalVisibleAgentId(rawSessionAgentId) || canonicalVisibleAgentId(parsed.residentAgentId) || "main";
       return { agentId: fallback, rawAgentId: rawSessionAgentId && rawSessionAgentId !== fallback ? rawSessionAgentId : undefined };
@@ -1328,6 +1362,7 @@ export default {
         toolData.label = p?.label;
         const task = typeof p?.task === "string" ? p.task : "";
         toolData.task = task ? task.slice(0, 160) : undefined;
+        rememberPendingSpawnAgent(ctx?.sessionKey, p?.agentId);
       }
 
       // Show message preview when using the message tool.
@@ -1383,6 +1418,14 @@ export default {
       // This helps surface sub-agent completions even when no message_sent hook is emitted.
       let outputPreview: string | undefined = undefined;
       if (toolName === "sessions_spawn") {
+        const requestedSpawnAgentId = event?.params?.agentId ?? event?.result?.agentId ?? event?.agentId ?? consumePendingSpawnAgent(ctx?.sessionKey);
+        rememberSpawnedSessionAgent(
+          event?.result?.childSessionKey
+            ?? event?.result?.sessionKey
+            ?? event?.childSessionKey
+            ?? event?.sessionKey,
+          requestedSpawnAgentId,
+        );
         const candidates = [
           event?.result?.message,
           event?.result?.content,
