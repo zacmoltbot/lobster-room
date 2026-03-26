@@ -1124,6 +1124,16 @@ export default {
       return { agentId: id || "main", residentAgentId: id || "main", lane: "main" };
     };
 
+    const canonicalResidentAgentId = (value: unknown): string => {
+      if (typeof value !== "string") return "";
+      const raw = String(value).trim();
+      if (!raw) return "";
+      if (raw.startsWith("agent:")) return parseSessionIdentity(raw).residentAgentId;
+      const stripped = raw.replace(/^resident@/, "");
+      const slash = stripped.indexOf("/");
+      return (slash >= 0 ? stripped.slice(0, slash) : stripped).trim();
+    };
+
     const ensure = (agentId: string): AgentActivity => {
       const existing = activity.get(agentId);
       if (existing) return existing;
@@ -2064,10 +2074,11 @@ export default {
         const agentIdAllowRaw = (process.env.LOBSTER_ROOM_AGENT_IDS || "").trim();
         let allowIds: string[] = [];
         if (agentIdAllowRaw) {
+          const seen = new Set<string>();
           allowIds = agentIdAllowRaw
             .split(",")
-            .map((s) => s.trim())
-            .filter(Boolean);
+            .map((s) => canonicalResidentAgentId(s))
+            .filter((s) => !!s && !seen.has(s) && (seen.add(s), true));
         } else {
           const ids: string[] = [];
           const seen = new Set<string>();
@@ -2079,7 +2090,8 @@ export default {
               seen.add(id.trim());
             }
           }
-          for (const id of activity.keys()) {
+          for (const rawId of activity.keys()) {
+            const id = canonicalResidentAgentId(rawId);
             if (id && !seen.has(id)) {
               ids.push(id);
               seen.add(id);
@@ -2088,7 +2100,8 @@ export default {
           // IMPORTANT: hook handlers may run in a different isolate; in that case this HTTP handler
           // won't see hook-updated in-memory `activity`, but it *will* see the on-disk snapshot.
           const snapAgentIds = snapDisk && snapDisk.agents ? Object.keys(snapDisk.agents) : [];
-          for (const id of snapAgentIds) {
+          for (const rawId of snapAgentIds) {
+            const id = canonicalResidentAgentId(rawId);
             if (id && !seen.has(id)) {
               ids.push(id);
               seen.add(id);
