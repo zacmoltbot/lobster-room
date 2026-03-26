@@ -1205,6 +1205,58 @@ export default {
     const spawnedSessionAgentIds = new Map<string, string>();
     const pendingSpawnAttributionsByParent = new Map<string, PendingSpawnAttribution[]>();
     const pendingSpawnAttributionsByResident = new Map<string, PendingSpawnAttribution[]>();
+    const spawnAttributionStatePath = join(rootUserDir, "spawn-attribution-state.json");
+
+    const loadSpawnAttributionState = async () => {
+      try {
+        const txt = await fs.readFile(spawnAttributionStatePath, "utf8");
+        const data: any = JSON.parse(txt);
+        spawnedSessionAgentIds.clear();
+        pendingSpawnAttributionsByParent.clear();
+        pendingSpawnAttributionsByResident.clear();
+
+        const spawned = data?.spawnedSessionAgentIds;
+        if (spawned && typeof spawned === "object") {
+          for (const [key, value] of Object.entries(spawned)) {
+            const sk = typeof key === "string" ? key.trim() : "";
+            const agentId = canonicalVisibleAgentId(value);
+            if (sk && agentId) spawnedSessionAgentIds.set(sk, agentId);
+          }
+        }
+
+        const pending = Array.isArray(data?.pending) ? data.pending : [];
+        for (const raw of pending) {
+          const parentSessionKey = typeof raw?.parentSessionKey === "string" ? raw.parentSessionKey.trim() : "";
+          const residentAgentId = canonicalResidentAgentId(raw?.residentAgentId || parentSessionKey);
+          const actorId = canonicalVisibleAgentId(raw?.actorId);
+          if (!parentSessionKey || !residentAgentId || !actorId) continue;
+          const entry: PendingSpawnAttribution = {
+            actorId,
+            parentSessionKey,
+            residentAgentId,
+            label: normalizeSpawnText(raw?.label, 120) || undefined,
+            task: normalizeSpawnText(raw?.task, 240) || undefined,
+            source: raw?.source === "explicit" ? "explicit" : "inferred",
+            createdAt: typeof raw?.createdAt === "number" && Number.isFinite(raw.createdAt) ? raw.createdAt : nowMs(),
+          };
+          enqueuePendingSpawnAttribution(pendingSpawnAttributionsByParent, parentSessionKey, entry);
+          enqueuePendingSpawnAttribution(pendingSpawnAttributionsByResident, residentAgentId, entry);
+        }
+      } catch {}
+    };
+
+    const persistSpawnAttributionState = async () => {
+      try {
+        const pending: PendingSpawnAttribution[] = [];
+        for (const queue of pendingSpawnAttributionsByParent.values()) {
+          for (const entry of queue) pending.push(entry);
+        }
+        await fs.writeFile(spawnAttributionStatePath, JSON.stringify({
+          spawnedSessionAgentIds: Object.fromEntries(spawnedSessionAgentIds.entries()),
+          pending,
+        }, null, 2));
+      } catch {}
+    };
 
     const normalizeSpawnText = (value: unknown, maxLen = 240): string => {
       if (typeof value !== "string") return "";
@@ -1279,7 +1331,8 @@ export default {
       else pendingSpawnAttributionsByResident.delete(residentAgentId);
     };
 
-    const rememberPendingSpawnAttribution = (parentSessionKey: unknown, payload: any): PendingSpawnAttribution | undefined => {
+    const rememberPendingSpawnAttribution = async (parentSessionKey: unknown, payload: any): Promise<PendingSpawnAttribution | undefined> => {
+      await loadSpawnAttributionState();
       const sk = typeof parentSessionKey === "string" ? String(parentSessionKey).trim() : "";
       if (!sk) return undefined;
       const actorId = inferSpawnActorId(payload);
@@ -1298,19 +1351,23 @@ export default {
       };
       enqueuePendingSpawnAttribution(pendingSpawnAttributionsByParent, sk, entry);
       enqueuePendingSpawnAttribution(pendingSpawnAttributionsByResident, residentAgentId, entry);
+      await persistSpawnAttributionState();
       return entry;
     };
 
-    const consumePendingSpawnAttribution = (parentSessionKey: unknown): PendingSpawnAttribution | undefined => {
+    const consumePendingSpawnAttribution = async (parentSessionKey: unknown): Promise<PendingSpawnAttribution | undefined> => {
+      await loadSpawnAttributionState();
       const sk = typeof parentSessionKey === "string" ? String(parentSessionKey).trim() : "";
       if (!sk) return undefined;
       const next = dequeuePendingSpawnAttribution(pendingSpawnAttributionsByParent, sk);
       if (!next) return undefined;
       forgetPendingSpawnAttributionFromResident(next.residentAgentId, next);
+      await persistSpawnAttributionState();
       return next;
     };
 
-    const adoptPendingSpawnAttributionForSession = (sessionKey: unknown, residentAgentId: unknown): PendingSpawnAttribution | undefined => {
+    const adoptPendingSpawnAttributionForSession = async (sessionKey: unknown, residentAgentId: unknown): Promise<PendingSpawnAttribution | undefined> => {
+      await loadSpawnAttributionState();
       const sk = typeof sessionKey === "string" ? String(sessionKey).trim() : "";
       if (!sk) return undefined;
       const existingActorId = spawnedSessionAgentIds.get(sk);
@@ -1332,22 +1389,25 @@ export default {
       const nextParentQueue = parentQueue.filter((candidate) => candidate !== adopted);
       if (nextParentQueue.length) pendingSpawnAttributionsByParent.set(adopted.parentSessionKey, nextParentQueue);
       else pendingSpawnAttributionsByParent.delete(adopted.parentSessionKey);
+      await persistSpawnAttributionState();
       return adopted;
     };
 
-    const rememberSpawnedSessionAgent = (sessionKey: unknown, agentId: unknown) => {
+    const rememberSpawnedSessionAgent = async (sessionKey: unknown, agentId: unknown) => {
+      await loadSpawnAttributionState();
       const sk = typeof sessionKey === "string" ? String(sessionKey).trim() : "";
       const visible = canonicalVisibleAgentId(agentId);
       if (!sk || !visible) return;
       spawnedSessionAgentIds.set(sk, visible);
+      await persistSpawnAttributionState();
     };
 
-    const resolveFeedAgentIdentity = (ctx: any): { agentId: string; rawAgentId?: string } => {
+    const resolveFeedAgentIdentity = async (ctx: any): Promise<{ agentId: string; rawAgentId?: string }> => {
       const parsed = parseSessionIdentity(ctx?.sessionKey, ctx?.agentId);
       const rawSessionAgentId = parsed.agentId;
       const childSessionKey = typeof ctx?.sessionKey === "string" ? ctx.sessionKey.trim() : "";
       const adoptedAttribution = childSessionKey && parsed.lane !== "main"
-        ? adoptPendingSpawnAttributionForSession(childSessionKey, parsed.residentAgentId)
+        ? await adoptPendingSpawnAttributionForSession(childSessionKey, parsed.residentAgentId)
         : undefined;
       const spawnedVisible = childSessionKey
         ? (spawnedSessionAgentIds.get(childSessionKey) || adoptedAttribution?.actorId || "")
@@ -1501,13 +1561,13 @@ export default {
     };
 
     // Hooks → real runtime state
-    const resolveAgentId = (ctx: any): string => {
-      const identity = resolveFeedAgentIdentity(ctx);
+    const resolveAgentId = async (ctx: any): Promise<string> => {
+      const identity = await resolveFeedAgentIdentity(ctx);
       return identity.agentId;
     };
 
-    api.on("before_agent_start", (_event, ctx) => {
-      const agentIdentity = resolveFeedAgentIdentity(ctx);
+    api.on("before_agent_start", async (_event, ctx) => {
+      const agentIdentity = await resolveFeedAgentIdentity(ctx);
       const agentId = agentIdentity.agentId;
       // api.logger.info("[lobster-room] hook before_agent_start", { buildTag: BUILD_TAG, agentId, sessionKey: ctx?.sessionKey });
       pushEvent("before_agent_start", { agentId, data: { sessionKey: ctx?.sessionKey, messageProvider: ctx?.messageProvider } });
@@ -1515,8 +1575,8 @@ export default {
       setState(agentId, "thinking", { sessionKey: ctx?.sessionKey, messageProvider: ctx?.messageProvider });
     });
 
-    api.on("before_tool_call", (event, ctx) => {
-      const agentIdentity = resolveFeedAgentIdentity(ctx);
+    api.on("before_tool_call", async (event, ctx) => {
+      const agentIdentity = await resolveFeedAgentIdentity(ctx);
       const agentId = agentIdentity.agentId;
       const toolName = event?.toolName || event?.tool || event?.name;
       const internalObservation = isInternalObservationToolCall(toolName, ctx);
@@ -1533,7 +1593,7 @@ export default {
 
       // Show what spawned the subagent.
       if (toolName === "sessions_spawn") {
-        const pendingAttribution = rememberPendingSpawnAttribution(ctx?.sessionKey, p);
+        const pendingAttribution = await rememberPendingSpawnAttribution(ctx?.sessionKey, p);
         const requestedSpawnAgentId = pendingAttribution?.actorId || resolveRequestedSpawnAgentId(p);
         toolData.spawnAgentId = requestedSpawnAgentId || p?.agentId || p?.spawnAgentId;
         toolData.label = p?.label;
@@ -1582,8 +1642,8 @@ export default {
       setState(agentId, "tool", { toolName, sessionKey: ctx?.sessionKey });
     });
 
-    api.on("after_tool_call", (event, ctx) => {
-      const agentIdentity = resolveFeedAgentIdentity(ctx);
+    api.on("after_tool_call", async (event, ctx) => {
+      const agentIdentity = await resolveFeedAgentIdentity(ctx);
       const agentId = agentIdentity.agentId;
       const toolName = event?.toolName;
       const internalObservation = isInternalObservationToolCall(toolName, ctx);
@@ -1595,12 +1655,12 @@ export default {
       // This helps surface sub-agent completions even when no message_sent hook is emitted.
       let outputPreview: string | undefined = undefined;
       if (toolName === "sessions_spawn") {
-        const pendingAttribution = consumePendingSpawnAttribution(ctx?.sessionKey);
+        const pendingAttribution = await consumePendingSpawnAttribution(ctx?.sessionKey);
         const requestedSpawnAgentId = resolveRequestedSpawnAgentId(event?.params)
           || resolveRequestedSpawnAgentId(event?.result)
           || resolveRequestedSpawnAgentId(event)
           || pendingAttribution?.actorId;
-        rememberSpawnedSessionAgent(
+        await rememberSpawnedSessionAgent(
           event?.result?.childSessionKey
             ?? event?.result?.sessionKey
             ?? event?.childSessionKey
@@ -1640,8 +1700,8 @@ export default {
     });
 
     // Some tools may not reliably fire after_tool_call in all paths; use persist as a backup.
-    api.on("tool_result_persist", (event, ctx) => {
-      const agentIdentity = resolveFeedAgentIdentity(ctx);
+    api.on("tool_result_persist", async (event, ctx) => {
+      const agentIdentity = await resolveFeedAgentIdentity(ctx);
       const agentId = agentIdentity.agentId;
       const toolName = event?.toolName;
       const internalObservation = isInternalObservationToolCall(toolName, ctx);
@@ -1706,8 +1766,8 @@ export default {
       setIdleWithCooldown(agentId);
     });
 
-    api.on("agent_end", (event, ctx) => {
-      const agentIdentity = resolveFeedAgentIdentity(ctx);
+    api.on("agent_end", async (event, ctx) => {
+      const agentIdentity = await resolveFeedAgentIdentity(ctx);
       const agentId = agentIdentity.agentId;
       pushEvent("agent_end", { agentId, data: { success: event?.success, error: event?.error, sessionKey: ctx?.sessionKey } });
       pushFeed({
