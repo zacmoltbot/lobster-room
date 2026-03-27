@@ -2589,6 +2589,26 @@ export default {
           sessionsByAgent.set(aid, arr);
         }
 
+        const latestVisibleFeedItemForAgent = (agentId: string): FeedItem | null => {
+          for (let i = feedBuf.length - 1; i >= 0; i -= 1) {
+            const item = feedBuf[i];
+            if (!item || item.agentId !== agentId) continue;
+            if (!Number.isFinite(Number(item.ts))) continue;
+            if ((t - Number(item.ts)) > staleMs) continue;
+            return item;
+          }
+          return null;
+        };
+
+        const inferActivityFromFeedItem = (item: FeedItem | null): ActivityState | null => {
+          if (!item) return null;
+          if (item.kind === "message_sending" || item.kind === "message_sent") return "reply";
+          if (item.kind === "before_tool_call") return "tool";
+          if (item.kind === "agent_end") return item.success === false || !!item.error ? "error" : "idle";
+          if (item.kind === "before_agent_start" || item.kind === "after_tool_call" || item.kind === "tool_result_persist") return "thinking";
+          return null;
+        };
+
         const agentsPayload = [] as any[];
         for (const agentId of allowIds) {
           const displayName = agentNameOverrides[agentId] || identityNameByAgentId.get(agentId) || agentId;
@@ -2596,28 +2616,39 @@ export default {
           list.sort((a, b) => (Number(b?.updatedAt || 0) - Number(a?.updatedAt || 0)));
 
           const maxUpdatedAt = list.length ? Number(list[0]?.updatedAt || 0) : 0;
-          const recent = !!(maxUpdatedAt && (t - maxUpdatedAt) <= staleMs);
+          const freshSessions = list.filter((s) => {
+            const updatedAt = Number(s?.updatedAt || 0);
+            return !!(updatedAt && (t - updatedAt) <= staleMs);
+          });
+          const freshMaxUpdatedAt = freshSessions.length ? Number(freshSessions[0]?.updatedAt || 0) : 0;
 
-          // session_status on the most recent session (best-effort)
+          // session_status on the freshest candidate sessions only (best-effort)
           let queueDepth: number | null = null;
           let statusText: string | null = null;
-          if (list.length) {
+          const statusCandidates = freshSessions.slice(0, 2);
+          for (const sessionRow of statusCandidates) {
             try {
-              const r2 = await invoke("session_status", { sessionKey: String(list[0].key) });
+              const r2 = await invoke("session_status", { sessionKey: String(sessionRow.key) });
               const det2 = r2?.result?.details || {};
               const qd = det2.queueDepth ?? det2?.queue?.depth;
-              if (Number.isFinite(Number(qd))) queueDepth = Number(qd);
-              if (typeof det2.statusText === "string") statusText = det2.statusText;
+              if (Number.isFinite(Number(qd))) {
+                const nextDepth = Number(qd);
+                if (queueDepth == null || nextDepth > queueDepth) {
+                  queueDepth = nextDepth;
+                  statusText = typeof det2.statusText === "string" ? det2.statusText : statusText;
+                }
+                if (nextDepth > 0) break;
+              }
             } catch {}
           }
 
-          // sessions_history for last message type (best-effort)
+          // sessions_history remains debug-only; do not let observation probes drive visible state.
           let lastType: string | null = null;
           let lastRole: string | null = null;
           let historyTypes: string[] = [];
-          if (list.length) {
+          if (statusCandidates.length) {
             try {
-              const r3 = await invoke("sessions_history", { sessionKey: String(list[0].key), limit: 8 });
+              const r3 = await invoke("sessions_history", { sessionKey: String(statusCandidates[0].key), limit: 8 });
               const msgs = r3?.result?.details?.messages || [];
               const last = Array.isArray(msgs) && msgs.length ? msgs[0] : null;
               lastRole = typeof last?.role === "string" ? last.role : null;
@@ -2633,29 +2664,41 @@ export default {
 
           let activityState: ActivityState = "idle";
           let uiState: "think" | "wait" | "tool" | "reply" | "error" = "wait";
+          let currentTruthSource = "idle";
 
-          // Prefer hook-derived snapshot (more real-time, no polling lag).
+          // P0 current-truth rule:
+          // 1) fresh hook snapshot wins;
+          // 2) else fresh visible feed row wins;
+          // 3) else only a fresh queueDepth>0 may show active thinking;
+          // 4) otherwise stay idle/wait. Old sessions and observation probes must not create fake tool/reply state.
           const snapRow = snapDisk?.agents?.[agentId];
           const snapFresh = !!(snapRow && typeof snapRow.lastEventMs === "number" && (t - snapRow.lastEventMs) <= staleMs);
+          const feedTruth = latestVisibleFeedItemForAgent(agentId);
+          const feedTruthState = inferActivityFromFeedItem(feedTruth);
           if (snapFresh) {
             activityState = snapRow.state as ActivityState;
             uiState = mapActivityToUiState(activityState);
-          } else if (typeof queueDepth === "number" && queueDepth > 0) {
+            currentTruthSource = "snapshot";
+          } else if (feedTruthState) {
+            activityState = feedTruthState;
+            uiState = mapActivityToUiState(activityState);
+            currentTruthSource = "feed";
+          } else if (typeof queueDepth === "number" && queueDepth > 0 && freshSessions.length) {
             activityState = "thinking";
             uiState = "think";
-          } else if (recent && lastType === "toolCall") {
-            activityState = "tool";
-            uiState = "tool";
-          } else if (recent && lastType === "text" && lastRole === "assistant") {
-            activityState = "reply";
-            uiState = "reply";
+            currentTruthSource = "session_status";
           } else {
             activityState = "idle";
             uiState = "wait";
+            currentTruthSource = freshSessions.length ? "fresh_session_idle" : "stale_or_none";
           }
 
-          const sinceOut = snapFresh ? (snapRow?.sinceMs || null) : (maxUpdatedAt || null);
-          const lastOut = snapFresh ? (snapRow?.lastEventMs || null) : (maxUpdatedAt || null);
+          const sinceOut = snapFresh
+            ? (snapRow?.sinceMs || null)
+            : (feedTruth ? Number(feedTruth.ts) : (freshMaxUpdatedAt || null));
+          const lastOut = snapFresh
+            ? (snapRow?.lastEventMs || null)
+            : (feedTruth ? Number(feedTruth.ts) : (freshMaxUpdatedAt || null));
           agentsPayload.push({
             id: `resident@${agentId}`,
             hostId: "local",
@@ -2680,6 +2723,7 @@ export default {
                 staleMs,
                 toolMaxMs,
                 finalState: uiState,
+                currentTruthSource,
                 details: {
                   queueDepth,
                   statusText,
@@ -2688,6 +2732,10 @@ export default {
                   lastType,
                   snapFresh,
                   snapState: snapRow?.state || null,
+                  feedTruthKind: feedTruth?.kind || null,
+                  feedTruthSessionKey: feedTruth?.sessionKey || null,
+                  freshSessionCount: freshSessions.length,
+                  freshMaxUpdatedAt: freshMaxUpdatedAt || null,
                 } as any,
                 recentEvents: (snapDisk?.events || eventBuf),
               },
