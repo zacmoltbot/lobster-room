@@ -2672,7 +2672,16 @@ export default {
           // 3) else only a fresh queueDepth>0 may show active thinking;
           // 4) otherwise stay idle/wait. Old sessions and observation probes must not create fake tool/reply state.
           const snapRow = snapDisk?.agents?.[agentId];
-          const snapFresh = !!(snapRow && typeof snapRow.lastEventMs === "number" && (t - snapRow.lastEventMs) <= staleMs);
+          const snapLowSignal = !!(snapRow?.details && (
+            snapRow.details.lowSignal === true
+            || isLowSignalObservationTool(snapRow.details.toolName)
+          ));
+          const snapFresh = !!(
+            snapRow
+            && !snapLowSignal
+            && typeof snapRow.lastEventMs === "number"
+            && (t - snapRow.lastEventMs) <= staleMs
+          );
           const feedTruth = latestVisibleFeedItemForAgent(agentId);
           const feedTruthState = inferActivityFromFeedItem(feedTruth);
           if (snapFresh) {

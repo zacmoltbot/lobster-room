@@ -34,7 +34,11 @@ function pickCurrentTruth({ agentId, nowMs, staleMs, sessions, feedBuf, snapRow,
     return !!(updatedAt && (nowMs - updatedAt) <= staleMs);
   });
   const freshMaxUpdatedAt = freshSessions.length ? Number(freshSessions[0].updatedAt || 0) : 0;
-  const snapFresh = !!(snapRow && typeof snapRow.lastEventMs === 'number' && (nowMs - snapRow.lastEventMs) <= staleMs);
+  const snapLowSignal = !!(snapRow && snapRow.details && (
+    snapRow.details.lowSignal === true
+    || ['sessions_history', 'sessions_list', 'session_status'].includes(String(snapRow.details.toolName || ''))
+  ));
+  const snapFresh = !!(snapRow && !snapLowSignal && typeof snapRow.lastEventMs === 'number' && (nowMs - snapRow.lastEventMs) <= staleMs);
   const feedTruth = latestVisibleFeedItemForAgent(feedBuf || [], agentId, nowMs, staleMs);
   const feedTruthState = inferActivityFromFeedItem(feedTruth);
 
@@ -121,15 +125,41 @@ const staleMs = 15 * 1000;
     staleMs,
     sessions: [{ key: 'agent:main:discord:channel:probe', updatedAt: nowMs - 1500, kind: 'main' }],
     feedBuf: [], // visible feed intentionally excludes internal observation tools
-    snapRow: null,
+    snapRow: {
+      state: 'thinking',
+      sinceMs: nowMs - 1200,
+      lastEventMs: nowMs - 1200,
+      details: { toolName: 'sessions_list', lowSignal: true },
+    },
     queueDepth: 0,
   });
-  assert.equal(result.uiState, 'wait', 'fresh probe-only session must not create fake busy state');
+  assert.equal(result.uiState, 'wait', 'fresh probe-only snapshot must not create fake busy state');
   assert.equal(result.activityState, 'idle');
   assert.equal(result.currentTruthSource, 'fresh_session_idle');
 }
 
-// 4. actor attribution fix must not regress: recent child activity attributed to qa_agent should still win.
+// 4. main should still show busy when it has real fresh activity.
+{
+  const result = pickCurrentTruth({
+    agentId: 'main',
+    nowMs,
+    staleMs,
+    sessions: [{ key: 'agent:main:discord:channel:real', updatedAt: nowMs - 1800, kind: 'main' }],
+    feedBuf: [],
+    snapRow: {
+      state: 'tool',
+      sinceMs: nowMs - 900,
+      lastEventMs: nowMs - 900,
+      details: { toolName: 'exec' },
+    },
+    queueDepth: 0,
+  });
+  assert.equal(result.uiState, 'tool');
+  assert.equal(result.activityState, 'tool');
+  assert.equal(result.currentTruthSource, 'snapshot');
+}
+
+// 5. actor attribution fix must not regress: recent child activity attributed to qa_agent should still win.
 {
   const result = pickCurrentTruth({
     agentId: 'qa_agent',
