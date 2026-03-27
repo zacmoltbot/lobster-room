@@ -1085,6 +1085,34 @@ export default {
       return bits.length ? "Done · " + bits.join(" · ") : "Done";
     };
 
+    const visibleFeedAgentId = (value: unknown, fallback = "main"): string => {
+      const visible = canonicalVisibleAgentId(value);
+      return visible || fallback;
+    };
+
+    const sanitizeFeedItemForApi = (it: FeedItem, includeRaw = false) => {
+      const base = includeRaw
+        ? { ...it }
+        : {
+            ts: it.ts,
+            kind: it.kind,
+            agentId: it.agentId,
+            sessionKey: it.sessionKey,
+            channelId: it.channelId,
+            to: it.to,
+            toolName: it.toolName,
+            durationMs: it.durationMs,
+            success: it.success,
+            error: it.error,
+            details: it.details,
+          };
+      return {
+        ...base,
+        agentId: visibleFeedAgentId(it.agentId),
+        preview: feedPreview(it),
+      };
+    };
+
     const groupFeedIntoTasks = (items: FeedItem[], opts?: { includeRaw?: boolean }): FeedTask[] => {
       const includeRaw = !!opts?.includeRaw;
       const byKey = new Map<string, FeedItem[]>();
@@ -1100,7 +1128,7 @@ export default {
 
       for (const [sk, arr] of byKey.entries()) {
         const sorted = arr.slice().sort((a, b) => a.ts - b.ts);
-        const agentId = sorted.find((x) => x.agentId)?.agentId || "unknown";
+        const agentId = visibleFeedAgentId(sorted.find((x) => x.agentId)?.agentId, "unknown");
         const startTs = sorted[0]?.ts || nowMs();
         const end = [...sorted].reverse().find((x) => x.kind === "agent_end");
         const status: FeedTaskStatus = end ? (end.success === false || end.error ? "error" : "done") : "running";
@@ -1112,7 +1140,7 @@ export default {
       if (noKey.length) {
         const byAgent = new Map<string, FeedItem[]>();
         for (const it of noKey) {
-          const a = it.agentId || "unknown";
+          const a = visibleFeedAgentId(it.agentId, "unknown");
           byAgent.set(a, (byAgent.get(a) || []).concat([it]));
         }
         for (const [agentId, arr] of byAgent.entries()) {
@@ -2099,20 +2127,20 @@ export default {
               sendJson(res, 200, {
                 ok: true,
                 buildTagFeed: FEED_UI_VERSION,
-                latest: last ? { ...last, preview: feedPreview(last) } : null,
+                latest: last ? sanitizeFeedItemForApi(last, true) : null,
                 tasks: tasks.map((t) => ({
                   id: t.id,
                   sessionKey: t.sessionKey,
-                  agentId: t.agentId,
+                  agentId: visibleFeedAgentId(t.agentId, "unknown"),
                   startTs: t.startTs,
                   endTs: t.endTs,
                   status: t.status,
                   title: t.title,
                   summary: t.summary,
-                  items: t.items ? t.items.map((it) => (includeRaw ? { ...it, preview: feedPreview(it) } : { ts: it.ts, kind: it.kind, agentId: it.agentId, sessionKey: it.sessionKey, channelId: it.channelId, to: it.to, toolName: it.toolName, durationMs: it.durationMs, success: it.success, error: it.error, details: it.details, preview: feedPreview(it) })) : undefined,
+                  items: t.items ? t.items.map((it) => sanitizeFeedItemForApi(it, includeRaw)) : undefined,
                 })),
-                rows: items.slice().reverse().map((it) => ({ ts: it.ts, kind: it.kind, agentId: it.agentId, sessionKey: it.sessionKey, channelId: it.channelId, to: it.to, toolName: it.toolName, durationMs: it.durationMs, success: it.success, error: it.error, details: it.details, preview: feedPreview(it) })),
-                items: includeRaw ? items.slice().reverse().map((it) => ({ ...it, preview: feedPreview(it) })) : undefined,
+                rows: items.slice().reverse().map((it) => sanitizeFeedItemForApi(it, false)),
+                items: includeRaw ? items.slice().reverse().map((it) => sanitizeFeedItemForApi(it, true)) : undefined,
               });
               // api.logger.info("[lobster-room] feedGet sent", { itemsLen: items.length, tasksLen: tasks.length });
               } catch (err: any) {
