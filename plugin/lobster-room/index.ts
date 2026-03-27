@@ -2727,9 +2727,32 @@ export default {
 
         const skToAgentId = (sk: unknown): string | null => {
           if (typeof sk !== "string") return null;
-          const m = sk.match(/^agent:([^:]+):/);
-          return m && m[1] ? m[1] : null;
+          const raw = String(sk).trim();
+          if (!raw) return null;
+          const spawnedVisible = spawnedSessionAgentIds.get(raw);
+          if (spawnedVisible) return spawnedVisible;
+          const parsed = parseSessionIdentity(raw);
+          if (parsed.lane !== "main") {
+            const visible = canonicalVisibleAgentId(parsed.agentId);
+            if (visible && visible !== parsed.residentAgentId) return visible;
+          }
+          const resident = canonicalVisibleAgentId(parsed.residentAgentId);
+          return resident || null;
         };
++
++        const recentVisibleEventsForAgent = (agentId: string, limit = 24) => {
++          const out: Array<{ ts: number; kind: string; agentId?: string; data?: any }> = [];
++          const source = Array.isArray(snapDisk?.events) && snapDisk?.events?.length ? snapDisk.events : eventBuf;
++          for (let i = source.length - 1; i >= 0; i -= 1) {
++            const item = source[i];
++            if (!item) continue;
++            const visibleAgentId = visibleFeedAgentId(item.agentId, "");
++            if (!visibleAgentId || visibleAgentId !== agentId) continue;
++            out.push(item);
++            if (out.length >= limit) break;
++          }
++          return out.reverse();
++        };
 
         let sessions: any[] = [];
         try {
@@ -2875,6 +2898,37 @@ export default {
           const lastOut = snapFresh
             ? (snapRow?.lastEventMs || null)
             : (feedTruth ? Number(feedTruth.ts) : (freshMaxUpdatedAt || null));
+          const recentEvents = recentVisibleEventsForAgent(agentId);
+          const decisionDetails: any = {
+            queueDepth,
+            statusText,
+            historyTypes,
+            lastRole,
+            lastType,
+            snapFresh,
+            snapUsable,
+            snapState: snapRow?.state || null,
+            feedTruthKind: feedTruth?.kind || null,
+            feedTruthSessionKey: feedTruth?.sessionKey || null,
+            feedTruthUsable,
+            freshSessionCount: freshSessions.length,
+            freshMaxUpdatedAt: freshMaxUpdatedAt || null,
+          };
+          if (snapRow?.details && typeof snapRow.details === "object") {
+            Object.assign(decisionDetails, snapRow.details);
+          }
+          if ((!decisionDetails.toolName || currentTruthSource === "feed") && feedTruth?.toolName) {
+            decisionDetails.toolName = feedTruth.toolName;
+          }
+          if ((!decisionDetails.sessionKey || currentTruthSource === "feed") && feedTruth?.sessionKey) {
+            decisionDetails.sessionKey = feedTruth.sessionKey;
+          }
+          if (currentTruthSource === "feed" && feedTruth?.details && typeof feedTruth.details === "object") {
+            decisionDetails.feedTruthDetails = feedTruth.details;
+            for (const [k, v] of Object.entries(feedTruth.details)) {
+              if (decisionDetails[k] == null && v != null) decisionDetails[k] = v;
+            }
+          }
           agentsPayload.push({
             id: `resident@${agentId}`,
             hostId: "local",
@@ -2900,22 +2954,8 @@ export default {
                 toolMaxMs,
                 finalState: uiState,
                 currentTruthSource,
-                details: {
-                  queueDepth,
-                  statusText,
-                  historyTypes,
-                  lastRole,
-                  lastType,
-                  snapFresh,
-                  snapUsable,
-                  snapState: snapRow?.state || null,
-                  feedTruthKind: feedTruth?.kind || null,
-                  feedTruthSessionKey: feedTruth?.sessionKey || null,
-                  feedTruthUsable,
-                  freshSessionCount: freshSessions.length,
-                  freshMaxUpdatedAt: freshMaxUpdatedAt || null,
-                } as any,
-                recentEvents: (snapDisk?.events || eventBuf),
+                details: decisionDetails,
+                recentEvents,
               },
             },
           });
