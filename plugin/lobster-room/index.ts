@@ -2739,20 +2739,20 @@ export default {
           const resident = canonicalVisibleAgentId(parsed.residentAgentId);
           return resident || null;
         };
-+
-+        const recentVisibleEventsForAgent = (agentId: string, limit = 24) => {
-+          const out: Array<{ ts: number; kind: string; agentId?: string; data?: any }> = [];
-+          const source = Array.isArray(snapDisk?.events) && snapDisk?.events?.length ? snapDisk.events : eventBuf;
-+          for (let i = source.length - 1; i >= 0; i -= 1) {
-+            const item = source[i];
-+            if (!item) continue;
-+            const visibleAgentId = visibleFeedAgentId(item.agentId, "");
-+            if (!visibleAgentId || visibleAgentId !== agentId) continue;
-+            out.push(item);
-+            if (out.length >= limit) break;
-+          }
-+          return out.reverse();
-+        };
+
+        const recentVisibleEventsForAgent = (agentId: string, limit = 24) => {
+          const out: Array<{ ts: number; kind: string; agentId?: string; data?: any }> = [];
+          const source = Array.isArray(snapDisk?.events) && snapDisk?.events?.length ? snapDisk.events : eventBuf;
+          for (let i = source.length - 1; i >= 0; i -= 1) {
+            const item = source[i];
+            if (!item) continue;
+            const visibleAgentId = visibleFeedAgentId(item.agentId, "");
+            if (!visibleAgentId || visibleAgentId !== agentId) continue;
+            out.push(item);
+            if (out.length >= limit) break;
+          }
+          return out.reverse();
+        };
 
         let sessions: any[] = [];
         try {
