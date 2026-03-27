@@ -24,7 +24,7 @@ function sendJson(res: ServerResponse, status: number, body: unknown) {
   res.end(text);
 }
 
-const FEED_UI_VERSION = "feed-v3-20260327.1";
+const FEED_UI_VERSION = "feed-v3-20260327.2";
 
 // Maps tool names to user-facing labels for feed preview filtering.
 // Returns undefined for internal/noisy tools that should not appear in the feed label.
@@ -967,12 +967,24 @@ export default {
     };
 
     const extractTaskIntent = (details: Record<string, unknown> | null): string => {
-      const candidates = [details?.task, details?.label, details?.prompt, details?.goal, details?.summary];
+      const candidates = [details?.task, details?.label, details?.prompt, details?.goal, details?.summary, details?.title, details?.purpose, details?.name];
       for (const candidate of candidates) {
         const text = normalizeIntentText(candidate, 120);
         if (text) return text;
       }
       return "";
+    };
+
+    const fallbackTaskIntentForTool = (toolName: string, details: Record<string, unknown> | null): string => {
+      const tn = String(toolName || "tool").trim();
+      if (tn === "read") return "review files";
+      if (tn === "write" || tn === "edit") return "update files";
+      if (tn === "browser") return typeof details?.url === "string" && details.url.trim() ? "check live page" : "check page";
+      if (tn === "web_fetch") return "check page";
+      if (tn === "message") return "prepare a reply";
+      if (tn === "exec" || tn === "process") return "run a check";
+      const base = genericToolLabel(tn) || "";
+      return normalizeIntentText(base, 120).toLowerCase();
     };
 
     const humanizedWorkDescription = (
@@ -1029,52 +1041,55 @@ export default {
         const intent = extractTaskIntent((it.details as Record<string, unknown> | null) || null);
         if (intent) return intent;
       }
-      const firstTool = items.find((x) => x.kind === "before_tool_call" && x.toolName)?.toolName;
-      const firstLabel = firstTool ? genericToolLabel(String(firstTool).trim()) : "";
-      return firstLabel ? firstLabel.toLowerCase() : "";
+      const firstToolItem = items.find((x) => x.kind === "before_tool_call" && x.toolName);
+      return firstToolItem ? fallbackTaskIntentForTool(String(firstToolItem.toolName || ""), (firstToolItem.details as Record<string, unknown> | null) || null) : "";
     };
+
+    const GENERIC_TASK_TITLE_RE = /^(working|in progress|run command|check process|summarize)$/i;
 
     const taskTitleFromIntent = (intent: string): string => {
       const clean = normalizeIntentText(intent, 120);
-      if (!clean) return "Working";
+      if (!clean) return "Active task";
+      if (GENERIC_TASK_TITLE_RE.test(clean)) return sentenceCase(clean.toLowerCase() === "run command" ? "Run a check" : clean);
       return sentenceCase(clean);
     };
 
     const taskSummaryFromIntent = (intent: string, status: FeedTaskStatus, steps = 0, msgSent = 0, msgFail = 0, errorText = ""): string => {
       const clean = normalizeIntentText(intent, 120);
+      const stableIntent = clean || "run a check";
       const stepBit = steps > 1 ? ` · ${steps} steps` : "";
       const sentBit = msgSent ? ` · ${msgSent} repl${msgSent === 1 ? "y" : "ies"} sent` : "";
       const failBit = msgFail ? ` · ${msgFail} repl${msgFail === 1 ? "y" : "ies"} failed` : "";
-      if (status === "running") return clean ? `Now ${clean}${stepBit}${sentBit}${failBit}` : (steps ? `In progress · ${steps} steps` : "In progress");
+      if (status === "running") return `Now ${stableIntent}${stepBit}${sentBit}${failBit}`;
       if (status === "error") {
         const prefix = errorText ? `Blocked · ${redactSecretsInText(errorText).slice(0, 160)}` : "Blocked";
-        return clean ? `${prefix} · while trying to ${clean}${sentBit}${failBit}` : `${prefix}${stepBit}${sentBit}${failBit}`;
+        return `${prefix} · while trying to ${stableIntent}${sentBit}${failBit}`;
       }
-      return clean ? `Done · ${clean}${stepBit}${sentBit}${failBit}` : (steps ? `Done · ${steps} steps${sentBit}${failBit}` : `Done${sentBit}${failBit}`);
+      return `Done · ${stableIntent}${stepBit}${sentBit}${failBit}`;
     };
 
-    const feedPreview = (it: FeedItem): string => {
+    const feedPreview = (it: FeedItem, opts?: { includeActor?: boolean }): string => {
       // Always canonicalize agentId so internal descendant ids never leak into visible feed.
       const canonicalAgentId = it.agentId ? canonicalVisibleAgentId(it.agentId) || "main" : "";
-      const agent = canonicalAgentId ? `@${canonicalAgentId}` : "";
+      const actorPrefix = opts?.includeActor !== false && canonicalAgentId ? `@${canonicalAgentId} ` : "";
       const details = it.details as Record<string, unknown> | null;
 
       if (it.kind === "before_agent_start") {
-        return `${agent} started`;
+        return `${actorPrefix}started`.trim();
       }
       if (it.kind === "before_tool_call") {
         const tn = it.toolName || "tool";
         const desc = humanizedWorkDescription(String(tn), details, "active");
-        return `${agent} ${desc}`.trim();
+        return `${actorPrefix}${desc}`.trim();
       }
       if (it.kind === "after_tool_call") {
         const tn = it.toolName || "tool";
         const desc = humanizedWorkDescription(String(tn), details, "done");
-        return `${agent} ${desc}`.trim();
+        return `${actorPrefix}${desc}`.trim();
       }
       if (it.kind === "tool_result_persist") {
-        const intent = extractTaskIntent(details);
-        return `${agent} ${intent ? `working on ${intent}` : "making progress"}`.trim();
+        const intent = extractTaskIntent(details) || fallbackTaskIntentForTool(String(it.toolName || ""), details);
+        return `${actorPrefix}${intent ? `continuing ${intent}` : "continuing work"}`.trim();
       }
       if (it.kind === "message_sending") {
         const to = it.to ? redactSecretsInText(it.to) : "(unknown)";
@@ -1086,10 +1101,24 @@ export default {
         return `message ${ok} → ${to}`;
       }
       if (it.kind === "agent_end") {
-        if (it.success === false) return `${agent} ended (error)`;
-        return `${agent} ended`;
+        if (it.success === false) return `${actorPrefix}ended (error)`.trim();
+        return `${actorPrefix}ended`.trim();
       }
-      return it.kind;
+      return String(it.kind || "event");
+    };
+
+    const shouldSuppressFeedItem = (it: FeedItem, allItems: FeedItem[]): boolean => {
+      if (it.kind === "tool_result_persist") {
+        const details = (it.details as Record<string, unknown> | null) || null;
+        const intent = extractTaskIntent(details) || fallbackTaskIntentForTool(String(it.toolName || ""), details);
+        return !intent;
+      }
+      if (it.kind === "agent_end" && it.success !== false) {
+        const sameSession = allItems.filter((candidate) => candidate.sessionKey && candidate.sessionKey === it.sessionKey);
+        const hasStory = sameSession.some((candidate) => candidate !== it && (candidate.kind === "before_agent_start" || candidate.kind === "before_tool_call" || candidate.kind === "after_tool_call" || candidate.kind === "message_sent"));
+        return hasStory;
+      }
+      return false;
     };
 
     const pushFeed = (item: FeedItem) => {
@@ -1150,7 +1179,8 @@ export default {
       return {
         ...base,
         agentId: visibleFeedAgentId(it.agentId),
-        preview: feedPreview(it),
+        preview: feedPreview(it, { includeActor: false }),
+        previewWithActor: feedPreview(it, { includeActor: true }),
       };
     };
 
@@ -2251,9 +2281,10 @@ export default {
               }
 
               const tasks = groupFeedIntoTasks(items, { includeRaw });
+              const visibleItems = items.filter((it) => !shouldSuppressFeedItem(it, items));
 
-              // Latest preview = most recent event.
-              const last = items.length ? items[items.length - 1] : null;
+              // Latest preview = most recent visible event, with raw fallback if everything was suppressed.
+              const last = visibleItems.length ? visibleItems[visibleItems.length - 1] : (items.length ? items[items.length - 1] : null);
 
               // api.logger.info("[lobster-room] feedGet before sendJson", { itemsLen: items.length, tasksLen: tasks.length });
               sendJson(res, 200, {
@@ -2271,7 +2302,7 @@ export default {
                   summary: t.summary,
                   items: t.items ? t.items.map((it) => sanitizeFeedItemForApi(it, includeRaw)) : undefined,
                 })),
-                rows: items.slice().reverse().map((it) => sanitizeFeedItemForApi(it, false)),
+                rows: visibleItems.slice().reverse().map((it) => sanitizeFeedItemForApi(it, false)),
                 items: includeRaw ? items.slice().reverse().map((it) => sanitizeFeedItemForApi(it, true)) : undefined,
               });
               // api.logger.info("[lobster-room] feedGet sent", { itemsLen: items.length, tasksLen: tasks.length });

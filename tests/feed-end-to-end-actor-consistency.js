@@ -121,16 +121,16 @@ function inferTaskIntentFromItems(items) {
   return '';
 }
 
-function feedPreview(it) {
-  const agent = `@${visibleFeedAgentId(it.agentId)}`;
-  if (it.kind === 'before_agent_start') return `${agent} started`;
-  if (it.kind === 'before_tool_call') return `${agent} ${humanizedWorkDescription(it.toolName, it.details || null, 'active')}`;
-  if (it.kind === 'after_tool_call') return `${agent} ${humanizedWorkDescription(it.toolName, it.details || null, 'done')}`;
+function feedPreview(it, includeActor = false) {
+  const agent = includeActor ? `@${visibleFeedAgentId(it.agentId)} ` : '';
+  if (it.kind === 'before_agent_start') return `${agent}started`.trim();
+  if (it.kind === 'before_tool_call') return `${agent}${humanizedWorkDescription(it.toolName, it.details || null, 'active')}`.trim();
+  if (it.kind === 'after_tool_call') return `${agent}${humanizedWorkDescription(it.toolName, it.details || null, 'done')}`.trim();
   if (it.kind === 'tool_result_persist') {
     const intent = extractTaskIntent(it.details || null);
-    return `${agent} ${intent ? `working on ${intent}` : 'making progress'}`;
+    return `${agent}${intent ? `continuing ${intent}` : 'continuing work'}`.trim();
   }
-  return `${agent} making progress`;
+  return `${agent}continuing work`.trim();
 }
 
 function taskTitleFromItems(items) {
@@ -317,9 +317,10 @@ assert.equal(childTask?.agentId, 'qa_agent', 'feedGet.tasks[].agentId must stay 
 assert.equal(feed.latest?.agentId, 'qa_agent', 'feedGet.latest.agentId must stay qa_agent');
 assert.equal(childTask?.title, 'Check live page', `task title should read like user intent: ${childTask?.title}`);
 assert.equal(childTask?.summary, 'Now check live page', `task summary should tell the story, not just Working · steps: ${childTask?.summary}`);
-assert.ok(feed.rows[2].preview.startsWith('@qa_agent started'), `before_agent_start preview should humanize to qa_agent: ${feed.rows[2].preview}`);
-assert.ok(feed.rows[1].preview.startsWith('@qa_agent checking live page'), `before_tool_call preview should humanize to qa_agent: ${feed.rows[1].preview}`);
-assert.ok(feed.rows[0].preview.startsWith('@qa_agent checked page') || feed.rows[0].preview.startsWith('@qa_agent checked live page'), `after_tool_call preview should use completed task language: ${feed.rows[0].preview}`);
+assert.equal(feed.rows[2].preview, 'started', `before_agent_start preview should only contain action text: ${feed.rows[2].preview}`);
+assert.equal(feed.rows[1].preview, 'checking live page', `before_tool_call preview should humanize without repeating actor: ${feed.rows[1].preview}`);
+assert.ok(feed.rows[0].preview === 'checked page' || feed.rows[0].preview === 'checked live page', `after_tool_call preview should use completed task language: ${feed.rows[0].preview}`);
+assert.ok(!/@qa_agent/.test(feed.rows[0].preview), `feed row preview should not repeat actor prefix: ${feed.rows[0].preview}`);
 assert.ok(!/done/.test(feed.rows[0].preview), `after_tool_call preview should avoid raw done wording: ${feed.rows[0].preview}`);
 const visiblePayload = JSON.stringify({
   rows: feed.rows.map((row) => ({ agentId: row.agentId, preview: row.preview })),
