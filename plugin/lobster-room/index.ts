@@ -2725,20 +2725,18 @@ export default {
           }
         };
 
-        const skToAgentId = (sk: unknown): string | null => {
-          if (typeof sk !== "string") return null;
+        const resolveVisibleSessionBucket = (sk: unknown): { agentId: string | null; source: "spawned" | "resident" | "none" } => {
+          if (typeof sk !== "string") return { agentId: null, source: "none" };
           const raw = String(sk).trim();
-          if (!raw) return null;
+          if (!raw) return { agentId: null, source: "none" };
           const spawnedVisible = spawnedSessionAgentIds.get(raw);
-          if (spawnedVisible) return spawnedVisible;
+          if (spawnedVisible) return { agentId: spawnedVisible, source: "spawned" };
           const parsed = parseSessionIdentity(raw);
-          if (parsed.lane !== "main") {
-            const visible = canonicalVisibleAgentId(parsed.agentId);
-            if (visible && visible !== parsed.residentAgentId) return visible;
-          }
           const resident = canonicalVisibleAgentId(parsed.residentAgentId);
-          return resident || null;
+          return { agentId: resident || null, source: resident ? "resident" : "none" };
         };
+
+        const skToAgentId = (sk: unknown): string | null => resolveVisibleSessionBucket(sk).agentId;
 
         const recentVisibleEventsForAgent = (agentId: string, limit = 24) => {
           const out: Array<{ ts: number; kind: string; agentId?: string; data?: any }> = [];
@@ -2764,12 +2762,17 @@ export default {
         }
 
         const sessionsByAgent = new Map<string, any[]>();
+        const sessionBucketDebug = new Map<string, { key: string; source: "spawned" | "resident" | "none" }[]>();
         for (const s of sessions) {
-          const aid = skToAgentId(s?.key);
+          const bucket = resolveVisibleSessionBucket(s?.key);
+          const aid = bucket.agentId;
           if (!aid) continue;
           const arr = sessionsByAgent.get(aid) || [];
           arr.push(s);
           sessionsByAgent.set(aid, arr);
+          const debugArr = sessionBucketDebug.get(aid) || [];
+          debugArr.push({ key: String(s?.key || ""), source: bucket.source });
+          sessionBucketDebug.set(aid, debugArr);
         }
 
         const latestVisibleFeedItemForAgent = (agentId: string): FeedItem | null => {
@@ -2913,6 +2916,10 @@ export default {
             feedTruthUsable,
             freshSessionCount: freshSessions.length,
             freshMaxUpdatedAt: freshMaxUpdatedAt || null,
+            sessionBucketing: (sessionBucketDebug.get(agentId) || []).map((row) => ({
+              key: row.key,
+              source: row.source,
+            })),
           };
           if (snapRow?.details && typeof snapRow.details === "object") {
             Object.assign(decisionDetails, snapRow.details);
