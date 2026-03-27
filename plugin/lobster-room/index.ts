@@ -1576,15 +1576,18 @@ export default {
     });
 
     api.on("before_tool_call", async (event, ctx) => {
+      const toolName = event?.toolName || event?.tool || event?.name;
+      const p = event?.params || null;
+      const pendingAttribution = toolName === "sessions_spawn"
+        ? await rememberPendingSpawnAttribution(ctx?.sessionKey, p)
+        : undefined;
       const agentIdentity = await resolveFeedAgentIdentity(ctx);
       const agentId = agentIdentity.agentId;
-      const toolName = event?.toolName || event?.tool || event?.name;
       const internalObservation = isInternalObservationToolCall(toolName, ctx);
       // api.logger.info("[lobster-room] hook before_tool_call", { buildTag: BUILD_TAG, agentId, toolName, sessionKey: ctx?.sessionKey });
 
       // Capture high-value params for debugging (truncate aggressively).
       let toolData: any = { toolName, sessionKey: ctx?.sessionKey };
-      const p = event?.params || null;
 
       if (toolName === "exec") {
         const cmd = (p && (p.command || p.cmd || p.args)) || null;
@@ -1593,7 +1596,6 @@ export default {
 
       // Show what spawned the subagent.
       if (toolName === "sessions_spawn") {
-        const pendingAttribution = await rememberPendingSpawnAttribution(ctx?.sessionKey, p);
         const requestedSpawnAgentId = pendingAttribution?.actorId || resolveRequestedSpawnAgentId(p);
         toolData.spawnAgentId = requestedSpawnAgentId || p?.agentId || p?.spawnAgentId;
         toolData.label = p?.label;
