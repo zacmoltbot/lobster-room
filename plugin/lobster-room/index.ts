@@ -1234,21 +1234,47 @@ export default {
     const pendingSpawnAttributionsByParent = new Map<string, PendingSpawnAttribution[]>();
     const pendingSpawnAttributionsByResident = new Map<string, PendingSpawnAttribution[]>();
     const spawnAttributionStatePath = join(rootUserDir, "spawn-attribution-state.json");
+    let spawnAttributionStateHydrated = false;
+
+    const pendingSpawnAttributionKey = (entry: PendingSpawnAttribution): string => [
+      entry.parentSessionKey,
+      entry.residentAgentId,
+      entry.actorId,
+      entry.label || "",
+      entry.task || "",
+      entry.source,
+      String(entry.createdAt || 0),
+    ].join("\u0000");
+
+    const mergePendingSpawnAttribution = (entry: PendingSpawnAttribution) => {
+      const entryKey = pendingSpawnAttributionKey(entry);
+      const mergeIntoBucket = (bucket: Map<string, PendingSpawnAttribution[]>, key: string) => {
+        const queue = bucket.get(key) || [];
+        if (queue.some((candidate) => pendingSpawnAttributionKey(candidate) === entryKey)) return;
+        bucket.set(key, queue.concat([entry]));
+      };
+      mergeIntoBucket(pendingSpawnAttributionsByParent, entry.parentSessionKey);
+      mergeIntoBucket(pendingSpawnAttributionsByResident, entry.residentAgentId);
+    };
 
     const loadSpawnAttributionState = async () => {
       try {
         const txt = await fs.readFile(spawnAttributionStatePath, "utf8");
         const data: any = JSON.parse(txt);
-        spawnedSessionAgentIds.clear();
-        pendingSpawnAttributionsByParent.clear();
-        pendingSpawnAttributionsByResident.clear();
+        if (!spawnAttributionStateHydrated) {
+          spawnedSessionAgentIds.clear();
+          pendingSpawnAttributionsByParent.clear();
+          pendingSpawnAttributionsByResident.clear();
+          spawnAttributionStateHydrated = true;
+        }
 
         const spawned = data?.spawnedSessionAgentIds;
         if (spawned && typeof spawned === "object") {
           for (const [key, value] of Object.entries(spawned)) {
             const sk = typeof key === "string" ? key.trim() : "";
             const agentId = canonicalVisibleAgentId(value);
-            if (sk && agentId) spawnedSessionAgentIds.set(sk, agentId);
+            if (!sk || !agentId) continue;
+            if (!spawnedSessionAgentIds.has(sk)) spawnedSessionAgentIds.set(sk, agentId);
           }
         }
 
@@ -1267,21 +1293,22 @@ export default {
             source: raw?.source === "explicit" ? "explicit" : "inferred",
             createdAt: typeof raw?.createdAt === "number" && Number.isFinite(raw.createdAt) ? raw.createdAt : nowMs(),
           };
-          enqueuePendingSpawnAttribution(pendingSpawnAttributionsByParent, parentSessionKey, entry);
-          enqueuePendingSpawnAttribution(pendingSpawnAttributionsByResident, residentAgentId, entry);
+          mergePendingSpawnAttribution(entry);
         }
-      } catch {}
+      } catch {
+        if (!spawnAttributionStateHydrated) spawnAttributionStateHydrated = true;
+      }
     };
 
     const persistSpawnAttributionState = async () => {
       try {
-        const pending: PendingSpawnAttribution[] = [];
+        const pending = new Map<string, PendingSpawnAttribution>();
         for (const queue of pendingSpawnAttributionsByParent.values()) {
-          for (const entry of queue) pending.push(entry);
+          for (const entry of queue) pending.set(pendingSpawnAttributionKey(entry), entry);
         }
         await fs.writeFile(spawnAttributionStatePath, JSON.stringify({
           spawnedSessionAgentIds: Object.fromEntries(spawnedSessionAgentIds.entries()),
-          pending,
+          pending: Array.from(pending.values()),
         }, null, 2));
       } catch {}
     };
@@ -1377,8 +1404,7 @@ export default {
         source: explicit ? "explicit" : "inferred",
         createdAt: nowMs(),
       };
-      enqueuePendingSpawnAttribution(pendingSpawnAttributionsByParent, sk, entry);
-      enqueuePendingSpawnAttribution(pendingSpawnAttributionsByResident, residentAgentId, entry);
+      mergePendingSpawnAttribution(entry);
       await persistSpawnAttributionState();
       return entry;
     };
