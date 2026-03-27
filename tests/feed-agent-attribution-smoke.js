@@ -158,57 +158,75 @@ function genericToolLabel(toolName) {
   return TOOL_LABELS[String(toolName).trim()];
 }
 
-function humanizedWorkDescription(toolName, details) {
+function normalizeIntentText(value, maxLen = 120) {
+  if (typeof value !== 'string') return '';
+  let text = value.trim();
+  if (!text) return '';
+  text = text.replace(/^you are\s+[^。.!?\n]+[。.!?]?\s*/i, '');
+  text = text.replace(/^你是\s*[^。.!?\n]+[。.!?]?\s*/u, '');
+  text = text.replace(/^(please|pls|kindly)\s+/i, '');
+  text = text.replace(/^(請|麻煩)\s*/u, '');
+  text = text.replace(/^(task|label|prompt)\s*[:：-]\s*/i, '');
+  text = text.replace(/\s+/g, ' ').trim();
+  if (text.length > maxLen) text = text.slice(0, maxLen).trimEnd() + '…';
+  return text;
+}
+
+function extractTaskIntent(details) {
+  for (const candidate of [details?.task, details?.label, details?.prompt, details?.goal, details?.summary]) {
+    const text = normalizeIntentText(candidate, 120);
+    if (text) return text;
+  }
+  return '';
+}
+
+function humanizedWorkDescription(toolName, details, phase = 'active') {
   const tn = String(toolName || 'tool').trim();
+  const intent = extractTaskIntent(details);
 
   if (tn === 'sessions_spawn') {
-    const task = typeof details?.task === 'string' ? details.task.trim() : '';
-    const label = typeof details?.label === 'string' ? details.label.trim() : '';
-    const spawnId = typeof details?.spawnAgentId === 'string' ? details.spawnAgentId.trim() : '';
-    if (task) {
-      const preview = task.length > 80 ? task.slice(0, 80) + '…' : task;
-      return `starting: ${preview}`;
-    }
-    if (label) return `starting ${label}`;
-    if (spawnId) return `starting helper (${spawnId})`;
-    return 'starting helper task';
+    if (intent) return phase === 'done' ? `started helper task for ${intent}` : `starting helper task for ${intent}`;
+    return phase === 'done' ? 'started helper task' : 'starting helper task';
   }
-
   if (tn === 'read') {
-    const task = typeof details?.task === 'string' ? details.task.trim() : '';
-    return task ? `reviewing: ${task}` : 'reviewing files';
+    if (intent) return phase === 'done' ? `reviewed ${intent}` : `reviewing ${intent}`;
+    return phase === 'done' ? 'reviewed files' : 'reviewing files';
   }
-  if (tn === 'write') return 'updating files';
-  if (tn === 'edit') return 'updating files';
-
+  if (tn === 'write' || tn === 'edit') {
+    if (intent) return phase === 'done' ? `updated ${intent}` : `updating ${intent}`;
+    return phase === 'done' ? 'updated files' : 'updating files';
+  }
   if (tn === 'browser' || tn === 'web_fetch') {
-    const url = typeof details?.url === 'string' ? details.url.trim() : '';
-    return url ? 'checking live page' : 'checking page';
+    if (intent) return phase === 'done' ? `checked ${intent}` : `checking ${intent}`;
+    return phase === 'done' ? (details?.url ? 'checked live page' : 'checked page') : (details?.url ? 'checking live page' : 'checking page');
   }
+  if (tn === 'exec' || tn === 'process') {
+    if (intent) return phase === 'done' ? `finished ${intent}` : intent;
+    return phase === 'done' ? 'finished a check' : 'running a check';
+  }
+  if (tn === 'message') {
+    if (intent) return phase === 'done' ? `prepared reply for ${intent}` : `preparing reply for ${intent}`;
+    return phase === 'done' ? 'prepared a reply' : 'preparing a reply';
+  }
+
+  if (intent) return phase === 'done' ? `finished ${intent}` : intent;
 
   const base = genericToolLabel(tn) || 'working';
-  return base.toLowerCase();
+  return phase === 'done' ? `finished ${base.toLowerCase()}` : base.toLowerCase();
 }
 
 function feedPreview(it) {
-  // Always canonicalize agentId so internal descendant ids never leak into visible feed.
   const canonicalAgentId = it.agentId ? canonicalVisibleAgentId(it.agentId) || 'main' : '';
   const agent = canonicalAgentId ? `@${canonicalAgentId}` : '';
   const details = it.details || null;
 
   if (it.kind === 'before_agent_start') return `${agent} started`;
-  if (it.kind === 'before_tool_call') {
-    const tn = it.toolName || 'tool';
-    const desc = humanizedWorkDescription(String(tn), details);
-    return `${agent} ${desc}`.trim();
+  if (it.kind === 'before_tool_call') return `${agent} ${humanizedWorkDescription(String(it.toolName || 'tool'), details, 'active')}`.trim();
+  if (it.kind === 'after_tool_call') return `${agent} ${humanizedWorkDescription(String(it.toolName || 'tool'), details, 'done')}`.trim();
+  if (it.kind === 'tool_result_persist') {
+    const intent = extractTaskIntent(details);
+    return `${agent} ${intent ? `working on ${intent}` : 'making progress'}`.trim();
   }
-  if (it.kind === 'after_tool_call') {
-    const tn = it.toolName || 'tool';
-    const desc = humanizedWorkDescription(String(tn), details).replace(/^starting:/, 'started:');
-    const d = typeof it.durationMs === 'number' ? ` (${Math.round(it.durationMs)}ms)` : '';
-    return `${agent} ${desc} done${d}`.trim();
-  }
-  if (it.kind === 'tool_result_persist') return `${agent} working`;
   if (it.kind === 'agent_end') {
     if (it.success === false) return `${agent} ended (error)`;
     return `${agent} ended`;
@@ -268,7 +286,7 @@ assert.ok(/checking/.test(qaPreview), `qa_agent browser call should say 'checkin
 const qaSpawn = { kind: 'before_tool_call', agentId: 'qa_agent', toolName: 'sessions_spawn', details: { task: 'run final acceptance checks', spawnAgentId: 'qa_agent' } };
 const qaSpawnPreview = feedPreview(qaSpawn);
 assert.ok(qaSpawnPreview.startsWith('@qa_agent'), `qa_agent spawn must show @qa_agent: ${qaSpawnPreview}`);
-assert.ok(/starting:/.test(qaSpawnPreview), `qa_agent spawn should show 'starting:' with task: ${qaSpawnPreview}`);
+assert.ok(/starting helper task for/.test(qaSpawnPreview), `qa_agent spawn should show human task intent: ${qaSpawnPreview}`);
 assert.ok(!/subagent/i.test(qaSpawnPreview), `qa_agent spawn must not show 'subagent': ${qaSpawnPreview}`);
 assertFeedOk('qa_agent spawn', qaSpawnPreview);
 
@@ -283,7 +301,7 @@ assert.ok(/reviewing/.test(codingPreview), `coding_agent read should say 'review
 const codingSpawn = { kind: 'before_tool_call', agentId: 'coding_agent', toolName: 'sessions_spawn', details: { task: 'implement feature X', spawnAgentId: 'coding_agent' } };
 const codingSpawnPreview = feedPreview(codingSpawn);
 assert.ok(codingSpawnPreview.startsWith('@coding_agent'), `coding_agent spawn must show @coding_agent: ${codingSpawnPreview}`);
-assert.ok(/starting:/.test(codingSpawnPreview), `coding_agent spawn should show 'starting:' with task: ${codingSpawnPreview}`);
+assert.ok(/starting helper task for/.test(codingSpawnPreview), `coding_agent spawn should show human task intent: ${codingSpawnPreview}`);
 assertFeedOk('coding_agent spawn', codingSpawnPreview);
 
 // 3. main activity → feed row shows main
@@ -312,11 +330,16 @@ assert.ok(badPreview.startsWith('@main'), `internal id should canonicalize to @m
 const afterQaTool = { kind: 'after_tool_call', agentId: 'qa_agent', toolName: 'browser', durationMs: 1234, details: {} };
 const afterQaPreview = feedPreview(afterQaTool);
 assert.ok(afterQaPreview.startsWith('@qa_agent'), `after_tool_call must show correct agent: ${afterQaPreview}`);
-assert.ok(/done/.test(afterQaPreview), `after_tool_call should say 'done': ${afterQaPreview}`);
-assert.ok(/1234ms/.test(afterQaPreview), `after_tool_call should show duration: ${afterQaPreview}`);
+assert.ok(/checked page|checked live page/.test(afterQaPreview), `after_tool_call should use task language, not raw done(): ${afterQaPreview}`);
+assert.ok(!/done \(/.test(afterQaPreview), `after_tool_call should avoid event-log style done(ms): ${afterQaPreview}`);
 assertFeedOk('after_tool_call', afterQaPreview);
 
-// 7. agent_end
+// 7. tool_result_persist should also read like task progress, not "working"
+const progressPreview = feedPreview({ kind: 'tool_result_persist', agentId: 'qa_agent', details: { task: 'review room/feed consistency' } });
+assert.ok(/working on review room\/feed consistency/.test(progressPreview), `tool_result_persist should carry task intent: ${progressPreview}`);
+assert.ok(!/\bworking$/.test(progressPreview), `tool_result_persist should not collapse to bare working: ${progressPreview}`);
+
+// 8. agent_end
 const qaEnd = { kind: 'agent_end', agentId: 'qa_agent', success: true };
 const qaEndPreview = feedPreview(qaEnd);
 assert.equal(qaEndPreview, '@qa_agent ended', `agent_end: ${qaEndPreview}`);

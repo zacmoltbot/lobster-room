@@ -71,54 +71,78 @@ function inferSpawnActorId(payload) {
   return '';
 }
 
-function humanizedWorkDescription(toolName, details) {
+function normalizeIntentText(value, maxLen = 120) {
+  if (typeof value !== 'string') return '';
+  let text = value.trim();
+  if (!text) return '';
+  text = text.replace(/^you are\s+[^。.!?\n]+[。.!?]?\s*/i, '');
+  text = text.replace(/^你是\s*[^。.!?\n]+[。.!?]?\s*/u, '');
+  text = text.replace(/^(please|pls|kindly)\s+/i, '');
+  text = text.replace(/^(請|麻煩)\s*/u, '');
+  text = text.replace(/^(task|label|prompt)\s*[:：-]\s*/i, '');
+  text = text.replace(/\s+/g, ' ').trim();
+  if (text.length > maxLen) text = text.slice(0, maxLen).trimEnd() + '…';
+  return text;
+}
+
+function sentenceCase(value) {
+  const text = value.trim();
+  return text ? text.charAt(0).toUpperCase() + text.slice(1) : '';
+}
+
+function extractTaskIntent(details) {
+  for (const candidate of [details?.task, details?.label, details?.prompt, details?.goal, details?.summary]) {
+    const text = normalizeIntentText(candidate, 120);
+    if (text) return text;
+  }
+  return '';
+}
+
+function humanizedWorkDescription(toolName, details, phase = 'active') {
   const tn = String(toolName || 'tool').trim();
-  if (tn === 'sessions_spawn') {
-    const task = typeof details?.task === 'string' ? details.task.trim() : '';
-    const label = typeof details?.label === 'string' ? details.label.trim() : '';
-    const spawnId = typeof details?.spawnAgentId === 'string' ? details.spawnAgentId.trim() : '';
-    if (task) return `starting: ${task.length > 80 ? task.slice(0, 80) + '…' : task}`;
-    if (label) return `starting ${label}`;
-    if (spawnId) return `starting helper (${spawnId})`;
-    return 'starting helper task';
+  const intent = extractTaskIntent(details);
+  if (tn === 'sessions_spawn') return intent ? `${phase === 'done' ? 'started' : 'starting'} helper task for ${intent}` : `${phase === 'done' ? 'started' : 'starting'} helper task`;
+  if (tn === 'read') return intent ? `${phase === 'done' ? 'reviewed' : 'reviewing'} ${intent}` : `${phase === 'done' ? 'reviewed' : 'reviewing'} files`;
+  if (tn === 'browser' || tn === 'web_fetch') return intent ? `${phase === 'done' ? 'checked' : 'checking'} ${intent}` : (phase === 'done' ? (details?.url ? 'checked live page' : 'checked page') : (details?.url ? 'checking live page' : 'checking page'));
+  if (tn === 'write' || tn === 'edit') return intent ? `${phase === 'done' ? 'updated' : 'updating'} ${intent}` : `${phase === 'done' ? 'updated' : 'updating'} files`;
+  if (tn === 'exec' || tn === 'process') return intent ? (phase === 'done' ? `finished ${intent}` : intent) : (phase === 'done' ? 'finished a check' : 'running a check');
+  return intent ? (phase === 'done' ? `finished ${intent}` : intent) : 'making progress';
+}
+
+function inferTaskIntentFromItems(items) {
+  for (const it of items) {
+    if (it.kind !== 'before_tool_call') continue;
+    const intent = extractTaskIntent(it.details || null);
+    if (intent) return intent;
   }
-  if (tn === 'read') {
-    const task = typeof details?.task === 'string' ? details.task.trim() : '';
-    return task ? `reviewing: ${task}` : 'reviewing files';
-  }
-  if (tn === 'browser' || tn === 'web_fetch') return details?.url ? 'checking live page' : 'checking page';
-  if (tn === 'write' || tn === 'edit') return 'updating files';
-  return 'working';
+  const firstTool = items.find((x) => x.kind === 'before_tool_call' && x.toolName)?.toolName;
+  if (firstTool === 'browser') return 'check live page';
+  if (firstTool === 'read') return 'review files';
+  return '';
 }
 
 function feedPreview(it) {
   const agent = `@${visibleFeedAgentId(it.agentId)}`;
   if (it.kind === 'before_agent_start') return `${agent} started`;
-  if (it.kind === 'before_tool_call') return `${agent} ${humanizedWorkDescription(it.toolName, it.details || null)}`;
-  if (it.kind === 'after_tool_call') return `${agent} ${humanizedWorkDescription(it.toolName, it.details || null).replace(/^starting:/, 'started:')} done`;
-  return `${agent} working`;
+  if (it.kind === 'before_tool_call') return `${agent} ${humanizedWorkDescription(it.toolName, it.details || null, 'active')}`;
+  if (it.kind === 'after_tool_call') return `${agent} ${humanizedWorkDescription(it.toolName, it.details || null, 'done')}`;
+  if (it.kind === 'tool_result_persist') {
+    const intent = extractTaskIntent(it.details || null);
+    return `${agent} ${intent ? `working on ${intent}` : 'making progress'}`;
+  }
+  return `${agent} making progress`;
 }
 
 function taskTitleFromItems(items) {
-  for (const it of items) {
-    if (it.kind === 'before_tool_call' && it.toolName === 'sessions_spawn') {
-      const label = typeof it.details?.label === 'string' ? it.details.label : '';
-      const task = typeof it.details?.task === 'string' ? it.details.task : '';
-      const t = (label || '').trim() || (task || '').trim();
-      if (t) return t.slice(0, 120);
-      return 'Starting helper task';
-    }
-  }
-  const firstTool = items.find((x) => x.kind === 'before_tool_call' && x.toolName)?.toolName;
-  if (firstTool === 'browser') return 'Check live page';
-  if (firstTool === 'read') return 'Review files';
-  return 'Working';
+  const intent = inferTaskIntentFromItems(items);
+  return intent ? sentenceCase(intent) : 'Working';
 }
 
 function taskSummaryFromItems(items, status) {
   const toolCalls = items.filter((x) => x.kind === 'before_tool_call').length;
-  if (status === 'running') return toolCalls ? `Working · ${toolCalls} steps` : 'Working';
-  return toolCalls ? `Done · ${toolCalls} steps` : 'Done';
+  const intent = inferTaskIntentFromItems(items);
+  if (status === 'running') return intent ? `Now ${intent}${toolCalls > 1 ? ` · ${toolCalls} steps` : ''}` : (toolCalls ? `In progress · ${toolCalls} steps` : 'In progress');
+  return intent ? `Done · ${intent}${toolCalls > 1 ? ` · ${toolCalls} steps` : ''}` : (toolCalls ? `Done · ${toolCalls} steps` : 'Done');
 }
 
 function sanitizeFeedItemForApi(it, includeRaw = false) {
@@ -291,9 +315,12 @@ assert.equal(afterToolIdentity.agentId, 'qa_agent', 'follow-up after_tool_call m
 assert.ok(feed.rows.every((row) => row.agentId === 'qa_agent'), 'feedGet.rows[].agentId must stay qa_agent for the child trace');
 assert.equal(childTask?.agentId, 'qa_agent', 'feedGet.tasks[].agentId must stay qa_agent');
 assert.equal(feed.latest?.agentId, 'qa_agent', 'feedGet.latest.agentId must stay qa_agent');
+assert.equal(childTask?.title, 'Check live page', `task title should read like user intent: ${childTask?.title}`);
+assert.equal(childTask?.summary, 'Now check live page', `task summary should tell the story, not just Working · steps: ${childTask?.summary}`);
 assert.ok(feed.rows[2].preview.startsWith('@qa_agent started'), `before_agent_start preview should humanize to qa_agent: ${feed.rows[2].preview}`);
 assert.ok(feed.rows[1].preview.startsWith('@qa_agent checking live page'), `before_tool_call preview should humanize to qa_agent: ${feed.rows[1].preview}`);
-assert.ok(feed.rows[0].preview.startsWith('@qa_agent checking page done'), `after_tool_call preview should humanize to qa_agent: ${feed.rows[0].preview}`);
+assert.ok(feed.rows[0].preview.startsWith('@qa_agent checked page') || feed.rows[0].preview.startsWith('@qa_agent checked live page'), `after_tool_call preview should use completed task language: ${feed.rows[0].preview}`);
+assert.ok(!/done/.test(feed.rows[0].preview), `after_tool_call preview should avoid raw done wording: ${feed.rows[0].preview}`);
 const visiblePayload = JSON.stringify({
   rows: feed.rows.map((row) => ({ agentId: row.agentId, preview: row.preview })),
   tasks: feed.tasks.map((task) => ({ agentId: task.agentId, title: task.title, summary: task.summary, items: (task.items || []).map((item) => ({ agentId: item.agentId, preview: item.preview })) })),

@@ -945,43 +945,112 @@ export default {
       return redactSecretsInText(t);
     };
 
-    // Build a natural-language fragment describing what the agent is doing,
-    // driven by tool intent (not raw tool names). Safe details (task label,
-    // url, spawnAgentId) are used to add context without exposing internals.
-    const humanizedWorkDescription = (toolName: string, details: Record<string, unknown> | null): string => {
+    const normalizeIntentText = (value: unknown, maxLen = 120): string => {
+      if (typeof value !== "string") return "";
+      let text = redactSecretsInText(value).trim();
+      if (!text) return "";
+      text = text.replace(/^you are\s+[^。.!?\n]+[。.!?]?\s*/i, "");
+      text = text.replace(/^你是\s*[^。.!?\n]+[。.!?]?\s*/u, "");
+      text = text.replace(/^(please|pls|kindly)\s+/i, "");
+      text = text.replace(/^(請|麻煩)\s*/u, "");
+      text = text.replace(/^(task|label|prompt)\s*[:：-]\s*/i, "");
+      text = text.replace(/\s+/g, " ").trim();
+      if (!text) return "";
+      if (text.length > maxLen) text = text.slice(0, maxLen).trimEnd() + "…";
+      return text;
+    };
+
+    const sentenceCase = (value: string): string => {
+      const text = value.trim();
+      if (!text) return "";
+      return text.charAt(0).toUpperCase() + text.slice(1);
+    };
+
+    const extractTaskIntent = (details: Record<string, unknown> | null): string => {
+      const candidates = [details?.task, details?.label, details?.prompt, details?.goal, details?.summary];
+      for (const candidate of candidates) {
+        const text = normalizeIntentText(candidate, 120);
+        if (text) return text;
+      }
+      return "";
+    };
+
+    const humanizedWorkDescription = (
+      toolName: string,
+      details: Record<string, unknown> | null,
+      phase: "active" | "done" = "active",
+    ): string => {
       const tn = String(toolName || "tool").trim();
+      const intent = extractTaskIntent(details);
 
-      // sessions_spawn: show the actual task the helper will run
       if (tn === "sessions_spawn") {
-        const task = typeof details?.task === "string" ? details.task.trim() : "";
-        const label = typeof details?.label === "string" ? details.label.trim() : "";
-        const spawnId = typeof details?.spawnAgentId === "string" ? details.spawnAgentId.trim() : "";
-        if (task) {
-          const preview = task.length > 80 ? task.slice(0, 80) + "…" : task;
-          return `starting: ${preview}`;
-        }
-        if (label) return `starting ${label}`;
-        if (spawnId) return `starting helper (${spawnId})`;
-        return "starting helper task";
+        if (intent) return phase === "done" ? `started helper task for ${intent}` : `starting helper task for ${intent}`;
+        return phase === "done" ? "started helper task" : "starting helper task";
       }
 
-      // File operations: show what kind of review/update is happening
       if (tn === "read") {
-        const task = typeof details?.task === "string" ? details.task.trim() : "";
-        return task ? `reviewing: ${task}` : "reviewing files";
+        if (intent) return phase === "done" ? `reviewed ${intent}` : `reviewing ${intent}`;
+        return phase === "done" ? "reviewed files" : "reviewing files";
       }
-      if (tn === "write") return "updating files";
-      if (tn === "edit") return "updating files";
-
-      // Browser / web: show checking live content
+      if (tn === "write" || tn === "edit") {
+        if (intent) return phase === "done" ? `updated ${intent}` : `updating ${intent}`;
+        return phase === "done" ? "updated files" : "updating files";
+      }
       if (tn === "browser" || tn === "web_fetch") {
+        if (intent) return phase === "done" ? `checked ${intent}` : `checking ${intent}`;
         const url = typeof details?.url === "string" ? details.url.trim() : "";
-        return url ? "checking live page" : "checking page";
+        return phase === "done" ? (url ? "checked live page" : "checked page") : (url ? "checking live page" : "checking page");
+      }
+      if (tn === "exec" || tn === "process") {
+        if (intent) return phase === "done" ? `finished ${intent}` : `${intent}`;
+        return phase === "done" ? "finished a check" : "running a check";
+      }
+      if (tn === "message") {
+        if (intent) return phase === "done" ? `prepared reply for ${intent}` : `preparing reply for ${intent}`;
+        return phase === "done" ? "prepared a reply" : "preparing a reply";
       }
 
-      // Fallback: use the generic tool label in natural form
+      if (intent) return phase === "done" ? `finished ${intent}` : intent;
+
       const base = genericToolLabel(tn) || "working";
+      if (phase === "done") {
+        if (/^check/i.test(base)) return base.replace(/^Check/i, "Checked").toLowerCase();
+        if (/^review/i.test(base)) return base.replace(/^Review/i, "Reviewed").toLowerCase();
+        if (/^update/i.test(base)) return base.replace(/^Update/i, "Updated").toLowerCase();
+        if (/^prepare/i.test(base)) return base.replace(/^Prepare/i, "Prepared").toLowerCase();
+        return `finished ${base.toLowerCase()}`;
+      }
       return base.toLowerCase();
+    };
+
+    const inferTaskIntentFromItems = (items: FeedItem[]): string => {
+      for (const it of items) {
+        if (it.kind !== "before_tool_call") continue;
+        const intent = extractTaskIntent((it.details as Record<string, unknown> | null) || null);
+        if (intent) return intent;
+      }
+      const firstTool = items.find((x) => x.kind === "before_tool_call" && x.toolName)?.toolName;
+      const firstLabel = firstTool ? genericToolLabel(String(firstTool).trim()) : "";
+      return firstLabel ? firstLabel.toLowerCase() : "";
+    };
+
+    const taskTitleFromIntent = (intent: string): string => {
+      const clean = normalizeIntentText(intent, 120);
+      if (!clean) return "Working";
+      return sentenceCase(clean);
+    };
+
+    const taskSummaryFromIntent = (intent: string, status: FeedTaskStatus, steps = 0, msgSent = 0, msgFail = 0, errorText = ""): string => {
+      const clean = normalizeIntentText(intent, 120);
+      const stepBit = steps > 1 ? ` · ${steps} steps` : "";
+      const sentBit = msgSent ? ` · ${msgSent} repl${msgSent === 1 ? "y" : "ies"} sent` : "";
+      const failBit = msgFail ? ` · ${msgFail} repl${msgFail === 1 ? "y" : "ies"} failed` : "";
+      if (status === "running") return clean ? `Now ${clean}${stepBit}${sentBit}${failBit}` : (steps ? `In progress · ${steps} steps` : "In progress");
+      if (status === "error") {
+        const prefix = errorText ? `Blocked · ${redactSecretsInText(errorText).slice(0, 160)}` : "Blocked";
+        return clean ? `${prefix} · while trying to ${clean}${sentBit}${failBit}` : `${prefix}${stepBit}${sentBit}${failBit}`;
+      }
+      return clean ? `Done · ${clean}${stepBit}${sentBit}${failBit}` : (steps ? `Done · ${steps} steps${sentBit}${failBit}` : `Done${sentBit}${failBit}`);
     };
 
     const feedPreview = (it: FeedItem): string => {
@@ -991,21 +1060,22 @@ export default {
       const details = it.details as Record<string, unknown> | null;
 
       if (it.kind === "before_agent_start") {
-        // No task context in before_agent_start details today; keep it simple.
         return `${agent} started`;
       }
       if (it.kind === "before_tool_call") {
         const tn = it.toolName || "tool";
-        const desc = humanizedWorkDescription(String(tn), details);
+        const desc = humanizedWorkDescription(String(tn), details, "active");
         return `${agent} ${desc}`.trim();
       }
       if (it.kind === "after_tool_call") {
         const tn = it.toolName || "tool";
-        const desc = humanizedWorkDescription(String(tn), details).replace(/^starting:/, "started:");
-        const d = typeof it.durationMs === "number" ? ` (${Math.round(it.durationMs)}ms)` : "";
-        return `${agent} ${desc} done${d}`.trim();
+        const desc = humanizedWorkDescription(String(tn), details, "done");
+        return `${agent} ${desc}`.trim();
       }
-      if (it.kind === "tool_result_persist") return `${agent} working`;
+      if (it.kind === "tool_result_persist") {
+        const intent = extractTaskIntent(details);
+        return `${agent} ${intent ? `working on ${intent}` : "making progress"}`.trim();
+      }
       if (it.kind === "message_sending") {
         const to = it.to ? redactSecretsInText(it.to) : "(unknown)";
         return `sending message → ${to}`;
@@ -1043,25 +1113,8 @@ export default {
     };
 
     const taskTitleFromItems = (items: FeedItem[]): string => {
-      // Prefer sessions_spawn label/task if present.
-      for (const it of items) {
-        if (it.kind === "before_tool_call" && it.toolName === "sessions_spawn") {
-          const label = typeof (it.details as any)?.label === "string" ? String((it.details as any).label) : "";
-          const task = typeof (it.details as any)?.task === "string" ? String((it.details as any).task) : "";
-          const t = (label || "").trim() || (task || "").trim();
-          if (t) return redactSecretsInText(t).slice(0, 120);
-          return "Starting helper task";
-        }
-      }
-
-      // Otherwise, use the first meaningful user-facing tool label.
-      const firstTool = items.find((x) => {
-        if (x.kind !== "before_tool_call" || !x.toolName) return false;
-        return !!genericToolLabel(String(x.toolName).trim());
-      })?.toolName;
-      if (firstTool) return genericToolLabel(String(firstTool).trim()) || "Working";
-
-      return "Working";
+      const intent = inferTaskIntentFromItems(items);
+      return taskTitleFromIntent(intent);
     };
 
     const taskSummaryFromItems = (items: FeedItem[], status: FeedTaskStatus): string => {
@@ -1069,23 +1122,8 @@ export default {
       const msgSent = items.filter((x) => x.kind === "message_sent" && x.success !== false).length;
       const msgFail = items.filter((x) => x.kind === "message_sent" && x.success === false).length;
       const errors = items.map((x) => (x.error ? String(x.error) : "")).filter(Boolean);
-      const firstTool = items.find((x) => x.kind === "before_tool_call" && x.toolName)?.toolName;
-      const firstLabel = firstTool ? genericToolLabel(String(firstTool).trim()) : undefined;
-
-      const bits: string[] = [];
-      if (firstLabel) bits.push(firstLabel.toLowerCase());
-      if (toolCalls) bits.push(String(toolCalls) + " step" + (toolCalls === 1 ? "" : "s"));
-      if (msgSent) bits.push(String(msgSent) + " reply" + (msgSent === 1 ? "" : "ies") + " sent");
-      if (msgFail) bits.push(String(msgFail) + " reply" + (msgFail === 1 ? "" : "ies") + " failed");
-
-      if (status === "running") return bits.length ? "Working · " + bits.join(" · ") : "Working";
-
-      if (status === "error") {
-        const e = errors[0] ? "Error: " + redactSecretsInText(errors[0]).slice(0, 160) : "Error";
-        return bits.length ? e + " · " + bits.join(" · ") : e;
-      }
-
-      return bits.length ? "Done · " + bits.join(" · ") : "Done";
+      const intent = inferTaskIntentFromItems(items);
+      return taskSummaryFromIntent(intent, status, toolCalls, msgSent, msgFail, errors[0] || "");
     };
 
     const visibleFeedAgentId = (value: unknown, fallback = "main"): string => {
