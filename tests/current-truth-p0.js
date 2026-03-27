@@ -26,6 +26,10 @@ function inferActivityFromFeedItem(item) {
   return null;
 }
 
+function activityNeedsFreshSession(state) {
+  return state === 'thinking' || state === 'tool' || state === 'reply';
+}
+
 function pickCurrentTruth({ agentId, nowMs, staleMs, sessions, feedBuf, snapRow, queueDepth }) {
   const list = (sessions || []).slice().sort((a, b) => Number(b.updatedAt || 0) - Number(a.updatedAt || 0));
   const maxUpdatedAt = list.length ? Number(list[0].updatedAt || 0) : 0;
@@ -39,18 +43,21 @@ function pickCurrentTruth({ agentId, nowMs, staleMs, sessions, feedBuf, snapRow,
     || ['sessions_history', 'sessions_list', 'session_status'].includes(String(snapRow.details.toolName || ''))
   ));
   const snapFresh = !!(snapRow && !snapLowSignal && typeof snapRow.lastEventMs === 'number' && (nowMs - snapRow.lastEventMs) <= staleMs);
+  const snapState = snapFresh ? snapRow.state : null;
+  const snapUsable = !!(snapFresh && (!activityNeedsFreshSession(snapState) || freshSessions.length));
   const feedTruth = latestVisibleFeedItemForAgent(feedBuf || [], agentId, nowMs, staleMs);
   const feedTruthState = inferActivityFromFeedItem(feedTruth);
+  const feedTruthUsable = !!(feedTruthState && (!activityNeedsFreshSession(feedTruthState) || freshSessions.length));
 
   let activityState = 'idle';
   let uiState = 'wait';
   let currentTruthSource = 'idle';
 
-  if (snapFresh) {
-    activityState = snapRow.state;
+  if (snapUsable) {
+    activityState = snapState;
     uiState = mapActivityToUiState(activityState);
     currentTruthSource = 'snapshot';
-  } else if (feedTruthState) {
+  } else if (feedTruthUsable) {
     activityState = feedTruthState;
     uiState = mapActivityToUiState(activityState);
     currentTruthSource = 'feed';
@@ -95,7 +102,7 @@ const staleMs = 15 * 1000;
   assert.equal(result.currentTruthSource, 'stale_or_none');
 }
 
-// 2. recent qa_agent feed/task should beat stale session residue and align room/Now with feed/tasks.
+// 2. recent qa_agent feed/task should beat stale residue when the agent still has a fresh live session.
 {
   const result = pickCurrentTruth({
     agentId: 'qa_agent',
@@ -103,18 +110,38 @@ const staleMs = 15 * 1000;
     staleMs,
     sessions: [
       { key: 'agent:qa_agent:main', updatedAt: nowMs - 8 * DAY, kind: 'main' },
-      { key: 'agent:qa_agent:subagent:old', updatedAt: nowMs - 8 * DAY, kind: 'subagent' },
+      { key: 'agent:qa_agent:subagent:active', updatedAt: nowMs - 2000, kind: 'subagent' },
     ],
     feedBuf: [
-      { ts: nowMs - 3000, kind: 'before_tool_call', agentId: 'qa_agent', toolName: 'browser', sessionKey: 'agent:qa_agent:subagent:fresh-qa' },
+      { ts: nowMs - 3000, kind: 'before_tool_call', agentId: 'qa_agent', toolName: 'browser', sessionKey: 'agent:qa_agent:subagent:active' },
     ],
     snapRow: null,
     queueDepth: 0,
   });
-  assert.equal(result.uiState, 'tool', 'recent visible qa feed row should drive Now');
+  assert.equal(result.uiState, 'tool', 'recent visible qa feed row should drive Now when the session is still live');
   assert.equal(result.activityState, 'tool');
   assert.equal(result.currentTruthSource, 'feed');
-  assert.equal(result.feedTruth.sessionKey, 'agent:qa_agent:subagent:fresh-qa');
+  assert.equal(result.feedTruth.sessionKey, 'agent:qa_agent:subagent:active');
+}
+
+// 2b. stale-active regression: recent feed residue alone must not keep qa_agent busy once no fresh session exists.
+{
+  const result = pickCurrentTruth({
+    agentId: 'qa_agent',
+    nowMs,
+    staleMs,
+    sessions: [
+      { key: 'agent:qa_agent:main', updatedAt: nowMs - 8 * DAY, kind: 'main' },
+    ],
+    feedBuf: [
+      { ts: nowMs - 3000, kind: 'before_tool_call', agentId: 'qa_agent', toolName: 'browser', sessionKey: 'agent:qa_agent:subagent:ended' },
+    ],
+    snapRow: null,
+    queueDepth: 0,
+  });
+  assert.equal(result.uiState, 'wait', 'recent qa feed residue must collapse once no fresh session exists');
+  assert.equal(result.activityState, 'idle');
+  assert.equal(result.currentTruthSource, 'stale_or_none');
 }
 
 // 3. internal observation / debug probe must not make main look busy.

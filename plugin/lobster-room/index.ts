@@ -2746,6 +2746,10 @@ export default {
           return null;
         };
 
+        const activityNeedsFreshSession = (state: ActivityState | null | undefined): boolean => (
+          state === "thinking" || state === "tool" || state === "reply"
+        );
+
         const agentsPayload = [] as any[];
         for (const agentId of allowIds) {
           const displayName = agentNameOverrides[agentId] || identityNameByAgentId.get(agentId) || agentId;
@@ -2819,14 +2823,17 @@ export default {
             && typeof snapRow.lastEventMs === "number"
             && (t - snapRow.lastEventMs) <= staleMs
           );
+          const snapState = snapFresh ? (snapRow.state as ActivityState) : null;
+          const snapUsable = !!(snapFresh && (!activityNeedsFreshSession(snapState) || freshSessions.length));
           const feedTruth = latestVisibleFeedItemForAgent(agentId);
           const feedTruthState = inferActivityFromFeedItem(feedTruth);
-          if (snapFresh) {
-            activityState = snapRow.state as ActivityState;
+          const feedTruthUsable = !!(feedTruthState && (!activityNeedsFreshSession(feedTruthState) || freshSessions.length));
+          if (snapUsable) {
+            activityState = snapState as ActivityState;
             uiState = mapActivityToUiState(activityState);
             currentTruthSource = "snapshot";
-          } else if (feedTruthState) {
-            activityState = feedTruthState;
+          } else if (feedTruthUsable) {
+            activityState = feedTruthState as ActivityState;
             uiState = mapActivityToUiState(activityState);
             currentTruthSource = "feed";
           } else if (typeof queueDepth === "number" && queueDepth > 0 && freshSessions.length) {
@@ -2877,9 +2884,11 @@ export default {
                   lastRole,
                   lastType,
                   snapFresh,
+                  snapUsable,
                   snapState: snapRow?.state || null,
                   feedTruthKind: feedTruth?.kind || null,
                   feedTruthSessionKey: feedTruth?.sessionKey || null,
+                  feedTruthUsable,
                   freshSessionCount: freshSessions.length,
                   freshMaxUpdatedAt: freshMaxUpdatedAt || null,
                 } as any,
