@@ -2799,6 +2799,22 @@ export default {
           state === "thinking" || state === "tool" || state === "reply"
         );
 
+        const hasFreshCorroboratedActiveSignal = (params: {
+          snapFresh: boolean;
+          snapState: ActivityState | null;
+          snapRow: any;
+          feedTruth: FeedItem | null;
+          feedTruthState: ActivityState | null;
+        }): boolean => {
+          const { snapFresh, snapState, snapRow, feedTruth, feedTruthState } = params;
+          if (!snapFresh || !feedTruth || !feedTruthState) return false;
+          if (!activityNeedsFreshSession(snapState) || !activityNeedsFreshSession(feedTruthState)) return false;
+          const snapSessionKey = typeof snapRow?.details?.sessionKey === "string" ? snapRow.details.sessionKey.trim() : "";
+          const feedSessionKey = typeof feedTruth?.sessionKey === "string" ? feedTruth.sessionKey.trim() : "";
+          if (snapSessionKey && feedSessionKey && snapSessionKey !== feedSessionKey) return false;
+          return true;
+        };
+
         const agentsPayload = [] as any[];
         for (const agentId of allowIds) {
           const displayName = agentNameOverrides[agentId] || identityNameByAgentId.get(agentId) || agentId;
@@ -2873,10 +2889,11 @@ export default {
             && (t - snapRow.lastEventMs) <= staleMs
           );
           const snapState = snapFresh ? (snapRow.state as ActivityState) : null;
-          const snapUsable = !!(snapFresh && (!activityNeedsFreshSession(snapState) || freshSessions.length));
           const feedTruth = latestVisibleFeedItemForAgent(agentId);
           const feedTruthState = inferActivityFromFeedItem(feedTruth);
-          const feedTruthUsable = !!(feedTruthState && (!activityNeedsFreshSession(feedTruthState) || freshSessions.length));
+          const freshActiveCorroborated = hasFreshCorroboratedActiveSignal({ snapFresh, snapState, snapRow, feedTruth, feedTruthState });
+          const snapUsable = !!(snapFresh && (!activityNeedsFreshSession(snapState) || freshSessions.length || freshActiveCorroborated));
+          const feedTruthUsable = !!(feedTruthState && (!activityNeedsFreshSession(feedTruthState) || freshSessions.length || freshActiveCorroborated));
           if (snapUsable) {
             activityState = snapState as ActivityState;
             uiState = mapActivityToUiState(activityState);
@@ -2913,6 +2930,7 @@ export default {
             snapState: snapRow?.state || null,
             feedTruthKind: feedTruth?.kind || null,
             feedTruthSessionKey: feedTruth?.sessionKey || null,
+            freshActiveCorroborated,
             feedTruthUsable,
             freshSessionCount: freshSessions.length,
             freshMaxUpdatedAt: freshMaxUpdatedAt || null,
