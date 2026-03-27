@@ -823,7 +823,7 @@ export default {
       .then((txt) => {
         const obj = JSON.parse(txt);
         if (obj && typeof obj === "object") {
-          if (obj.agents && typeof obj.agents === "object") snap.agents = obj.agents;
+          if (obj.agents && typeof obj.agents === "object") snap.agents = pruneSnapshotAgents(obj.agents);
           if (Array.isArray(obj.events)) snap.events = obj.events;
           if (typeof obj.updatedAtMs === "number") snap.updatedAtMs = obj.updatedAtMs;
         }
@@ -846,7 +846,10 @@ export default {
         const merged: ActivitySnapshot = {
           buildTag: BUILD_TAG,
           updatedAtMs: snap.updatedAtMs,
-          agents: { ...(disk?.agents || {}), ...(snap.agents || {}) },
+          agents: {
+            ...pruneSnapshotAgents(disk?.agents || {}),
+            ...pruneSnapshotAgents(snap.agents || {}),
+          },
           events: Array.isArray(disk?.events) ? disk.events.slice(-30) : [],
         };
         // Prefer the most recent events we have.
@@ -1220,6 +1223,24 @@ export default {
       return canonical;
     };
 
+    const isVisibleSnapshotAgentKey = (value: unknown): boolean => {
+      if (typeof value !== "string") return false;
+      const raw = String(value).trim();
+      if (!raw) return false;
+      const visible = canonicalVisibleAgentId(raw);
+      return !!visible && raw === visible;
+    };
+
+    const pruneSnapshotAgents = (agents: Record<string, { state: ActivityState; sinceMs: number; lastEventMs: number; details?: any }> | null | undefined) => {
+      const out: Record<string, { state: ActivityState; sinceMs: number; lastEventMs: number; details?: any }> = {};
+      if (!agents || typeof agents !== "object") return out;
+      for (const [key, value] of Object.entries(agents)) {
+        if (!isVisibleSnapshotAgentKey(key)) continue;
+        out[key] = value as { state: ActivityState; sinceMs: number; lastEventMs: number; details?: any };
+      }
+      return out;
+    };
+
     type PendingSpawnAttribution = {
       actorId: string;
       parentSessionKey: string;
@@ -1472,7 +1493,13 @@ export default {
       return "";
     };
 
-    const resolveFeedAgentIdentity = async (ctx: any): Promise<{ agentId: string; rawAgentId?: string }> => {
+    const resolveFeedAgentIdentity = async (ctx: any): Promise<{
+      agentId: string;
+      rawAgentId?: string;
+      residentAgentId: string;
+      lane: string;
+      source: "spawned" | "explicit" | "fallback";
+    }> => {
       const parsed = parseSessionIdentity(ctx?.sessionKey, ctx?.agentId);
       const rawSessionAgentId = parsed.agentId;
       const childSessionKey = typeof ctx?.sessionKey === "string" ? ctx.sessionKey.trim() : "";
@@ -1486,6 +1513,9 @@ export default {
         return {
           agentId: spawnedVisible,
           rawAgentId: rawSessionAgentId && rawSessionAgentId !== spawnedVisible ? rawSessionAgentId : undefined,
+          residentAgentId: parsed.residentAgentId,
+          lane: parsed.lane,
+          source: "spawned",
         };
       }
       const explicitCandidates = [
@@ -1499,11 +1529,36 @@ export default {
         const visible = canonicalVisibleAgentId(candidate);
         if (visible) {
           const raw = typeof candidate === "string" ? String(candidate).trim() : "";
-          return { agentId: visible, rawAgentId: raw && raw !== visible ? raw : rawSessionAgentId !== visible ? rawSessionAgentId : undefined };
+          return {
+            agentId: visible,
+            rawAgentId: raw && raw !== visible ? raw : rawSessionAgentId !== visible ? rawSessionAgentId : undefined,
+            residentAgentId: parsed.residentAgentId,
+            lane: parsed.lane,
+            source: "explicit",
+          };
         }
       }
       const fallback = canonicalVisibleAgentId(rawSessionAgentId) || canonicalVisibleAgentId(parsed.residentAgentId) || "main";
-      return { agentId: fallback, rawAgentId: rawSessionAgentId && rawSessionAgentId !== fallback ? rawSessionAgentId : undefined };
+      return {
+        agentId: fallback,
+        rawAgentId: rawSessionAgentId && rawSessionAgentId !== fallback ? rawSessionAgentId : undefined,
+        residentAgentId: parsed.residentAgentId,
+        lane: parsed.lane,
+        source: "fallback",
+      };
+    };
+
+    const resolveSnapshotWriterAgentId = (identity: {
+      agentId: string;
+      residentAgentId: string;
+      lane: string;
+      source: "spawned" | "explicit" | "fallback";
+    }): string => {
+      const visible = canonicalVisibleAgentId(identity?.agentId);
+      if (!visible) return "";
+      if (identity?.lane === "main") return visible;
+      if (identity?.source === "spawned" || identity?.source === "explicit") return visible;
+      return "";
     };
 
     const ensure = (agentId: string): AgentActivity => {
@@ -1547,24 +1602,28 @@ export default {
         cur.sinceMs = t;
         cur.lastEventMs = t;
         cur.details = { ...(cur.details || {}), toolMax: true };
-        setIdleWithCooldown(agentId);
+        setIdleWithCooldown(agentId, undefined, cur.details || undefined);
       }, toolMaxMs);
     };
 
     const setState = (agentId: string, next: ActivityState, details?: Record<string, unknown> | null) => {
       const row = ensure(agentId);
       const t = nowMs();
+      const snapshotAgentId = typeof details?.snapshotAgentId === "string" ? canonicalVisibleAgentId(details.snapshotAgentId) : canonicalVisibleAgentId(agentId);
 
       // Persist to snapshot for API consumers.
       try {
-        const prev = snap.agents[agentId];
-        if (!prev || prev.state !== next) {
-          snap.agents[agentId] = { state: next, sinceMs: t, lastEventMs: t, details: details ?? null };
-        } else {
-          snap.agents[agentId] = { ...prev, lastEventMs: t, details: details ?? prev.details };
+        if (snapshotAgentId) {
+          const prev = snap.agents[snapshotAgentId];
+          if (!prev || prev.state !== next) {
+            snap.agents[snapshotAgentId] = { state: next, sinceMs: t, lastEventMs: t, details: details ?? null };
+          } else {
+            snap.agents[snapshotAgentId] = { ...prev, lastEventMs: t, details: details ?? prev.details };
+          }
+          snap.agents = pruneSnapshotAgents(snap.agents);
+          snap.updatedAtMs = t;
+          writeSnapshotSoon();
         }
-        snap.updatedAtMs = t;
-        writeSnapshotSoon();
       } catch {}
 
       // Min-dwell: don't let fast transitions to idle hide states between polls.
@@ -1597,11 +1656,12 @@ export default {
       return seq;
     };
 
-    const setIdleWithCooldown = (agentId: string, overrideMs?: number) => {
+    const setIdleWithCooldown = (agentId: string, overrideMs?: number, details?: Record<string, unknown> | null) => {
       const row = ensure(agentId);
       const seq = row.seq + 1;
       row.seq = seq;
       const scheduledAt = nowMs();
+      const snapshotAgentId = typeof details?.snapshotAgentId === "string" ? canonicalVisibleAgentId(details.snapshotAgentId) : canonicalVisibleAgentId(agentId);
       const waitMs = (typeof overrideMs === "number" && Number.isFinite(overrideMs)) ? Math.max(0, overrideMs) : cooldownMs;
       // Keep current state for a short cooldown to reduce UI flicker.
       setTimeout(() => {
@@ -1614,16 +1674,19 @@ export default {
         cur.lastEventMs = t;
         cur.details = null;
         try {
-          const prev = snap.agents[agentId];
-          snap.agents[agentId] = {
-            ...(prev || {}),
-            state: "idle",
-            sinceMs: t,
-            lastEventMs: t,
-            details: null,
-          };
-          snap.updatedAtMs = t;
-          writeSnapshotSoon();
+          if (snapshotAgentId) {
+            const prev = snap.agents[snapshotAgentId];
+            snap.agents[snapshotAgentId] = {
+              ...(prev || {}),
+              state: "idle",
+              sinceMs: t,
+              lastEventMs: t,
+              details: null,
+            };
+            snap.agents = pruneSnapshotAgents(snap.agents);
+            snap.updatedAtMs = t;
+            writeSnapshotSoon();
+          }
         } catch {}
       }, waitMs);
       // Update lastEvent so API knows something just happened.
@@ -1639,10 +1702,11 @@ export default {
     api.on("before_agent_start", async (_event, ctx) => {
       const agentIdentity = await resolveFeedAgentIdentity(ctx);
       const agentId = agentIdentity.agentId;
+      const snapshotAgentId = resolveSnapshotWriterAgentId(agentIdentity);
       // api.logger.info("[lobster-room] hook before_agent_start", { buildTag: BUILD_TAG, agentId, sessionKey: ctx?.sessionKey });
       pushEvent("before_agent_start", { agentId, data: { sessionKey: ctx?.sessionKey, messageProvider: ctx?.messageProvider } });
       pushFeed({ ts: nowMs(), kind: "before_agent_start", agentId, rawAgentId: agentIdentity.rawAgentId, sessionKey: typeof ctx?.sessionKey === "string" ? ctx.sessionKey : undefined });
-      setState(agentId, "thinking", { sessionKey: ctx?.sessionKey, messageProvider: ctx?.messageProvider });
+      setState(agentId, "thinking", { sessionKey: ctx?.sessionKey, messageProvider: ctx?.messageProvider, snapshotAgentId: snapshotAgentId || undefined });
     });
 
     api.on("before_tool_call", async (event, ctx) => {
@@ -1653,6 +1717,7 @@ export default {
         : undefined;
       const agentIdentity = await resolveFeedAgentIdentity(ctx);
       const agentId = agentIdentity.agentId;
+      const snapshotAgentId = resolveSnapshotWriterAgentId(agentIdentity);
       const internalObservation = isInternalObservationToolCall(toolName, ctx);
       // api.logger.info("[lobster-room] hook before_tool_call", { buildTag: BUILD_TAG, agentId, toolName, sessionKey: ctx?.sessionKey });
 
@@ -1708,15 +1773,16 @@ export default {
       }
       if (internalObservation) return;
       if (isLowSignalObservationTool(toolName)) {
-        setState(agentId, "thinking", { toolName, sessionKey: ctx?.sessionKey, lowSignal: true });
+        setState(agentId, "thinking", { toolName, sessionKey: ctx?.sessionKey, lowSignal: true, snapshotAgentId: snapshotAgentId || undefined });
         return;
       }
-      setState(agentId, "tool", { toolName, sessionKey: ctx?.sessionKey });
+      setState(agentId, "tool", { toolName, sessionKey: ctx?.sessionKey, snapshotAgentId: snapshotAgentId || undefined });
     });
 
     api.on("after_tool_call", async (event, ctx) => {
       const agentIdentity = await resolveFeedAgentIdentity(ctx);
       const agentId = agentIdentity.agentId;
+      const snapshotAgentId = resolveSnapshotWriterAgentId(agentIdentity);
       const toolName = event?.toolName;
       const internalObservation = isInternalObservationToolCall(toolName, ctx);
       if (!internalObservation) {
@@ -1765,13 +1831,14 @@ export default {
         });
       }
       if (internalObservation) return;
-      setState(agentId, "thinking", { sessionKey: ctx?.sessionKey, lowSignal: isLowSignalObservationTool(toolName) || undefined });
+      setState(agentId, "thinking", { sessionKey: ctx?.sessionKey, lowSignal: isLowSignalObservationTool(toolName) || undefined, snapshotAgentId: snapshotAgentId || undefined });
     });
 
     // Some tools may not reliably fire after_tool_call in all paths; use persist as a backup.
     api.on("tool_result_persist", async (event, ctx) => {
       const agentIdentity = await resolveFeedAgentIdentity(ctx);
       const agentId = agentIdentity.agentId;
+      const snapshotAgentId = resolveSnapshotWriterAgentId(agentIdentity);
       const toolName = event?.toolName;
       const internalObservation = isInternalObservationToolCall(toolName, ctx);
       if (!internalObservation) {
@@ -1793,7 +1860,7 @@ export default {
         });
       }
       if (internalObservation) return;
-      setState(agentId, "thinking", { sessionKey: ctx?.sessionKey, persisted: true, lowSignal: isLowSignalObservationTool(toolName) || undefined });
+      setState(agentId, "thinking", { sessionKey: ctx?.sessionKey, persisted: true, lowSignal: isLowSignalObservationTool(toolName) || undefined, snapshotAgentId: snapshotAgentId || undefined });
     });
 
     api.on("message_sending", (event, ctx) => {
@@ -1838,6 +1905,7 @@ export default {
     api.on("agent_end", async (event, ctx) => {
       const agentIdentity = await resolveFeedAgentIdentity(ctx);
       const agentId = agentIdentity.agentId;
+      const snapshotAgentId = resolveSnapshotWriterAgentId(agentIdentity);
       pushEvent("agent_end", { agentId, data: { success: event?.success, error: event?.error, sessionKey: ctx?.sessionKey } });
       pushFeed({
         ts: nowMs(),
@@ -1850,13 +1918,13 @@ export default {
       });
 
       if (event?.success === false) {
-        setState(agentId, "error", { error: event?.error || "agent_end: unsuccessful" });
-        setTimeout(() => setIdleWithCooldown(agentId), cooldownMs);
+        setState(agentId, "error", { error: event?.error || "agent_end: unsuccessful", snapshotAgentId: snapshotAgentId || undefined });
+        setTimeout(() => setIdleWithCooldown(agentId, cooldownMs, { snapshotAgentId: snapshotAgentId || undefined }), cooldownMs);
         return;
       }
 
-      setState(agentId, "reply", { synthetic: true });
-      setIdleWithCooldown(agentId, replyCooldownMs);
+      setState(agentId, "reply", { synthetic: true, snapshotAgentId: snapshotAgentId || undefined });
+      setIdleWithCooldown(agentId, replyCooldownMs, { snapshotAgentId: snapshotAgentId || undefined });
     });
 
     // --- Local assets via API (most reliable across gateway routers) ---
