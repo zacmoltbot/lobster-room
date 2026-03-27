@@ -975,6 +975,22 @@ export default {
       return "";
     };
 
+    const inferCommandTaskIntent = (details: Record<string, unknown> | null): string => {
+      const commandCandidates = [details?.command, details?.cmd, details?.args, details?.action, details?.toolName];
+      const raw = commandCandidates.find((value) => typeof value === "string" && value.trim());
+      const text = normalizeIntentText(raw, 160).toLowerCase();
+      if (!text) return "inspect runtime";
+      if (/\b(npm|pnpm|yarn|bun)\s+(test|vitest|jest)\b|\bpytest\b|\bgo test\b|\bcargo test\b/.test(text)) return "run tests";
+      if (/\b(build|compile|tsc|vite build|webpack)\b/.test(text)) return "build the project";
+      if (/\blint\b|eslint|ruff|flake8/.test(text)) return "run lint checks";
+      if (/\bgit\s+status\b/.test(text)) return "check git status";
+      if (/\bgit\s+diff\b/.test(text)) return "review git diff";
+      if (/\b(session_status|sessions_history|sessions_list)\b/.test(text)) return "inspect session status";
+      if (/\b(ps|top|htop|pgrep|process)\b/.test(text)) return "inspect process status";
+      if (/\bcurl\b|\bwget\b/.test(text)) return "check a live endpoint";
+      return "inspect runtime";
+    };
+
     const fallbackTaskIntentForTool = (toolName: string, details: Record<string, unknown> | null): string => {
       const tn = String(toolName || "tool").trim();
       if (tn === "read") return "review files";
@@ -982,7 +998,7 @@ export default {
       if (tn === "browser") return typeof details?.url === "string" && details.url.trim() ? "check live page" : "check page";
       if (tn === "web_fetch") return "check page";
       if (tn === "message") return "prepare a reply";
-      if (tn === "exec" || tn === "process") return "run a check";
+      if (tn === "exec" || tn === "process") return inferCommandTaskIntent(details);
       const base = genericToolLabel(tn) || "";
       return normalizeIntentText(base, 120).toLowerCase();
     };
@@ -1049,14 +1065,21 @@ export default {
 
     const taskTitleFromIntent = (intent: string): string => {
       const clean = normalizeIntentText(intent, 120);
-      if (!clean) return "Active task";
-      if (GENERIC_TASK_TITLE_RE.test(clean)) return sentenceCase(clean.toLowerCase() === "run command" ? "Run a check" : clean);
+      if (!clean) return "Ongoing work";
+      if (GENERIC_TASK_TITLE_RE.test(clean)) {
+        const normalized = clean.toLowerCase() === "run command"
+          ? "Inspect runtime"
+          : clean.toLowerCase() === "check process"
+            ? "Inspect process status"
+            : clean;
+        return sentenceCase(normalized);
+      }
       return sentenceCase(clean);
     };
 
     const taskSummaryFromIntent = (intent: string, status: FeedTaskStatus, steps = 0, msgSent = 0, msgFail = 0, errorText = ""): string => {
       const clean = normalizeIntentText(intent, 120);
-      const stableIntent = clean || "run a check";
+      const stableIntent = clean || "keep work moving";
       const stepBit = steps > 1 ? ` · ${steps} steps` : "";
       const sentBit = msgSent ? ` · ${msgSent} repl${msgSent === 1 ? "y" : "ies"} sent` : "";
       const failBit = msgFail ? ` · ${msgFail} repl${msgFail === 1 ? "y" : "ies"} failed` : "";

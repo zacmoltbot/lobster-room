@@ -13,11 +13,21 @@ function extractTaskIntent(details) {
   return '';
 }
 
+function inferCommandTaskIntent(details) {
+  const raw = [details?.command, details?.cmd, details?.args, details?.action, details?.toolName].find((value) => typeof value === 'string' && value.trim());
+  const text = normalizeIntentText(raw).toLowerCase();
+  if (!text) return 'inspect runtime';
+  if (/\b(npm|pnpm|yarn|bun)\s+(test|vitest|jest)\b|\bpytest\b|\bgo test\b|\bcargo test\b/.test(text)) return 'run tests';
+  if (/\b(session_status|sessions_history|sessions_list)\b/.test(text)) return 'inspect session status';
+  if (/\b(ps|top|htop|pgrep|process)\b/.test(text)) return 'inspect process status';
+  return 'inspect runtime';
+}
+
 function fallbackTaskIntentForTool(toolName, details) {
   const tn = String(toolName || '').trim();
   if (tn === 'browser') return details?.url ? 'check live page' : 'check page';
   if (tn === 'read') return 'review files';
-  if (tn === 'exec' || tn === 'process') return 'run a check';
+  if (tn === 'exec' || tn === 'process') return inferCommandTaskIntent(details);
   return '';
 }
 

@@ -100,6 +100,21 @@ function extractTaskIntent(details) {
   return '';
 }
 
+function inferCommandTaskIntent(details) {
+  const raw = [details?.command, details?.cmd, details?.args, details?.action, details?.toolName].find((value) => typeof value === 'string' && value.trim());
+  const text = normalizeIntentText(raw, 160).toLowerCase();
+  if (!text) return 'inspect runtime';
+  if (/\b(npm|pnpm|yarn|bun)\s+(test|vitest|jest)\b|\bpytest\b|\bgo test\b|\bcargo test\b/.test(text)) return 'run tests';
+  if (/\b(build|compile|tsc|vite build|webpack)\b/.test(text)) return 'build the project';
+  if (/\blint\b|eslint|ruff|flake8/.test(text)) return 'run lint checks';
+  if (/\bgit\s+status\b/.test(text)) return 'check git status';
+  if (/\bgit\s+diff\b/.test(text)) return 'review git diff';
+  if (/\b(session_status|sessions_history|sessions_list)\b/.test(text)) return 'inspect session status';
+  if (/\b(ps|top|htop|pgrep|process)\b/.test(text)) return 'inspect process status';
+  if (/\bcurl\b|\bwget\b/.test(text)) return 'check a live endpoint';
+  return 'inspect runtime';
+}
+
 function fallbackTaskIntentForTool(toolName, details) {
   const tn = String(toolName || 'tool').trim();
   if (tn === 'read') return 'review files';
@@ -107,7 +122,7 @@ function fallbackTaskIntentForTool(toolName, details) {
   if (tn === 'browser') return details?.url ? 'check live page' : 'check page';
   if (tn === 'web_fetch') return 'check page';
   if (tn === 'message') return 'prepare a reply';
-  if (tn === 'exec' || tn === 'process') return 'run a check';
+  if (tn === 'exec' || tn === 'process') return inferCommandTaskIntent(details);
   return (genericToolLabel(tn) || '').toLowerCase();
 }
 
@@ -118,7 +133,10 @@ function humanizedWorkDescription(toolName, details, phase = 'active') {
   if (tn === 'read') return intent ? `${phase === 'done' ? 'reviewed' : 'reviewing'} ${intent}` : `${phase === 'done' ? 'reviewed' : 'reviewing'} files`;
   if (tn === 'write' || tn === 'edit') return intent ? `${phase === 'done' ? 'updated' : 'updating'} ${intent}` : `${phase === 'done' ? 'updated' : 'updating'} files`;
   if (tn === 'browser' || tn === 'web_fetch') return intent ? `${phase === 'done' ? 'checked' : 'checking'} ${intent}` : (phase === 'done' ? (details?.url ? 'checked live page' : 'checked page') : (details?.url ? 'checking live page' : 'checking page'));
-  if (tn === 'exec' || tn === 'process') return intent ? (phase === 'done' ? `finished ${intent}` : intent) : (phase === 'done' ? 'finished a check' : 'running a check');
+  if (tn === 'exec' || tn === 'process') {
+    const fallbackIntent = inferCommandTaskIntent(details);
+    return intent ? (phase === 'done' ? `finished ${intent}` : intent) : (phase === 'done' ? `finished ${fallbackIntent}` : fallbackIntent);
+  }
   if (tn === 'message') return intent ? `${phase === 'done' ? 'prepared reply for' : 'preparing reply for'} ${intent}` : `${phase === 'done' ? 'prepared a reply' : 'preparing a reply'}`;
   if (intent) return phase === 'done' ? `finished ${intent}` : intent;
   const base = genericToolLabel(tn) || 'working';
@@ -193,7 +211,8 @@ assert.equal(feedPreview(mainBeforeTool, { includeActor: false }), 'updating upd
 
 const execTool = { kind: 'before_tool_call', agentId: 'qa_agent', toolName: 'exec', details: { command: 'npm test -- --coverage' } };
 const execPreview = feedPreview(execTool, { includeActor: false });
-assert.equal(execPreview, 'running a check');
+assert.equal(execPreview, 'run tests');
+assert.ok(!/run a check/i.test(execPreview));
 assertFeedOk('exec tool', execPreview);
 
 const badItem = { kind: 'before_tool_call', agentId: 'main/subagent:qa-123', toolName: 'read', details: {} };

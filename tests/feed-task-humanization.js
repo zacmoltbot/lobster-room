@@ -27,6 +27,21 @@ function extractTaskIntent(details) {
   return '';
 }
 
+function inferCommandTaskIntent(details) {
+  const raw = [details?.command, details?.cmd, details?.args, details?.action, details?.toolName].find((value) => typeof value === 'string' && value.trim());
+  const text = normalizeIntentText(raw, 160).toLowerCase();
+  if (!text) return 'inspect runtime';
+  if (/\b(npm|pnpm|yarn|bun)\s+(test|vitest|jest)\b|\bpytest\b|\bgo test\b|\bcargo test\b/.test(text)) return 'run tests';
+  if (/\b(build|compile|tsc|vite build|webpack)\b/.test(text)) return 'build the project';
+  if (/\blint\b|eslint|ruff|flake8/.test(text)) return 'run lint checks';
+  if (/\bgit\s+status\b/.test(text)) return 'check git status';
+  if (/\bgit\s+diff\b/.test(text)) return 'review git diff';
+  if (/\b(session_status|sessions_history|sessions_list)\b/.test(text)) return 'inspect session status';
+  if (/\b(ps|top|htop|pgrep|process)\b/.test(text)) return 'inspect process status';
+  if (/\bcurl\b|\bwget\b/.test(text)) return 'check a live endpoint';
+  return 'inspect runtime';
+}
+
 function fallbackTaskIntentForTool(toolName, details) {
   const tn = String(toolName || '').trim();
   if (tn === 'read') return 'review files';
@@ -34,7 +49,7 @@ function fallbackTaskIntentForTool(toolName, details) {
   if (tn === 'browser') return details?.url ? 'check live page' : 'check page';
   if (tn === 'web_fetch') return 'check page';
   if (tn === 'message') return 'prepare a reply';
-  if (tn === 'exec' || tn === 'process') return 'run a check';
+  if (tn === 'exec' || tn === 'process') return inferCommandTaskIntent(details);
   return '';
 }
 
@@ -94,9 +109,17 @@ assert.ok(!/^Run command$/i.test(taskTitleFromItems(taskItems)));
 const genericExecItems = [
   { kind: 'before_tool_call', toolName: 'exec', details: { command: 'npm test' } },
 ];
-assert.equal(taskTitleFromItems(genericExecItems), 'Run a check');
-assert.equal(taskSummaryFromItems(genericExecItems, 'running'), 'Now run a check');
+assert.equal(taskTitleFromItems(genericExecItems), 'Run tests');
+assert.equal(taskSummaryFromItems(genericExecItems, 'running'), 'Now run tests');
+assert.ok(!/^Now run a check/i.test(taskSummaryFromItems(genericExecItems, 'running')));
 assert.ok(!/^In progress/i.test(taskSummaryFromItems(genericExecItems, 'running')));
 assert.ok(!/^Working$/i.test(taskTitleFromItems(genericExecItems)));
+
+const genericUnknownItems = [
+  { kind: 'before_tool_call', toolName: 'exec', details: {} },
+];
+assert.equal(taskTitleFromItems(genericUnknownItems), 'Inspect runtime');
+assert.equal(taskSummaryFromItems(genericUnknownItems, 'running'), 'Now inspect runtime');
+assert.ok(!/Active task|run a check/i.test(`${taskTitleFromItems(genericUnknownItems)} :: ${taskSummaryFromItems(genericUnknownItems, 'running')}`));
 
 console.log('feed-task-humanization: PASS');
