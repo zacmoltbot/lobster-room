@@ -1402,6 +1402,22 @@ export default {
       await persistSpawnAttributionState();
     };
 
+    const resolveSpawnedChildSessionKey = (event: any, ctx: any): string => {
+      const parentSessionKey = typeof ctx?.sessionKey === "string" ? ctx.sessionKey.trim() : "";
+      const candidates = [
+        event?.result?.childSessionKey,
+        event?.childSessionKey,
+        event?.result?.sessionKey,
+      ];
+      for (const candidate of candidates) {
+        const sk = typeof candidate === "string" ? candidate.trim() : "";
+        if (!sk || sk === parentSessionKey) continue;
+        const parsed = parseSessionIdentity(sk);
+        if (parsed.lane === "subagent" || parsed.lane === "cron") return sk;
+      }
+      return "";
+    };
+
     const resolveFeedAgentIdentity = async (ctx: any): Promise<{ agentId: string; rawAgentId?: string }> => {
       const parsed = parseSessionIdentity(ctx?.sessionKey, ctx?.agentId);
       const rawSessionAgentId = parsed.agentId;
@@ -1657,18 +1673,15 @@ export default {
       // This helps surface sub-agent completions even when no message_sent hook is emitted.
       let outputPreview: string | undefined = undefined;
       if (toolName === "sessions_spawn") {
-        const pendingAttribution = await consumePendingSpawnAttribution(ctx?.sessionKey);
-        const requestedSpawnAgentId = resolveRequestedSpawnAgentId(event?.params)
-          || resolveRequestedSpawnAgentId(event?.result)
-          || resolveRequestedSpawnAgentId(event)
-          || pendingAttribution?.actorId;
-        await rememberSpawnedSessionAgent(
-          event?.result?.childSessionKey
-            ?? event?.result?.sessionKey
-            ?? event?.childSessionKey
-            ?? event?.sessionKey,
-          requestedSpawnAgentId,
-        );
+        const childSessionKey = resolveSpawnedChildSessionKey(event, ctx);
+        if (childSessionKey) {
+          const pendingAttribution = await consumePendingSpawnAttribution(ctx?.sessionKey);
+          const requestedSpawnAgentId = resolveRequestedSpawnAgentId(event?.params)
+            || resolveRequestedSpawnAgentId(event?.result)
+            || resolveRequestedSpawnAgentId(event)
+            || pendingAttribution?.actorId;
+          await rememberSpawnedSessionAgent(childSessionKey, requestedSpawnAgentId);
+        }
         const candidates = [
           event?.result?.message,
           event?.result?.content,
