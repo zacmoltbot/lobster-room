@@ -1634,17 +1634,64 @@ export default {
       return value.replace(/\s+/g, " ").trim().slice(0, maxLen);
     };
 
-    const resolveExplicitSpawnAgentId = (payload: any): string => {
-      const explicitCandidates = [
-        payload?.agentId,
-        payload?.spawnAgentId,
-        payload?.requestedAgentId,
-      ];
-      for (const candidate of explicitCandidates) {
-        const visible = canonicalVisibleAgentId(candidate);
-        if (visible) return visible;
+    const collectSpawnStringHints = (value: any, out: string[], seen = new Set<any>()) => {
+      if (!value || seen.has(value) || out.length >= 24) return;
+      if (typeof value === "string") {
+        const normalized = normalizeSpawnText(value, 400);
+        if (normalized) out.push(normalized);
+        return;
       }
-      return "";
+      if (typeof value !== "object") return;
+      seen.add(value);
+      const preferredKeys = ["label", "task", "prompt", "instructions", "title", "name", "description", "summary"];
+      for (const key of preferredKeys) collectSpawnStringHints(value?.[key], out, seen);
+      for (const nestedKey of ["payload", "input", "request", "session", "sessionOptions", "meta", "details", "context", "options"]) {
+        collectSpawnStringHints(value?.[nestedKey], out, seen);
+      }
+      if (Array.isArray(value)) {
+        for (const item of value) collectSpawnStringHints(item, out, seen);
+      }
+    };
+
+    const isSpawnPayloadLike = (value: any): boolean => {
+      if (!value || typeof value !== "object") return false;
+      return !!(
+        value?.spawnAgentId
+        || value?.requestedAgentId
+        || value?.actorId
+        || value?.toolName === "sessions_spawn"
+      );
+    };
+
+    const collectSpawnActorCandidates = (value: any, out: string[], seen = new Set<any>(), allowGenericAgentId = false) => {
+      if (!value || seen.has(value) || out.length >= 16) return;
+      const visible = canonicalVisibleAgentId(value);
+      if (visible) {
+        out.push(visible);
+        return;
+      }
+      if (typeof value !== "object") return;
+      seen.add(value);
+      for (const key of ["spawnAgentId", "requestedAgentId", "actorId", "actor"]) {
+        collectSpawnActorCandidates(value?.[key], out, seen, true);
+      }
+      if (allowGenericAgentId || isSpawnPayloadLike(value)) {
+        collectSpawnActorCandidates(value?.agentId, out, seen, true);
+        collectSpawnActorCandidates(value?.agent, out, seen, true);
+      }
+      for (const nestedKey of ["payload", "input", "request", "sessionOptions", "options", "meta", "details"]) {
+        collectSpawnActorCandidates(value?.[nestedKey], out, seen, true);
+      }
+      if (Array.isArray(value)) {
+        for (const item of value) collectSpawnActorCandidates(item, out, seen, allowGenericAgentId);
+      }
+    };
+
+    const resolveExplicitSpawnAgentId = (payload: any): string => {
+      const explicitCandidates: string[] = [];
+      collectSpawnActorCandidates(payload, explicitCandidates);
+      const unique = uniqueVisibleAgentIds(explicitCandidates);
+      return unique.length === 1 ? (unique[0] || "") : "";
     };
 
     const uniqueVisibleAgentIds = (values: string[]): string[] => Array.from(new Set(values.filter(Boolean)));
@@ -1683,10 +1730,9 @@ export default {
     const inferSpawnActorId = (payload: any): string => {
       const explicit = resolveExplicitSpawnAgentId(payload);
       if (explicit) return explicit;
-      const text = [payload?.label, payload?.task, payload?.prompt, payload?.instructions]
-        .map((part) => normalizeSpawnText(part, 400))
-        .filter(Boolean)
-        .join("\n");
+      const stringHints: string[] = [];
+      collectSpawnStringHints(payload, stringHints);
+      const text = stringHints.filter(Boolean).join("\n");
       if (!text) return "";
       const directiveMatches = extractSpawnDirectiveActorIds(text);
       if (directiveMatches.length === 1) return directiveMatches[0] || "";
@@ -1694,6 +1740,33 @@ export default {
       const mentionMatches = extractSpawnMentionActorIds(text);
       if (mentionMatches.length === 1) return mentionMatches[0] || "";
       return "";
+    };
+
+    const extractSpawnMatcherHints = (value: any): { actorId?: string; label?: string; task?: string } => {
+      const actorId = resolveRequestedSpawnAgentId(value) || undefined;
+      const label = normalizeSpawnText(
+        value?.label
+        ?? value?.sessionLabel
+        ?? value?.title
+        ?? value?.name
+        ?? value?.session?.label
+        ?? value?.session?.title
+        ?? value?.payload?.label
+        ?? value?.request?.label,
+        120,
+      ) || undefined;
+      const task = normalizeSpawnText(
+        value?.task
+        ?? value?.prompt
+        ?? value?.instructions
+        ?? value?.description
+        ?? value?.session?.task
+        ?? value?.session?.prompt
+        ?? value?.payload?.task
+        ?? value?.request?.task,
+        240,
+      ) || undefined;
+      return { actorId, label, task };
     };
 
     const resolveRequestedSpawnAgentId = (payload: any): string => inferSpawnActorId(payload);
@@ -1720,14 +1793,29 @@ export default {
       const actorId = canonicalVisibleAgentId(matcher?.actorId);
       const label = normalizeSpawnText(matcher?.label, 120);
       const task = normalizeSpawnText(matcher?.task, 240);
-      const index = queue.findIndex((entry) => {
-        if (actorId && entry.actorId !== actorId) return false;
-        if (label && normalizeSpawnText(entry.label, 120) !== label) return false;
-        if (task && normalizeSpawnText(entry.task, 240) !== task) return false;
-        return true;
-      });
-      if (index < 0) return undefined;
-      const [picked] = queue.splice(index, 1);
+      const scored = queue.map((entry, index) => {
+        let score = 0;
+        if (actorId) {
+          if (entry.actorId !== actorId) return { entry, index, score: -1 };
+          score += 8;
+        }
+        if (label) {
+          if (normalizeSpawnText(entry.label, 120) !== label) return { entry, index, score: -1 };
+          score += 4;
+        }
+        if (task) {
+          if (normalizeSpawnText(entry.task, 240) !== task) return { entry, index, score: -1 };
+          score += 4;
+        }
+        if (!actorId && !label && !task) score = 1;
+        else if (entry.source === "explicit") score += 1;
+        return { entry, index, score };
+      }).filter((candidate) => candidate.score >= 0);
+      if (!scored.length) return undefined;
+      const bestScore = Math.max(...scored.map((candidate) => candidate.score));
+      const winners = scored.filter((candidate) => candidate.score === bestScore);
+      if (bestScore <= 0 || winners.length !== 1) return undefined;
+      const [picked] = queue.splice(winners[0]!.index, 1);
       if (queue.length) bucket.set(key, queue);
       else bucket.delete(key);
       return picked;
@@ -1763,11 +1851,7 @@ export default {
       return entry;
     };
 
-    const pendingSpawnMatcherFromPayload = (payload: any): { actorId?: string; label?: string; task?: string } => ({
-      actorId: resolveRequestedSpawnAgentId(payload) || undefined,
-      label: normalizeSpawnText(payload?.label, 120) || undefined,
-      task: normalizeSpawnText(payload?.task, 240) || undefined,
-    });
+    const pendingSpawnMatcherFromPayload = (payload: any): { actorId?: string; label?: string; task?: string } => extractSpawnMatcherHints(payload);
 
     const consumePendingSpawnAttribution = async (
       parentSessionKey: unknown,
@@ -1819,8 +1903,10 @@ export default {
         };
       }
 
+      const childMatcher = extractSpawnMatcherHints(ctx);
       for (const parentSessionKey of resolveChildParentSessionKeys(ctx)) {
-        const adopted = dequeuePendingSpawnAttribution(pendingSpawnAttributionsByParent, parentSessionKey);
+        const adopted = pickPendingSpawnAttribution(pendingSpawnAttributionsByParent, parentSessionKey, childMatcher)
+          || (childMatcher.actorId || childMatcher.label || childMatcher.task ? undefined : dequeuePendingSpawnAttribution(pendingSpawnAttributionsByParent, parentSessionKey));
         if (!adopted) continue;
         forgetPendingSpawnAttributionFromResident(adopted.residentAgentId, adopted);
         spawnedSessionAgentIds.set(sk, adopted.actorId);
@@ -1830,14 +1916,17 @@ export default {
 
       const resident = canonicalVisibleAgentId(parsed.residentAgentId);
       if (!resident) return undefined;
-      const queue = pendingSpawnAttributionsByResident.get(resident) || [];
-      const eligible = queue.filter((candidate) => {
+      const eligible = (pendingSpawnAttributionsByResident.get(resident) || []).filter((candidate) => {
         if (!candidate) return false;
         const parentParsed = parseSessionIdentity(candidate.parentSessionKey, candidate.residentAgentId);
         return parentParsed.residentAgentId === resident && parentParsed.lane !== "cron";
       });
-      if (eligible.length !== 1) return undefined;
-      const adopted = eligible[0];
+      if (!eligible.length) return undefined;
+      const syntheticKey = `resident:${resident}`;
+      pendingSpawnAttributionsByResident.set(syntheticKey, eligible.slice());
+      const matchedEligible = pickPendingSpawnAttribution(pendingSpawnAttributionsByResident, syntheticKey, childMatcher);
+      pendingSpawnAttributionsByResident.delete(syntheticKey);
+      const adopted = matchedEligible || (eligible.length === 1 && !(childMatcher.actorId || childMatcher.label || childMatcher.task) ? eligible[0] : undefined);
       if (!adopted) return undefined;
       forgetPendingSpawnAttributionFromResident(resident, adopted);
       const parentQueue = pendingSpawnAttributionsByParent.get(adopted.parentSessionKey) || [];
