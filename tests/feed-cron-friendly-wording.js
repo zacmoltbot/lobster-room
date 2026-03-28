@@ -136,21 +136,22 @@ function feedPreview(it, opts) {
   const canonicalAgentId = it.agentId ? canonicalVisibleAgentId(it.agentId) || 'main' : '';
   const actorPrefix = opts?.includeActor !== false && canonicalAgentId ? `@${canonicalAgentId} ` : '';
   const details = it.details || null;
+  const detailsWithSessionKey = details && details.sessionKey ? details : { ...(details || {}), sessionKey: it.sessionKey };
   if (it.kind === 'before_agent_start') {
     const cronStart = cronFriendlyIntent(it.sessionKey, undefined, 'active', { includeActor: false });
     if (cronStart) return `${actorPrefix}${cronStart}`.trim();
     return `${actorPrefix}started`.trim();
   }
   if (it.kind === 'before_tool_call') {
-    return `${actorPrefix}${humanizedWorkDescription(String(it.toolName || 'tool'), details, 'active')}`.trim();
+    return `${actorPrefix}${humanizedWorkDescription(String(it.toolName || 'tool'), detailsWithSessionKey, 'active')}`.trim();
   }
   if (it.kind === 'after_tool_call') {
-    return `${actorPrefix}${humanizedWorkDescription(String(it.toolName || 'tool'), details, 'done')}`.trim();
+    return `${actorPrefix}${humanizedWorkDescription(String(it.toolName || 'tool'), detailsWithSessionKey, 'done')}`.trim();
   }
   if (it.kind === 'tool_result_persist') {
-    const cronLabel = cronStoryLabel(details);
+    const cronLabel = cronStoryLabel(detailsWithSessionKey);
     if (cronLabel) return `${actorPrefix}continuing ${cronLabel}`.trim();
-    const intent = extractTaskIntent(details) || 'inspect runtime';
+    const intent = extractTaskIntent(detailsWithSessionKey) || 'inspect runtime';
     return `${actorPrefix}${intent ? `continuing ${intent}` : 'continuing work'}`.trim();
   }
   return '';
@@ -163,10 +164,14 @@ assert.equal(extractTaskIntent({ sessionKey: 'agent:main:cron:8267978b-1135-4736
 assert.equal(feedPreview({ kind: 'before_agent_start', agentId: 'main', sessionKey: 'agent:main:cron:0c30b9e4-0a8a-41a1-b714-56002839b65c' }, { includeActor: true }), '@main running Daily Idea');
 assert.equal(feedPreview({ kind: 'before_tool_call', agentId: 'main', toolName: 'browser', details: { sessionKey: 'agent:main:cron:8267978b-1135-4736-973b-ed370beec448', toolName: 'browser' } }, { includeActor: true }), '@main checking Gmail Checker');
 assert.equal(feedPreview({ kind: 'before_tool_call', agentId: 'main', toolName: 'exec', details: { sessionKey: 'agent:main:cron:8267978b-1135-4736-973b-ed370beec448', toolName: 'exec' } }, { includeActor: true }), '@main running Gmail Checker');
+assert.equal(feedPreview({ kind: 'before_tool_call', agentId: 'main', toolName: 'exec', sessionKey: 'agent:main:cron:8267978b-1135-4736-973b-ed370beec448', details: { toolName: 'exec' } }, { includeActor: true }), '@main running Gmail Checker');
 assert.equal(feedPreview({ kind: 'after_tool_call', agentId: 'main', toolName: 'process', details: { sessionKey: 'agent:main:cron:8267978b-1135-4736-973b-ed370beec448', toolName: 'process' } }, { includeActor: true }), '@main finished Gmail Checker');
+assert.equal(feedPreview({ kind: 'after_tool_call', agentId: 'main', toolName: 'process', sessionKey: 'agent:main:cron:8267978b-1135-4736-973b-ed370beec448', details: { toolName: 'process' } }, { includeActor: true }), '@main finished Gmail Checker');
 assert.equal(humanizedWorkDescription('message', { sessionKey: 'agent:main:cron:807dbcb2-16df-4eef-b2ec-a74fdce0ed96', toolName: 'message' }, 'active'), 'posting AI News Digest');
 assert.equal(feedPreview({ kind: 'tool_result_persist', agentId: 'main', toolName: 'message', details: { sessionKey: 'agent:main:cron:807dbcb2-16df-4eef-b2ec-a74fdce0ed96', toolName: 'message' } }, { includeActor: true }), '@main continuing AI News Digest');
+assert.equal(feedPreview({ kind: 'tool_result_persist', agentId: 'main', toolName: 'message', sessionKey: 'agent:main:cron:807dbcb2-16df-4eef-b2ec-a74fdce0ed96', details: { toolName: 'message' } }, { includeActor: true }), '@main continuing AI News Digest');
 assert.equal(feedPreview({ kind: 'tool_result_persist', agentId: 'main', toolName: 'process', details: { sessionKey: 'agent:main:cron:8267978b-1135-4736-973b-ed370beec448', toolName: 'process' } }, { includeActor: true }), '@main continuing Gmail Checker');
+assert.equal(feedPreview({ kind: 'tool_result_persist', agentId: 'main', toolName: 'process', sessionKey: 'agent:main:cron:8267978b-1135-4736-973b-ed370beec448', details: { toolName: 'process' } }, { includeActor: true }), '@main continuing Gmail Checker');
 assert.equal(cronJobLabelFromSessionKey('agent:main:cron:kanban_checker'), 'Kanban Checker', 'fallback should still humanize raw job ids when cache misses');
 
 console.log('feed-cron-friendly-wording: PASS');

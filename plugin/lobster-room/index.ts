@@ -1272,18 +1272,18 @@ export default {
       }
       if (it.kind === "before_tool_call") {
         const tn = it.toolName || "tool";
-        const desc = humanizedWorkDescription(String(tn), details, "active");
+        const desc = humanizedWorkDescription(String(tn), detailsWithSessionKey, "active");
         return `${actorPrefix}${desc}`.trim();
       }
       if (it.kind === "after_tool_call") {
         const tn = it.toolName || "tool";
-        const desc = humanizedWorkDescription(String(tn), details, "done");
+        const desc = humanizedWorkDescription(String(tn), detailsWithSessionKey, "done");
         return `${actorPrefix}${desc}`.trim();
       }
       if (it.kind === "tool_result_persist") {
-        const cronLabel = cronStoryLabel(details);
+        const cronLabel = cronStoryLabel(detailsWithSessionKey);
         if (cronLabel) return `${actorPrefix}continuing ${cronLabel}`.trim();
-        const intent = extractTaskIntent(details) || fallbackTaskIntentForTool(String(it.toolName || ""), details);
+        const intent = extractTaskIntent(detailsWithSessionKey) || fallbackTaskIntentForTool(String(it.toolName || ""), detailsWithSessionKey);
         return `${actorPrefix}${intent ? `continuing ${intent}` : "continuing work"}`.trim();
       }
       if (it.kind === "message_sending") {
