@@ -24,7 +24,7 @@ function sendJson(res: ServerResponse, status: number, body: unknown) {
   res.end(text);
 }
 
-const FEED_UI_VERSION = "feed-v3-20260327.2";
+const FEED_UI_VERSION = "feed-v3-20260328.1";
 
 // Maps tool names to user-facing labels for feed preview filtering.
 // Returns undefined for internal/noisy tools that should not appear in the feed label.
@@ -987,12 +987,90 @@ export default {
         .trim();
     };
 
+    const CRON_JOB_STORE_CANDIDATES = [
+      "/home/node/.openclaw/cron/jobs.json",
+      "/root/.openclaw/cron/jobs.json",
+      join(process.env.HOME || "/home/node", ".openclaw", "cron", "jobs.json"),
+    ];
+    let cronJobNameCache = new Map<string, string>();
+    let cronJobNameCacheMtimeMs = -1;
+    let cronJobNameCacheLoadedAt = 0;
+    let cronJobNameCacheInFlight: Promise<void> | null = null;
+
+    const cronStoreJobName = (rawJob: any): string => {
+      const candidate = [rawJob?.name, rawJob?.label, rawJob?.title].find((value) => typeof value === "string" && value.trim());
+      return normalizeIntentText(candidate, 120);
+    };
+
+    const refreshCronJobNameCache = async (force = false): Promise<void> => {
+      if (!force && cronJobNameCacheInFlight) {
+        await cronJobNameCacheInFlight;
+        return;
+      }
+      const now = Date.now();
+      if (!force && cronJobNameCacheLoadedAt && (now - cronJobNameCacheLoadedAt) < 15_000) return;
+      cronJobNameCacheInFlight = (async () => {
+        let chosenPath = "";
+        let chosenMtimeMs = -1;
+        for (const candidate of CRON_JOB_STORE_CANDIDATES) {
+          try {
+            const stat = await fs.stat(candidate);
+            if (stat.isFile()) {
+              chosenPath = candidate;
+              chosenMtimeMs = Number(stat.mtimeMs || 0);
+              break;
+            }
+          } catch {}
+        }
+        if (!chosenPath) {
+          cronJobNameCacheLoadedAt = now;
+          return;
+        }
+        if (!force && chosenMtimeMs >= 0 && chosenMtimeMs === cronJobNameCacheMtimeMs && cronJobNameCache.size) {
+          cronJobNameCacheLoadedAt = now;
+          return;
+        }
+        try {
+          const raw = await fs.readFile(chosenPath, "utf8");
+          const parsed = JSON.parse(raw);
+          const jobs = Array.isArray(parsed)
+            ? parsed
+            : (Array.isArray(parsed?.jobs) ? parsed.jobs : []);
+          const next = new Map<string, string>();
+          for (const job of jobs) {
+            const jobId = typeof job?.id === "string" && job.id.trim()
+              ? job.id.trim()
+              : (typeof job?.jobId === "string" && job.jobId.trim() ? job.jobId.trim() : "");
+            const name = cronStoreJobName(job);
+            if (!jobId || !name) continue;
+            next.set(jobId, name);
+          }
+          if (next.size) cronJobNameCache = next;
+          cronJobNameCacheMtimeMs = chosenMtimeMs;
+          cronJobNameCacheLoadedAt = now;
+        } catch (err: any) {
+          cronJobNameCacheLoadedAt = now;
+          api.logger.warn("[lobster-room] cron job cache refresh failed", {
+            error: String(err?.message || err),
+            path: chosenPath,
+          });
+        }
+      })();
+      try {
+        await cronJobNameCacheInFlight;
+      } finally {
+        cronJobNameCacheInFlight = null;
+      }
+    };
+
     const cronJobLabelFromSessionKey = (sessionKey: unknown): string => {
       const sk = typeof sessionKey === "string" ? sessionKey.trim() : "";
       const match = sk.match(/^agent:([^:]+):cron:([^:]+)$/i);
       if (!match) return "";
       const rawJobId = String(match[2] || "").trim();
       if (!rawJobId) return "";
+      const named = cronJobNameCache.get(rawJobId);
+      if (named) return named;
       const label = rawJobId
         .replace(/[_-]+/g, " ")
         .replace(/\s+/g, " ")
@@ -2395,6 +2473,7 @@ export default {
             if (op === "feedGet") {
               // api.logger.info("[lobster-room] feedGet ENTERED", { op, payload });
               try {
+              await refreshCronJobNameCache();
               const limit = Math.max(1, Math.min(500, Number(payload?.limit) || 120));
               const agentId = typeof payload?.agentId === "string" ? payload.agentId.trim() : "";
               const kind = typeof payload?.kind === "string" ? payload.kind.trim() : "";
@@ -2448,6 +2527,7 @@ export default {
 
             if (op === "feedSummarize") {
               // NOTE: We re-use the same logic as /lobster-room/api/feed/summarize,
+              await refreshCronJobNameCache();
               // but route reliability is better here.
 
               // Resolve an auth token for calling the local gateway LLM endpoint.
@@ -2797,6 +2877,7 @@ export default {
           }
         })();
 
+        await refreshCronJobNameCache();
         const agentNameOverridesFromFile = await readAgentLabels();
         const agentNameOverrides: Record<string, string> = {
           ...agentNameOverridesFromFile,

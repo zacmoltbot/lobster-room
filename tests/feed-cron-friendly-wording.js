@@ -39,12 +39,33 @@ function titleCaseCronLabel(value) {
   }).join(' ').trim();
 }
 
+function buildCronJobNameCache(jobs) {
+  const next = new Map();
+  for (const job of jobs || []) {
+    const jobId = typeof job?.id === 'string' && job.id.trim()
+      ? job.id.trim()
+      : (typeof job?.jobId === 'string' && job.jobId.trim() ? job.jobId.trim() : '');
+    const name = normalizeIntentText(job?.name || job?.label || job?.title, 120);
+    if (!jobId || !name) continue;
+    next.set(jobId, name);
+  }
+  return next;
+}
+
+const cronJobNameCache = buildCronJobNameCache([
+  { id: '8267978b-1135-4736-973b-ed370beec448', name: 'Gmail Checker' },
+  { id: '807dbcb2-16df-4eef-b2ec-a74fdce0ed96', name: 'AI News Digest' },
+  { id: '0c30b9e4-0a8a-41a1-b714-56002839b65c', name: 'Daily Idea' },
+]);
+
 function cronJobLabelFromSessionKey(sessionKey) {
   const sk = typeof sessionKey === 'string' ? sessionKey.trim() : '';
   const match = sk.match(/^agent:([^:]+):cron:([^:]+)$/i);
   if (!match) return '';
   const rawJobId = String(match[2] || '').trim();
   if (!rawJobId) return '';
+  const named = cronJobNameCache.get(rawJobId);
+  if (named) return named;
   return titleCaseCronLabel(rawJobId.replace(/[_-]+/g, ' ').replace(/\s+/g, ' ').trim());
 }
 
@@ -124,13 +145,14 @@ function feedPreview(it, opts) {
   return '';
 }
 
-assert.equal(cronJobLabelFromSessionKey('agent:main:cron:kanban_checker'), 'Kanban Checker');
-assert.equal(cronFriendlyIntent('agent:main:cron:gmail', 'browser', 'active'), '@main checking Gmail');
-assert.equal(cronFriendlyIntent('agent:main:cron:ai_news_digest', 'message', 'active'), '@main posting AI News Digest');
-assert.equal(extractTaskIntent({ sessionKey: 'agent:main:cron:gmail', toolName: 'browser' }), 'checking Gmail');
-assert.equal(feedPreview({ kind: 'before_agent_start', agentId: 'main', sessionKey: 'agent:main:cron:daily_idea' }, { includeActor: true }), '@main running Daily Idea');
-assert.equal(feedPreview({ kind: 'before_tool_call', agentId: 'main', toolName: 'browser', details: { sessionKey: 'agent:main:cron:gmail', toolName: 'browser' } }, { includeActor: true }), '@main checking Gmail');
-assert.equal(humanizedWorkDescription('message', { sessionKey: 'agent:main:cron:ai_news_digest', toolName: 'message' }, 'active'), 'posting AI News Digest');
-assert.equal(feedPreview({ kind: 'tool_result_persist', agentId: 'main', toolName: 'message', details: { sessionKey: 'agent:main:cron:ai_news_digest', toolName: 'message' } }, { includeActor: true }), '@main continuing posting AI News Digest');
+assert.equal(cronJobLabelFromSessionKey('agent:main:cron:8267978b-1135-4736-973b-ed370beec448'), 'Gmail Checker');
+assert.equal(cronFriendlyIntent('agent:main:cron:8267978b-1135-4736-973b-ed370beec448', 'browser', 'active'), '@main checking Gmail Checker');
+assert.equal(cronFriendlyIntent('agent:main:cron:807dbcb2-16df-4eef-b2ec-a74fdce0ed96', 'message', 'active'), '@main posting AI News Digest');
+assert.equal(extractTaskIntent({ sessionKey: 'agent:main:cron:8267978b-1135-4736-973b-ed370beec448', toolName: 'browser' }), 'checking Gmail Checker');
+assert.equal(feedPreview({ kind: 'before_agent_start', agentId: 'main', sessionKey: 'agent:main:cron:0c30b9e4-0a8a-41a1-b714-56002839b65c' }, { includeActor: true }), '@main running Daily Idea');
+assert.equal(feedPreview({ kind: 'before_tool_call', agentId: 'main', toolName: 'browser', details: { sessionKey: 'agent:main:cron:8267978b-1135-4736-973b-ed370beec448', toolName: 'browser' } }, { includeActor: true }), '@main checking Gmail Checker');
+assert.equal(humanizedWorkDescription('message', { sessionKey: 'agent:main:cron:807dbcb2-16df-4eef-b2ec-a74fdce0ed96', toolName: 'message' }, 'active'), 'posting AI News Digest');
+assert.equal(feedPreview({ kind: 'tool_result_persist', agentId: 'main', toolName: 'message', details: { sessionKey: 'agent:main:cron:807dbcb2-16df-4eef-b2ec-a74fdce0ed96', toolName: 'message' } }, { includeActor: true }), '@main continuing posting AI News Digest');
+assert.equal(cronJobLabelFromSessionKey('agent:main:cron:kanban_checker'), 'Kanban Checker', 'fallback should still humanize raw job ids when cache misses');
 
 console.log('feed-cron-friendly-wording: PASS');
