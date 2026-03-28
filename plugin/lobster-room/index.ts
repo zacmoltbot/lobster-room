@@ -1554,13 +1554,19 @@ export default {
     const spawnAttributionStatePath = join(rootUserDir, "spawn-attribution-state.json");
     let spawnAttributionStateHydrated = false;
 
-    const pendingSpawnAttributionKey = (entry: PendingSpawnAttribution): string => [
+    const PENDING_SPAWN_ATTRIBUTION_TTL_MS = 30 * 60 * 1000;
+
+    const pendingSpawnAttributionIdentityKey = (entry: PendingSpawnAttribution): string => [
       entry.parentSessionKey,
       entry.residentAgentId,
       entry.actorId,
       entry.label || "",
       entry.task || "",
       entry.source,
+    ].join("\u0000");
+
+    const pendingSpawnAttributionKey = (entry: PendingSpawnAttribution): string => [
+      pendingSpawnAttributionIdentityKey(entry),
       String(entry.createdAt || 0),
     ].join("\u0000");
 
@@ -1579,12 +1585,38 @@ export default {
       return hasAdoptableChildProof(sessionKey, parseSessionIdentity(sessionKey).residentAgentId);
     };
 
+    const prunePendingSpawnAttributions = (referenceNow = nowMs()) => {
+      const keep = new Map<string, PendingSpawnAttribution>();
+      const maxAgeMs = PENDING_SPAWN_ATTRIBUTION_TTL_MS;
+      const collect = (entry: PendingSpawnAttribution | null | undefined) => {
+        if (!entry) return;
+        const createdAt = typeof entry.createdAt === "number" && Number.isFinite(entry.createdAt) ? entry.createdAt : 0;
+        if (createdAt > 0 && referenceNow - createdAt > maxAgeMs) return;
+        const identityKey = pendingSpawnAttributionIdentityKey(entry);
+        const existing = keep.get(identityKey);
+        if (!existing || (existing.createdAt || 0) <= (createdAt || 0)) keep.set(identityKey, entry);
+      };
+      for (const queue of pendingSpawnAttributionsByParent.values()) {
+        for (const entry of queue) collect(entry);
+      }
+      for (const queue of pendingSpawnAttributionsByResident.values()) {
+        for (const entry of queue) collect(entry);
+      }
+      pendingSpawnAttributionsByParent.clear();
+      pendingSpawnAttributionsByResident.clear();
+      for (const entry of keep.values()) {
+        pendingSpawnAttributionsByParent.set(entry.parentSessionKey, (pendingSpawnAttributionsByParent.get(entry.parentSessionKey) || []).concat([entry]));
+        pendingSpawnAttributionsByResident.set(entry.residentAgentId, (pendingSpawnAttributionsByResident.get(entry.residentAgentId) || []).concat([entry]));
+      }
+    };
+
     const mergePendingSpawnAttribution = (entry: PendingSpawnAttribution) => {
-      const entryKey = pendingSpawnAttributionKey(entry);
+      prunePendingSpawnAttributions(entry.createdAt || nowMs());
+      const identityKey = pendingSpawnAttributionIdentityKey(entry);
       const mergeIntoBucket = (bucket: Map<string, PendingSpawnAttribution[]>, key: string) => {
         const queue = bucket.get(key) || [];
-        if (queue.some((candidate) => pendingSpawnAttributionKey(candidate) === entryKey)) return;
-        bucket.set(key, queue.concat([entry]));
+        const next = queue.filter((candidate) => pendingSpawnAttributionIdentityKey(candidate) !== identityKey);
+        bucket.set(key, next.concat([entry]).sort((a, b) => (a.createdAt || 0) - (b.createdAt || 0)));
       };
       mergeIntoBucket(pendingSpawnAttributionsByParent, entry.parentSessionKey);
       mergeIntoBucket(pendingSpawnAttributionsByResident, entry.residentAgentId);
@@ -1601,6 +1633,7 @@ export default {
           spawnAttributionStateHydrated = true;
         }
 
+        const referenceNow = nowMs();
         const spawned = data?.spawnedSessionAgentIds;
         if (spawned && typeof spawned === "object") {
           for (const [key, value] of Object.entries(spawned)) {
@@ -1624,10 +1657,11 @@ export default {
             label: normalizeSpawnText(raw?.label, 120) || undefined,
             task: normalizeSpawnText(raw?.task, 240) || undefined,
             source: raw?.source === "explicit" ? "explicit" : "inferred",
-            createdAt: typeof raw?.createdAt === "number" && Number.isFinite(raw.createdAt) ? raw.createdAt : nowMs(),
+            createdAt: typeof raw?.createdAt === "number" && Number.isFinite(raw.createdAt) ? raw.createdAt : referenceNow,
           };
           mergePendingSpawnAttribution(entry);
         }
+        prunePendingSpawnAttributions(referenceNow);
       } catch {
         if (!spawnAttributionStateHydrated) spawnAttributionStateHydrated = true;
       }
@@ -1635,6 +1669,7 @@ export default {
 
     const persistSpawnAttributionState = async () => {
       try {
+        prunePendingSpawnAttributions();
         const pending = new Map<string, PendingSpawnAttribution>();
         for (const queue of pendingSpawnAttributionsByParent.values()) {
           for (const entry of queue) pending.set(pendingSpawnAttributionKey(entry), entry);
@@ -1980,6 +2015,12 @@ export default {
         event?.result?.childSessionKey,
         event?.childSessionKey,
         event?.result?.sessionKey,
+        event?.result?.session?.sessionKey,
+        event?.result?.session?.key,
+        event?.result?.session?.id,
+        event?.result?.sessionId,
+        event?.result?.session_id,
+        event?.sessionKey,
       ];
       for (const candidate of candidates) {
         const sk = typeof candidate === "string" ? candidate.trim() : "";
