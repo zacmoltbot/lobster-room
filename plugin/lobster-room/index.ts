@@ -966,12 +966,80 @@ export default {
       return text.charAt(0).toUpperCase() + text.slice(1);
     };
 
-    const extractTaskIntent = (details: Record<string, unknown> | null): string => {
+    const titleCaseCronLabel = (value: string): string => {
+      const clean = normalizeIntentText(value, 120);
+      if (!clean) return "";
+      return clean
+        .split(/\s+/)
+        .map((part) => {
+          if (!part) return "";
+          if (/^AI$/i.test(part)) return "AI";
+          if (/^RSS$/i.test(part)) return "RSS";
+          if (/^gmail$/i.test(part)) return "Gmail";
+          if (/^github$/i.test(part)) return "GitHub";
+          if (/^youtube$/i.test(part)) return "YouTube";
+          if (/^notion$/i.test(part)) return "Notion";
+          if (/^discord$/i.test(part)) return "Discord";
+          if (/^[A-Z0-9]+$/.test(part)) return part;
+          return part.charAt(0).toUpperCase() + part.slice(1);
+        })
+        .join(" ")
+        .trim();
+    };
+
+    const cronJobLabelFromSessionKey = (sessionKey: unknown): string => {
+      const sk = typeof sessionKey === "string" ? sessionKey.trim() : "";
+      const match = sk.match(/^agent:([^:]+):cron:([^:]+)$/i);
+      if (!match) return "";
+      const rawJobId = String(match[2] || "").trim();
+      if (!rawJobId) return "";
+      const label = rawJobId
+        .replace(/[_-]+/g, " ")
+        .replace(/\s+/g, " ")
+        .trim();
+      return titleCaseCronLabel(label);
+    };
+
+    const cronActorPrefix = (sessionKey: unknown): string => {
+      const sk = typeof sessionKey === "string" ? sessionKey.trim() : "";
+      const match = sk.match(/^agent:([^:]+):cron:([^:]+)$/i);
+      if (!match) return "";
+      const actor = canonicalVisibleAgentId(String(match[1] || "").trim(), "");
+      return actor ? `@${actor}` : "";
+    };
+
+    const cronFriendlyIntent = (
+      sessionKey: unknown,
+      toolName?: unknown,
+      phase: "active" | "done" = "active",
+      opts?: { includeActor?: boolean },
+    ): string => {
+      const label = cronJobLabelFromSessionKey(sessionKey);
+      if (!label) return "";
+      const actor = opts?.includeActor === false ? "" : cronActorPrefix(sessionKey);
+      const verb = (() => {
+        const tn = String(toolName || "").trim();
+        if (tn === "message") return phase === "done" ? "posted" : "posting";
+        if (tn === "browser" || tn === "web_fetch") return phase === "done" ? "checked" : "checking";
+        return phase === "done" ? "ran" : "running";
+      })();
+      return `${actor ? actor + " " : ""}${verb} ${label}`.trim();
+    };
+
+    const extractExplicitTaskIntent = (details: Record<string, unknown> | null): string => {
       const candidates = [details?.task, details?.label, details?.prompt, details?.goal, details?.summary, details?.title, details?.purpose, details?.name];
       for (const candidate of candidates) {
         const text = normalizeIntentText(candidate, 120);
         if (text) return text;
       }
+      return "";
+    };
+
+    const extractTaskIntent = (details: Record<string, unknown> | null): string => {
+      const explicitIntent = extractExplicitTaskIntent(details);
+      if (explicitIntent) return explicitIntent;
+      const cronIntent = cronFriendlyIntent(details?.sessionKey, details?.toolName, "active", { includeActor: false });
+      if (cronIntent) return cronIntent;
       return "";
     };
 
@@ -1031,10 +1099,15 @@ export default {
       }
       if (tn === "exec" || tn === "process") {
         if (intent) return phase === "done" ? `finished ${intent}` : `${intent}`;
+        const cronIntent = cronFriendlyIntent(details?.sessionKey, tn, phase, { includeActor: false });
+        if (cronIntent) return cronIntent;
         return phase === "done" ? "finished a check" : "running a check";
       }
       if (tn === "message") {
-        if (intent) return phase === "done" ? `prepared reply for ${intent}` : `preparing reply for ${intent}`;
+        const explicitIntent = extractExplicitTaskIntent(details);
+        if (explicitIntent) return phase === "done" ? `prepared reply for ${explicitIntent}` : `preparing reply for ${explicitIntent}`;
+        const cronIntent = cronFriendlyIntent(details?.sessionKey, tn, phase, { includeActor: false });
+        if (cronIntent) return cronIntent;
         return phase === "done" ? "prepared a reply" : "preparing a reply";
       }
 
@@ -1098,6 +1171,8 @@ export default {
       const details = it.details as Record<string, unknown> | null;
 
       if (it.kind === "before_agent_start") {
+        const cronStart = cronFriendlyIntent(it.sessionKey, undefined, "active", { includeActor: false });
+        if (cronStart) return `${actorPrefix}${cronStart}`.trim();
         return `${actorPrefix}started`.trim();
       }
       if (it.kind === "before_tool_call") {
