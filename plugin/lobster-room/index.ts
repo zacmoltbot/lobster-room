@@ -1361,6 +1361,15 @@ export default {
       return visible || fallback;
     };
 
+    const isUnknownChildActor = (value: unknown): boolean => value === UNKNOWN_CHILD_ACTOR_ID;
+
+    const isUserVisibleActorId = (value: unknown): boolean => {
+      if (isUnknownChildActor(value)) return false;
+      return !!canonicalVisibleAgentId(value);
+    };
+
+    const isUserVisibleFeedItem = (it: FeedItem | null | undefined): boolean => !!it && isUserVisibleActorId(it.agentId);
+
     const sanitizeFeedItemForApi = (it: FeedItem, includeRaw = false) => {
       const base = includeRaw
         ? { ...it }
@@ -2612,17 +2621,10 @@ export default {
               }
 
               const tasks = groupFeedIntoTasks(items, { includeRaw });
-              const visibleItems = items.filter((it) => !shouldSuppressFeedItem(it, items));
-
-              // Latest preview = most recent visible event, with raw fallback if everything was suppressed.
-              const last = visibleItems.length ? visibleItems[visibleItems.length - 1] : (items.length ? items[items.length - 1] : null);
-
-              // api.logger.info("[lobster-room] feedGet before sendJson", { itemsLen: items.length, tasksLen: tasks.length });
-              sendJson(res, 200, {
-                ok: true,
-                buildTagFeed: FEED_UI_VERSION,
-                latest: last ? sanitizeFeedItemForApi(last, true) : null,
-                tasks: tasks.map((t) => ({
+              const visibleItems = items.filter((it) => isUserVisibleFeedItem(it) && !shouldSuppressFeedItem(it, items));
+              const visibleTasks = tasks
+                .filter((task) => isUserVisibleActorId(task.agentId))
+                .map((t) => ({
                   id: t.id,
                   sessionKey: t.sessionKey,
                   agentId: visibleFeedAgentId(t.agentId, "unknown"),
@@ -2631,8 +2633,18 @@ export default {
                   status: t.status,
                   title: t.title,
                   summary: t.summary,
-                  items: t.items ? t.items.map((it) => sanitizeFeedItemForApi(it, includeRaw)) : undefined,
-                })),
+                  items: t.items ? t.items.filter((it) => isUserVisibleFeedItem(it)).map((it) => sanitizeFeedItemForApi(it, includeRaw)) : undefined,
+                }));
+
+              // Latest preview = most recent visible event only. Unknown/pending child activity stays internal/debug-only.
+              const last = visibleItems.length ? visibleItems[visibleItems.length - 1] : null;
+
+              // api.logger.info("[lobster-room] feedGet before sendJson", { itemsLen: items.length, tasksLen: tasks.length });
+              sendJson(res, 200, {
+                ok: true,
+                buildTagFeed: FEED_UI_VERSION,
+                latest: last ? sanitizeFeedItemForApi(last, true) : null,
+                tasks: visibleTasks,
                 rows: visibleItems.slice().reverse().map((it) => sanitizeFeedItemForApi(it, false)),
                 items: includeRaw ? items.slice().reverse().map((it) => sanitizeFeedItemForApi(it, true)) : undefined,
               });
@@ -3042,6 +3054,7 @@ export default {
           const spawnedVisible = spawnedSessionAgentIds.get(raw);
           if (spawnedVisible && spawnedVisible !== UNKNOWN_CHILD_ACTOR_ID) return { agentId: spawnedVisible, source: "spawned" };
           const parsed = parseSessionIdentity(raw);
+          if (isAdoptableChildLane(parsed.lane)) return { agentId: null, source: "none" };
           const resident = canonicalVisibleAgentId(parsed.residentAgentId);
           return { agentId: resident || null, source: resident ? "resident" : "none" };
         };
