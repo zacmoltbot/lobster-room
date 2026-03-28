@@ -1766,11 +1766,21 @@ export default {
       return adopted;
     };
 
-    const rememberSpawnedSessionAgent = async (sessionKey: unknown, agentId: unknown) => {
+    const rememberSpawnedSessionAgent = async (sessionKey: unknown, agentId: unknown, options?: { allowOverwrite?: boolean; reason?: string }) => {
       await loadSpawnAttributionState();
       const sk = typeof sessionKey === "string" ? String(sessionKey).trim() : "";
       const visible = canonicalVisibleAgentId(agentId);
       if (!sk || !visible || !shouldPersistSpawnedSessionAgent(sk, visible)) return;
+      const existing = spawnedSessionAgentIds.get(sk);
+      if (existing && existing !== visible && !options?.allowOverwrite) {
+        api.logger.warn("[lobster-room] spawned session actor mismatch; keeping original attribution", {
+          sessionKey: sk,
+          existingActorId: existing,
+          inferredActorId: visible,
+          reason: options?.reason || "unspecified",
+        });
+        return;
+      }
       spawnedSessionAgentIds.set(sk, visible);
       await persistSpawnAttributionState();
     };
@@ -2095,10 +2105,20 @@ export default {
         if (childSessionKey) {
           const pendingAttribution = await consumePendingSpawnAttribution(ctx?.sessionKey);
           const requestedSpawnAgentId = resolveRequestedSpawnAgentId(event?.params)
-            || resolveRequestedSpawnAgentId(event?.result)
-            || resolveRequestedSpawnAgentId(event)
             || pendingAttribution?.actorId;
-          await rememberSpawnedSessionAgent(childSessionKey, requestedSpawnAgentId);
+          const noisyInferredAgentId = resolveRequestedSpawnAgentId(event?.result)
+            || resolveRequestedSpawnAgentId(event);
+          await rememberSpawnedSessionAgent(childSessionKey, requestedSpawnAgentId || noisyInferredAgentId, {
+            allowOverwrite: false,
+            reason: requestedSpawnAgentId ? "sessions_spawn:payload_or_pending" : "sessions_spawn:fallback_result_inference",
+          });
+          if (requestedSpawnAgentId && noisyInferredAgentId && noisyInferredAgentId !== requestedSpawnAgentId) {
+            api.logger.warn("[lobster-room] sessions_spawn actor inference mismatch; keeping payload/pending attribution", {
+              sessionKey: childSessionKey,
+              requestedSpawnAgentId,
+              noisyInferredAgentId,
+            });
+          }
         }
         const candidates = [
           event?.result?.message,
