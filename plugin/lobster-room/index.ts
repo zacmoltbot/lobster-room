@@ -1264,6 +1264,9 @@ export default {
       const canonicalAgentId = it.agentId ? canonicalVisibleAgentId(it.agentId) || "main" : "";
       const actorPrefix = opts?.includeActor !== false && canonicalAgentId ? `@${canonicalAgentId} ` : "";
       const details = it.details as Record<string, unknown> | null;
+      const detailsWithSessionKey: Record<string, unknown> | null = details
+        ? { ...details, sessionKey: details.sessionKey ?? it.sessionKey }
+        : (it.sessionKey ? { sessionKey: it.sessionKey } : null);
 
       if (it.kind === "before_agent_start") {
         const cronStart = cronFriendlyIntent(it.sessionKey, undefined, "active", { includeActor: false });
