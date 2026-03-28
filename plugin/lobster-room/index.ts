@@ -1358,6 +1358,21 @@ export default {
       String(entry.createdAt || 0),
     ].join("\u0000");
 
+    const isAdoptableChildLane = (lane: unknown): boolean => String(lane || "").trim().toLowerCase() === "subagent";
+
+    const hasAdoptableChildProof = (sessionKey: unknown, residentAgentId?: unknown): boolean => {
+      const parsed = parseSessionIdentity(sessionKey, residentAgentId);
+      if (!isAdoptableChildLane(parsed.lane)) return false;
+      const resident = canonicalResidentAgentId(residentAgentId ?? parsed.residentAgentId);
+      return !!resident && resident === parsed.residentAgentId;
+    };
+
+    const shouldPersistSpawnedSessionAgent = (sessionKey: unknown, agentId: unknown): boolean => {
+      const visible = canonicalVisibleAgentId(agentId);
+      if (!visible) return false;
+      return hasAdoptableChildProof(sessionKey, parseSessionIdentity(sessionKey).residentAgentId);
+    };
+
     const mergePendingSpawnAttribution = (entry: PendingSpawnAttribution) => {
       const entryKey = pendingSpawnAttributionKey(entry);
       const mergeIntoBucket = (bucket: Map<string, PendingSpawnAttribution[]>, key: string) => {
@@ -1385,7 +1400,7 @@ export default {
           for (const [key, value] of Object.entries(spawned)) {
             const sk = typeof key === "string" ? key.trim() : "";
             const agentId = canonicalVisibleAgentId(value);
-            if (!sk || !agentId) continue;
+            if (!sk || !shouldPersistSpawnedSessionAgent(sk, agentId)) continue;
             if (!spawnedSessionAgentIds.has(sk)) spawnedSessionAgentIds.set(sk, agentId);
           }
         }
@@ -1447,33 +1462,43 @@ export default {
       const explicit = resolveExplicitSpawnAgentId(payload);
       if (explicit) return explicit;
       const text = [payload?.label, payload?.task, payload?.prompt, payload?.instructions]
-        .map((part) => normalizeSpawnText(part, 400).toLowerCase())
+        .map((part) => normalizeSpawnText(part, 400))
         .filter(Boolean)
         .join("\n");
       if (!text) return "";
-      const actorHints: Array<{ actorId: string; patterns: RegExp[] }> = [
+      const actorHints: Array<{ actorId: string; directivePatterns: RegExp[]; mentionPatterns: RegExp[] }> = [
         {
           actorId: "qa_agent",
-          patterns: [
-            /\bqa[_ -]?agent\b/i,
+          directivePatterns: [
             /\byou are\s+qa[_ -]?agent\b/i,
             /你是\s*qa[_ -]?agent/i,
             /角色[:：]?\s*qa[_ -]?agent/i,
           ],
+          mentionPatterns: [
+            /\bqa[_ -]?agent\b/gi,
+          ],
         },
         {
           actorId: "coding_agent",
-          patterns: [
-            /\bcoding[_ -]?agent\b/i,
+          directivePatterns: [
             /\byou are\s+coding[_ -]?agent\b/i,
             /你是\s*coding[_ -]?agent/i,
             /角色[:：]?\s*coding[_ -]?agent/i,
           ],
+          mentionPatterns: [
+            /\bcoding[_ -]?agent\b/gi,
+          ],
         },
       ];
-      for (const hint of actorHints) {
-        if (hint.patterns.some((pattern) => pattern.test(text))) return hint.actorId;
-      }
+      const directiveMatches = actorHints
+        .filter((hint) => hint.directivePatterns.some((pattern) => pattern.test(text)))
+        .map((hint) => hint.actorId);
+      if (directiveMatches.length === 1) return directiveMatches[0] || "";
+      if (directiveMatches.length > 1) return "";
+      const mentionMatches = actorHints
+        .filter((hint) => hint.mentionPatterns.some((pattern) => Array.from(text.matchAll(pattern)).length > 0))
+        .map((hint) => hint.actorId);
+      if (mentionMatches.length === 1) return mentionMatches[0] || "";
       return "";
     };
 
@@ -1536,6 +1561,7 @@ export default {
       await loadSpawnAttributionState();
       const sk = typeof sessionKey === "string" ? String(sessionKey).trim() : "";
       if (!sk) return undefined;
+      if (!hasAdoptableChildProof(sk, residentAgentId)) return undefined;
       const existingActorId = spawnedSessionAgentIds.get(sk);
       if (existingActorId) {
         return {
@@ -1548,8 +1574,17 @@ export default {
       }
       const resident = canonicalVisibleAgentId(residentAgentId);
       if (!resident) return undefined;
-      const adopted = dequeuePendingSpawnAttribution(pendingSpawnAttributionsByResident, resident);
+      const queue = pendingSpawnAttributionsByResident.get(resident) || [];
+      const adopted = queue.find((candidate) => {
+        if (!candidate) return false;
+        if (candidate.parentSessionKey === sk) return false;
+        const parentParsed = parseSessionIdentity(candidate.parentSessionKey, candidate.residentAgentId);
+        return parentParsed.residentAgentId === resident && parentParsed.lane !== "cron";
+      });
       if (!adopted) return undefined;
+      const nextResidentQueue = queue.filter((candidate) => candidate !== adopted);
+      if (nextResidentQueue.length) pendingSpawnAttributionsByResident.set(resident, nextResidentQueue);
+      else pendingSpawnAttributionsByResident.delete(resident);
       spawnedSessionAgentIds.set(sk, adopted.actorId);
       const parentQueue = pendingSpawnAttributionsByParent.get(adopted.parentSessionKey) || [];
       const nextParentQueue = parentQueue.filter((candidate) => candidate !== adopted);
@@ -1563,7 +1598,7 @@ export default {
       await loadSpawnAttributionState();
       const sk = typeof sessionKey === "string" ? String(sessionKey).trim() : "";
       const visible = canonicalVisibleAgentId(agentId);
-      if (!sk || !visible) return;
+      if (!sk || !visible || !shouldPersistSpawnedSessionAgent(sk, visible)) return;
       spawnedSessionAgentIds.set(sk, visible);
       await persistSpawnAttributionState();
     };
@@ -1594,7 +1629,7 @@ export default {
       const parsed = parseSessionIdentity(ctx?.sessionKey, ctx?.agentId);
       const rawSessionAgentId = parsed.agentId;
       const childSessionKey = typeof ctx?.sessionKey === "string" ? ctx.sessionKey.trim() : "";
-      const adoptedAttribution = childSessionKey && parsed.lane !== "main"
+      const adoptedAttribution = childSessionKey && isAdoptableChildLane(parsed.lane)
         ? await adoptPendingSpawnAttributionForSession(childSessionKey, parsed.residentAgentId)
         : undefined;
       const spawnedVisible = childSessionKey
