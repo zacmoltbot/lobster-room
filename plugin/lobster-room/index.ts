@@ -1104,6 +1104,8 @@ export default {
       return `${actor ? actor + " " : ""}${verb} ${label}`.trim();
     };
 
+    const cronStoryLabel = (details: Record<string, unknown> | null): string => cronJobLabelFromSessionKey(details?.sessionKey);
+
     const extractExplicitTaskIntent = (details: Record<string, unknown> | null): string => {
       const candidates = [details?.task, details?.label, details?.prompt, details?.goal, details?.summary, details?.title, details?.purpose, details?.name];
       for (const candidate of candidates) {
@@ -1176,6 +1178,8 @@ export default {
         return phase === "done" ? (url ? "checked live page" : "checked page") : (url ? "checking live page" : "checking page");
       }
       if (tn === "exec" || tn === "process") {
+        const cronLabel = cronStoryLabel(details);
+        if (cronLabel) return phase === "done" ? `finished ${cronLabel}` : `running ${cronLabel}`;
         if (intent) return phase === "done" ? `finished ${intent}` : `${intent}`;
         const cronIntent = cronFriendlyIntent(details?.sessionKey, tn, phase, { includeActor: false });
         if (cronIntent) return cronIntent;
@@ -1277,6 +1281,8 @@ export default {
         return `${actorPrefix}${desc}`.trim();
       }
       if (it.kind === "tool_result_persist") {
+        const cronLabel = cronStoryLabel(details);
+        if (cronLabel) return `${actorPrefix}continuing ${cronLabel}`.trim();
         const intent = extractTaskIntent(details) || fallbackTaskIntentForTool(String(it.toolName || ""), details);
         return `${actorPrefix}${intent ? `continuing ${intent}` : "continuing work"}`.trim();
       }
