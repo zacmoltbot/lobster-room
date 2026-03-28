@@ -46,7 +46,8 @@ function visibleFeedAgentId(value, fallback = 'main') {
 const isAdoptableChildLane = (lane) => String(lane || '').trim().toLowerCase() === 'subagent';
 const isUnknownChildActor = (value) => value === UNKNOWN_CHILD_ACTOR_ID;
 const isUserVisibleActorId = (value) => !isUnknownChildActor(value) && !!canonicalVisibleAgentId(value);
-const isUserVisibleFeedItem = (it) => !!it && isUserVisibleActorId(it.agentId);
+const isFeedVisibleActorId = (value) => isUnknownChildActor(value) || !!canonicalVisibleAgentId(value);
+const isUserVisibleFeedItem = (it) => !!it && isFeedVisibleActorId(it.agentId);
 
 function resolveVisibleSessionBucket(sessionKey, spawnedSessionAgentIds) {
   if (typeof sessionKey !== 'string') return { agentId: null, source: 'none' };
@@ -93,7 +94,7 @@ function feedGet(items, includeRaw = false) {
     rows: visibleItems,
     latest: visibleItems.length ? visibleItems[visibleItems.length - 1] : null,
     tasks: tasks
-      .filter((task) => isUserVisibleActorId(task.agentId))
+      .filter((task) => isFeedVisibleActorId(task.agentId))
       .map((task) => ({
         ...task,
         items: task.items ? task.items.filter((it) => isUserVisibleFeedItem(it)) : undefined,
@@ -112,9 +113,11 @@ function feedGet(items, includeRaw = false) {
   const payload = feedGet([
     { ts: 1, kind: 'before_tool_call', agentId: identity.agentId, sessionKey, toolName: 'read' },
   ], true);
-  assert.equal(payload.rows.length, 0, 'visible rows must suppress unknown child activity');
-  assert.equal(payload.tasks.length, 0, 'visible tasks must suppress unknown child activity');
-  assert.equal(payload.latest, null, 'visible latest must suppress unknown child activity');
+  assert.equal(payload.rows.length, 1, 'visible rows must keep unknown child activity visible');
+  assert.equal(payload.tasks.length, 1, 'visible tasks must keep unknown child activity visible');
+  assert.equal(payload.latest && payload.latest.agentId, UNKNOWN_CHILD_ACTOR_ID, 'visible latest must keep unknown child activity visible');
+  assert.equal(payload.rows[0].agentId, UNKNOWN_CHILD_ACTOR_ID);
+  assert.equal(payload.tasks[0].agentId, UNKNOWN_CHILD_ACTOR_ID);
   assert.equal(payload.items.length, 1, 'raw/debug payload may retain unknown child activity');
   assert.equal(payload.items[0].agentId, UNKNOWN_CHILD_ACTOR_ID);
 
@@ -136,7 +139,7 @@ function feedGet(items, includeRaw = false) {
   assert.deepEqual(payload.rows.map((row) => row.agentId), ['qa_agent', 'qa_agent']);
   assert.deepEqual(payload.tasks.map((task) => task.agentId), ['qa_agent']);
   assert.equal(payload.latest && payload.latest.agentId, 'qa_agent');
-  assert.ok(!JSON.stringify({ rows: payload.rows, tasks: payload.tasks, latest: payload.latest }).includes('unknown'), 'user-visible payload must not expose unknown');
+  assert.ok(!JSON.stringify({ rows: payload.rows, tasks: payload.tasks, latest: payload.latest }).includes('\"agentId\":\"main\"'), 'proof-bound child must not regress back to main');
 
   const bucket = resolveVisibleSessionBucket(sessionKey, spawned);
   assert.equal(bucket.agentId, 'qa_agent', 'room/Now session bucketing must stay aligned with visible proof-bound actor');

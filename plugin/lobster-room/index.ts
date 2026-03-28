@@ -1385,7 +1385,9 @@ export default {
       return !!canonicalVisibleAgentId(value);
     };
 
-    const isUserVisibleFeedItem = (it: FeedItem | null | undefined): boolean => !!it && isUserVisibleActorId(resolveVisibleFeedItemAgentId(it, ""));
+    const isFeedVisibleActorId = (value: unknown): boolean => isUnknownChildActor(value) || !!canonicalVisibleAgentId(value);
+
+    const isUserVisibleFeedItem = (it: FeedItem | null | undefined): boolean => !!it && isFeedVisibleActorId(resolveVisibleFeedItemAgentId(it, ""));
 
     const sanitizeFeedItemForApi = (it: FeedItem, includeRaw = false) => {
       const base = includeRaw
@@ -2870,7 +2872,7 @@ export default {
               const tasks = groupFeedIntoTasks(items, { includeRaw });
               const visibleItems = items.filter((it) => isUserVisibleFeedItem(it) && !shouldSuppressFeedItem(it, items));
               const visibleTasks = tasks
-                .filter((task) => isUserVisibleActorId(task.agentId))
+                .filter((task) => isFeedVisibleActorId(task.agentId))
                 .map((t) => ({
                   id: t.id,
                   sessionKey: t.sessionKey,
@@ -2883,7 +2885,7 @@ export default {
                   items: t.items ? t.items.filter((it) => isUserVisibleFeedItem(it)).map((it) => sanitizeFeedItemForApi(it, includeRaw)) : undefined,
                 }));
 
-              // Latest preview = most recent visible event only. Unknown/pending child activity stays internal/debug-only.
+              // Latest preview = most recent visible event, including unresolved child work as @unknown until canonical proof arrives.
               const last = visibleItems.length ? visibleItems[visibleItems.length - 1] : null;
 
               // api.logger.info("[lobster-room] feedGet before sendJson", { itemsLen: items.length, tasksLen: tasks.length });
@@ -3371,6 +3373,28 @@ export default {
           state === "thinking" || state === "tool" || state === "reply"
         );
 
+        const hasFreshCanonicalChildFeedCluster = (agentId: string, feedTruth: FeedItem | null): boolean => {
+          if (!feedTruth || !activityNeedsFreshSession(inferActivityFromFeedItem(feedTruth))) return false;
+          const sessionKey = typeof feedTruth.sessionKey === "string" ? feedTruth.sessionKey.trim() : "";
+          if (!sessionKey) return false;
+          if (spawnedSessionAgentIds.get(sessionKey) !== agentId) return false;
+          const parsed = parseSessionIdentity(sessionKey, agentId);
+          if (!isAdoptableChildLane(parsed.lane)) return false;
+          let hits = 0;
+          for (let i = feedBuf.length - 1; i >= 0; i -= 1) {
+            const item = feedBuf[i];
+            if (!item) continue;
+            if ((t - Number(item.ts || 0)) > staleMs) break;
+            if (resolveVisibleFeedItemAgentId(item, "") !== agentId) continue;
+            const itemSessionKey = typeof item.sessionKey === "string" ? item.sessionKey.trim() : "";
+            if (itemSessionKey !== sessionKey) continue;
+            if (!activityNeedsFreshSession(inferActivityFromFeedItem(item))) continue;
+            hits += 1;
+            if (hits >= 2) return true;
+          }
+          return false;
+        };
+
         const hasFreshCorroboratedActiveSignal = (params: {
           snapFresh: boolean;
           snapState: ActivityState | null;
@@ -3463,9 +3487,11 @@ export default {
           const snapState = snapFresh ? (snapRow.state as ActivityState) : null;
           const feedTruth = latestVisibleFeedItemForAgent(agentId);
           const feedTruthState = inferActivityFromFeedItem(feedTruth);
+          const freshCanonicalChildFeedCluster = hasFreshCanonicalChildFeedCluster(agentId, feedTruth);
           const freshActiveCorroborated = hasFreshCorroboratedActiveSignal({ snapFresh, snapState, snapRow, feedTruth, feedTruthState });
-          const snapUsable = !!(snapFresh && (!activityNeedsFreshSession(snapState) || freshSessions.length || freshActiveCorroborated));
-          const feedTruthUsable = !!(feedTruthState && (!activityNeedsFreshSession(feedTruthState) || freshSessions.length || freshActiveCorroborated));
+          const activeGrace = freshActiveCorroborated || freshCanonicalChildFeedCluster;
+          const snapUsable = !!(snapFresh && (!activityNeedsFreshSession(snapState) || freshSessions.length || activeGrace));
+          const feedTruthUsable = !!(feedTruthState && (!activityNeedsFreshSession(feedTruthState) || freshSessions.length || activeGrace));
           if (snapUsable) {
             activityState = snapState as ActivityState;
             uiState = mapActivityToUiState(activityState);
@@ -3503,6 +3529,7 @@ export default {
             feedTruthKind: feedTruth?.kind || null,
             feedTruthSessionKey: feedTruth?.sessionKey || null,
             freshActiveCorroborated,
+            freshCanonicalChildFeedCluster,
             feedTruthUsable,
             freshSessionCount: freshSessions.length,
             freshMaxUpdatedAt: freshMaxUpdatedAt || null,
