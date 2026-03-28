@@ -1546,11 +1546,22 @@ export default {
       createdAt: number;
     };
 
+    type ObservedChildSession = {
+      sessionKey: string;
+      residentAgentId: string;
+      parentSessionKeys: string[];
+      actorId?: string;
+      label?: string;
+      task?: string;
+      observedAt: number;
+    };
+
     const UNKNOWN_CHILD_ACTOR_ID = "unknown";
 
     const spawnedSessionAgentIds = new Map<string, string>();
     const pendingSpawnAttributionsByParent = new Map<string, PendingSpawnAttribution[]>();
     const pendingSpawnAttributionsByResident = new Map<string, PendingSpawnAttribution[]>();
+    const observedChildSessions = new Map<string, ObservedChildSession>();
     const spawnAttributionStatePath = join(rootUserDir, "spawn-attribution-state.json");
     let spawnAttributionStateHydrated = false;
 
@@ -1630,6 +1641,7 @@ export default {
           spawnedSessionAgentIds.clear();
           pendingSpawnAttributionsByParent.clear();
           pendingSpawnAttributionsByResident.clear();
+          observedChildSessions.clear();
           spawnAttributionStateHydrated = true;
         }
 
@@ -1662,6 +1674,27 @@ export default {
           mergePendingSpawnAttribution(entry);
         }
         prunePendingSpawnAttributions(referenceNow);
+
+        const observed = Array.isArray(data?.observedChildSessions) ? data.observedChildSessions : [];
+        for (const raw of observed) {
+          const sessionKey = typeof raw?.sessionKey === "string" ? raw.sessionKey.trim() : "";
+          if (!sessionKey || spawnedSessionAgentIds.has(sessionKey) || !hasAdoptableChildProof(sessionKey, raw?.residentAgentId)) continue;
+          const residentAgentId = canonicalResidentAgentId(raw?.residentAgentId || sessionKey);
+          if (!residentAgentId) continue;
+          const matcher = extractSpawnMatcherHints(raw);
+          const parentSessionKeys = Array.isArray(raw?.parentSessionKeys)
+            ? raw.parentSessionKeys.map((value: any) => typeof value === "string" ? value.trim() : "").filter(Boolean)
+            : [];
+          observedChildSessions.set(sessionKey, {
+            sessionKey,
+            residentAgentId,
+            parentSessionKeys: Array.from(new Set(parentSessionKeys)),
+            actorId: matcher.actorId || undefined,
+            label: matcher.label || undefined,
+            task: matcher.task || undefined,
+            observedAt: typeof raw?.observedAt === "number" && Number.isFinite(raw.observedAt) ? raw.observedAt : referenceNow,
+          });
+        }
       } catch {
         if (!spawnAttributionStateHydrated) spawnAttributionStateHydrated = true;
       }
@@ -1677,6 +1710,7 @@ export default {
         await fs.writeFile(spawnAttributionStatePath, JSON.stringify({
           spawnedSessionAgentIds: Object.fromEntries(spawnedSessionAgentIds.entries()),
           pending: Array.from(pending.values()),
+          observedChildSessions: Array.from(observedChildSessions.values()),
         }, null, 2));
       } catch {}
     };
@@ -1823,6 +1857,76 @@ export default {
 
     const resolveRequestedSpawnAgentId = (payload: any): string => inferSpawnActorId(payload);
 
+    const bindSpawnedSessionAgent = (sessionKey: unknown, agentId: unknown, options?: { allowOverwrite?: boolean; reason?: string }): boolean => {
+      const sk = typeof sessionKey === "string" ? String(sessionKey).trim() : "";
+      const visible = canonicalVisibleAgentId(agentId);
+      if (!sk || !visible || !shouldPersistSpawnedSessionAgent(sk, visible)) return false;
+      const existing = spawnedSessionAgentIds.get(sk);
+      if (existing && existing !== visible && !options?.allowOverwrite) {
+        api.logger.warn("[lobster-room] spawned session actor mismatch; keeping original attribution", {
+          sessionKey: sk,
+          existingActorId: existing,
+          inferredActorId: visible,
+          reason: options?.reason || "unspecified",
+        });
+        return false;
+      }
+      spawnedSessionAgentIds.set(sk, visible);
+      observedChildSessions.delete(sk);
+      return true;
+    };
+
+    const mergeObservedChildSession = (entry: ObservedChildSession) => {
+      const existing = observedChildSessions.get(entry.sessionKey);
+      const parentSessionKeys = Array.from(new Set([...(existing?.parentSessionKeys || []), ...(entry.parentSessionKeys || [])].filter(Boolean)));
+      observedChildSessions.set(entry.sessionKey, {
+        sessionKey: entry.sessionKey,
+        residentAgentId: entry.residentAgentId,
+        parentSessionKeys,
+        actorId: entry.actorId || existing?.actorId,
+        label: entry.label || existing?.label,
+        task: entry.task || existing?.task,
+        observedAt: Math.max(existing?.observedAt || 0, entry.observedAt || 0),
+      });
+    };
+
+    const childAdoptionMatcherFromSources = (...sources: any[]): { actorId?: string; label?: string; task?: string } => {
+      for (const source of sources) {
+        const hints = extractSpawnMatcherHints(source);
+        if (hints.actorId || hints.label || hints.task) return hints;
+      }
+      return {};
+    };
+
+    const childParentSessionKeysFromSources = (...sources: any[]): string[] => {
+      const out: string[] = [];
+      for (const source of sources) {
+        for (const candidate of resolveChildParentSessionKeys(source)) {
+          if (!candidate || out.includes(candidate)) continue;
+          out.push(candidate);
+        }
+      }
+      return out;
+    };
+
+    const observeChildSessionForSpawnAdoption = async (sessionKey: unknown, ctx?: any): Promise<ObservedChildSession | undefined> => {
+      await loadSpawnAttributionState();
+      const sk = typeof sessionKey === "string" ? String(sessionKey).trim() : "";
+      if (!sk || spawnedSessionAgentIds.has(sk)) return undefined;
+      const parsed = parseSessionIdentity(sk, ctx?.agentId);
+      if (!hasAdoptableChildProof(sk, parsed.residentAgentId)) return undefined;
+      const observed: ObservedChildSession = {
+        sessionKey: sk,
+        residentAgentId: canonicalResidentAgentId(parsed.residentAgentId),
+        parentSessionKeys: childParentSessionKeysFromSources(ctx),
+        observedAt: nowMs(),
+        ...childAdoptionMatcherFromSources(ctx),
+      };
+      mergeObservedChildSession(observed);
+      await persistSpawnAttributionState();
+      return observedChildSessions.get(sk);
+    };
+
     const enqueuePendingSpawnAttribution = (bucket: Map<string, PendingSpawnAttribution[]>, key: string, entry: PendingSpawnAttribution) => {
       bucket.set(key, (bucket.get(key) || []).concat([entry]));
     };
@@ -1899,6 +2003,10 @@ export default {
         createdAt: nowMs(),
       };
       mergePendingSpawnAttribution(entry);
+      for (const observed of Array.from(observedChildSessions.values())) {
+        if (observed.residentAgentId !== residentAgentId) continue;
+        await adoptPendingSpawnAttributionForSession(observed.sessionKey, observed);
+      }
       await persistSpawnAttributionState();
       return entry;
     };
@@ -1946,6 +2054,7 @@ export default {
       if (!hasAdoptableChildProof(sk, parsed.residentAgentId)) return undefined;
       const existingActorId = spawnedSessionAgentIds.get(sk);
       if (existingActorId) {
+        observedChildSessions.delete(sk);
         return {
           actorId: existingActorId,
           parentSessionKey: "",
@@ -1955,13 +2064,14 @@ export default {
         };
       }
 
-      const childMatcher = extractSpawnMatcherHints(ctx);
-      for (const parentSessionKey of resolveChildParentSessionKeys(ctx)) {
+      const observed = observedChildSessions.get(sk);
+      const childMatcher = childAdoptionMatcherFromSources(ctx, observed);
+      for (const parentSessionKey of childParentSessionKeysFromSources(ctx, observed)) {
         const adopted = pickPendingSpawnAttribution(pendingSpawnAttributionsByParent, parentSessionKey, childMatcher)
           || (childMatcher.actorId || childMatcher.label || childMatcher.task ? undefined : dequeuePendingSpawnAttribution(pendingSpawnAttributionsByParent, parentSessionKey));
         if (!adopted) continue;
         forgetPendingSpawnAttributionFromResident(adopted.residentAgentId, adopted);
-        spawnedSessionAgentIds.set(sk, adopted.actorId);
+        bindSpawnedSessionAgent(sk, adopted.actorId, { reason: "pending_adoption:parent" });
         await persistSpawnAttributionState();
         return adopted;
       }
@@ -1985,27 +2095,14 @@ export default {
       const nextParentQueue = parentQueue.filter((candidate) => candidate !== adopted);
       if (nextParentQueue.length) pendingSpawnAttributionsByParent.set(adopted.parentSessionKey, nextParentQueue);
       else pendingSpawnAttributionsByParent.delete(adopted.parentSessionKey);
-      spawnedSessionAgentIds.set(sk, adopted.actorId);
+      bindSpawnedSessionAgent(sk, adopted.actorId, { reason: "pending_adoption:resident" });
       await persistSpawnAttributionState();
       return adopted;
     };
 
     const rememberSpawnedSessionAgent = async (sessionKey: unknown, agentId: unknown, options?: { allowOverwrite?: boolean; reason?: string }) => {
       await loadSpawnAttributionState();
-      const sk = typeof sessionKey === "string" ? String(sessionKey).trim() : "";
-      const visible = canonicalVisibleAgentId(agentId);
-      if (!sk || !visible || !shouldPersistSpawnedSessionAgent(sk, visible)) return;
-      const existing = spawnedSessionAgentIds.get(sk);
-      if (existing && existing !== visible && !options?.allowOverwrite) {
-        api.logger.warn("[lobster-room] spawned session actor mismatch; keeping original attribution", {
-          sessionKey: sk,
-          existingActorId: existing,
-          inferredActorId: visible,
-          reason: options?.reason || "unspecified",
-        });
-        return;
-      }
-      spawnedSessionAgentIds.set(sk, visible);
+      if (!bindSpawnedSessionAgent(sessionKey, agentId, options)) return;
       await persistSpawnAttributionState();
     };
 
@@ -2041,6 +2138,9 @@ export default {
       const parsed = parseSessionIdentity(ctx?.sessionKey, ctx?.agentId);
       const rawSessionAgentId = parsed.agentId;
       const childSessionKey = typeof ctx?.sessionKey === "string" ? ctx.sessionKey.trim() : "";
+      if (childSessionKey && isAdoptableChildLane(parsed.lane) && !spawnedSessionAgentIds.get(childSessionKey)) {
+        await observeChildSessionForSpawnAdoption(childSessionKey, ctx);
+      }
       const adoptedAttribution = childSessionKey && isAdoptableChildLane(parsed.lane)
         ? await adoptPendingSpawnAttributionForSession(childSessionKey, ctx)
         : undefined;
