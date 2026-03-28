@@ -1948,6 +1948,28 @@ export default {
       return {};
     };
 
+    const childAdoptionMatcherVariants = (matcher?: { actorId?: string; label?: string; task?: string }): Array<{ actorId?: string; label?: string; task?: string }> => {
+      const normalized = {
+        actorId: canonicalVisibleAgentId(matcher?.actorId) || undefined,
+        label: normalizeSpawnText(matcher?.label, 120) || undefined,
+        task: normalizeSpawnText(matcher?.task, 240) || undefined,
+      };
+      const variants = [
+        normalized,
+        normalized.actorId ? { actorId: normalized.actorId } : undefined,
+        normalized.label ? { label: normalized.label } : undefined,
+        normalized.task ? { task: normalized.task } : undefined,
+        (!normalized.actorId && !normalized.label && !normalized.task) ? {} : undefined,
+      ].filter(Boolean) as Array<{ actorId?: string; label?: string; task?: string }>;
+      const seen = new Set<string>();
+      return variants.filter((variant) => {
+        const key = JSON.stringify(variant);
+        if (seen.has(key)) return false;
+        seen.add(key);
+        return true;
+      });
+    };
+
     const childParentSessionKeysFromSources = (...sources: any[]): string[] => {
       const out: string[] = [];
       for (const source of sources) {
@@ -2116,9 +2138,16 @@ export default {
 
       const observed = observedChildSessions.get(sk);
       const childMatcher = childAdoptionMatcherFromSources(ctx, observed);
+      const childMatcherVariants = childAdoptionMatcherVariants(childMatcher);
       for (const parentSessionKey of childParentSessionKeysFromSources(ctx, observed)) {
-        const adopted = pickPendingSpawnAttribution(pendingSpawnAttributionsByParent, parentSessionKey, childMatcher)
-          || (childMatcher.actorId || childMatcher.label || childMatcher.task ? undefined : dequeuePendingSpawnAttribution(pendingSpawnAttributionsByParent, parentSessionKey));
+        let adopted: PendingSpawnAttribution | undefined;
+        for (const matcherVariant of childMatcherVariants) {
+          adopted = pickPendingSpawnAttribution(pendingSpawnAttributionsByParent, parentSessionKey, matcherVariant);
+          if (adopted) break;
+        }
+        if (!adopted && !(childMatcher.actorId || childMatcher.label || childMatcher.task)) {
+          adopted = dequeuePendingSpawnAttribution(pendingSpawnAttributionsByParent, parentSessionKey);
+        }
         if (!adopted) continue;
         forgetPendingSpawnAttributionFromResident(adopted.residentAgentId, adopted);
         bindSpawnedSessionAgent(sk, adopted.actorId, { reason: "pending_adoption:parent" });
@@ -2136,7 +2165,11 @@ export default {
       if (!eligible.length) return undefined;
       const syntheticKey = `resident:${resident}`;
       pendingSpawnAttributionsByResident.set(syntheticKey, eligible.slice());
-      const matchedEligible = pickPendingSpawnAttribution(pendingSpawnAttributionsByResident, syntheticKey, childMatcher);
+      let matchedEligible: PendingSpawnAttribution | undefined;
+      for (const matcherVariant of childMatcherVariants) {
+        matchedEligible = pickPendingSpawnAttribution(pendingSpawnAttributionsByResident, syntheticKey, matcherVariant);
+        if (matchedEligible) break;
+      }
       pendingSpawnAttributionsByResident.delete(syntheticKey);
       const adopted = matchedEligible || (eligible.length === 1 && !(childMatcher.actorId || childMatcher.label || childMatcher.task) ? eligible[0] : undefined);
       if (!adopted) return undefined;
