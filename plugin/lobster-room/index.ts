@@ -1261,9 +1261,7 @@ export default {
 
     const feedPreview = (it: FeedItem, opts?: { includeActor?: boolean }): string => {
       // Always canonicalize agentId so internal descendant ids never leak into visible feed.
-      const canonicalAgentId = it.agentId === UNKNOWN_CHILD_ACTOR_ID
-        ? UNKNOWN_CHILD_ACTOR_ID
-        : (it.agentId ? canonicalVisibleAgentId(it.agentId) || "main" : "");
+      const canonicalAgentId = resolveVisibleFeedItemAgentId(it, "");
       const actorPrefix = opts?.includeActor !== false && canonicalAgentId && canonicalAgentId !== UNKNOWN_CHILD_ACTOR_ID ? `@${canonicalAgentId} ` : "";
       const details = it.details as Record<string, unknown> | null;
       const detailsWithSessionKey: Record<string, unknown> | null = details
@@ -1363,12 +1361,31 @@ export default {
 
     const isUnknownChildActor = (value: unknown): boolean => value === UNKNOWN_CHILD_ACTOR_ID;
 
+    const resolveVisibleFeedItemAgentId = (it: FeedItem | null | undefined, fallback = "main"): string => {
+      if (!it) return fallback;
+      if (isUnknownChildActor(it.agentId)) return UNKNOWN_CHILD_ACTOR_ID;
+      const sessionKey = typeof it.sessionKey === "string" ? it.sessionKey.trim() : "";
+      if (sessionKey) {
+        const parsed = parseSessionIdentity(sessionKey, it.agentId);
+        if (isAdoptableChildLane(parsed.lane)) {
+          const bound = spawnedSessionAgentIds.get(sessionKey);
+          if (bound && bound !== UNKNOWN_CHILD_ACTOR_ID) return bound;
+          const explicit = canonicalVisibleAgentId(it.agentId);
+          const resident = canonicalVisibleAgentId(parsed.residentAgentId);
+          const rawAgentId = typeof it.rawAgentId === "string" ? it.rawAgentId.trim() : "";
+          if (explicit && !(resident && explicit === resident && (rawAgentId || parsed.agentId !== explicit))) return explicit;
+          return UNKNOWN_CHILD_ACTOR_ID;
+        }
+      }
+      return visibleFeedAgentId(it.agentId, fallback);
+    };
+
     const isUserVisibleActorId = (value: unknown): boolean => {
       if (isUnknownChildActor(value)) return false;
       return !!canonicalVisibleAgentId(value);
     };
 
-    const isUserVisibleFeedItem = (it: FeedItem | null | undefined): boolean => !!it && isUserVisibleActorId(it.agentId);
+    const isUserVisibleFeedItem = (it: FeedItem | null | undefined): boolean => !!it && isUserVisibleActorId(resolveVisibleFeedItemAgentId(it, ""));
 
     const sanitizeFeedItemForApi = (it: FeedItem, includeRaw = false) => {
       const base = includeRaw
@@ -1388,7 +1405,7 @@ export default {
           };
       return {
         ...base,
-        agentId: visibleFeedAgentId(it.agentId),
+        agentId: resolveVisibleFeedItemAgentId(it),
         preview: feedPreview(it, { includeActor: false }),
         previewWithActor: feedPreview(it, { includeActor: true }),
       };
@@ -1409,7 +1426,7 @@ export default {
 
       for (const [sk, arr] of byKey.entries()) {
         const sorted = arr.slice().sort((a, b) => a.ts - b.ts);
-        const agentId = visibleFeedAgentId(sorted.find((x) => x.agentId)?.agentId, "unknown");
+        const agentId = resolveVisibleFeedItemAgentId(sorted.find((x) => !!x), "unknown");
         const startTs = sorted[0]?.ts || nowMs();
         const end = [...sorted].reverse().find((x) => x.kind === "agent_end");
         const status: FeedTaskStatus = end ? (end.success === false || end.error ? "error" : "done") : "running";
@@ -1421,7 +1438,7 @@ export default {
       if (noKey.length) {
         const byAgent = new Map<string, FeedItem[]>();
         for (const it of noKey) {
-          const a = visibleFeedAgentId(it.agentId, "unknown");
+          const a = resolveVisibleFeedItemAgentId(it, "unknown");
           byAgent.set(a, (byAgent.get(a) || []).concat([it]));
         }
         for (const [agentId, arr] of byAgent.entries()) {
@@ -3036,6 +3053,8 @@ export default {
           snapDisk = null;
         }
 
+        await loadSpawnAttributionState();
+
         const agentIdAllowRaw = (process.env.LOBSTER_ROOM_AGENT_IDS || "").trim();
         let allowIds: string[] = [];
         if (agentIdAllowRaw) {
@@ -3156,7 +3175,7 @@ export default {
           for (let i = source.length - 1; i >= 0; i -= 1) {
             const item = source[i];
             if (!item) continue;
-            const visibleAgentId = visibleFeedAgentId(item.agentId, "");
+            const visibleAgentId = resolveVisibleFeedItemAgentId(item, "");
             if (!visibleAgentId || visibleAgentId !== agentId) continue;
             out.push(item);
             if (out.length >= limit) break;
@@ -3190,7 +3209,7 @@ export default {
         const latestVisibleFeedItemForAgent = (agentId: string): FeedItem | null => {
           for (let i = feedBuf.length - 1; i >= 0; i -= 1) {
             const item = feedBuf[i];
-            if (!item || item.agentId !== agentId) continue;
+            if (!item || resolveVisibleFeedItemAgentId(item, "") !== agentId) continue;
             if (!Number.isFinite(Number(item.ts))) continue;
             if ((t - Number(item.ts)) > staleMs) continue;
             return item;
