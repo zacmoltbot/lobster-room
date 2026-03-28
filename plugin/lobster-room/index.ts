@@ -24,7 +24,7 @@ function sendJson(res: ServerResponse, status: number, body: unknown) {
   res.end(text);
 }
 
-const FEED_UI_VERSION = "feed-v3-20260328.1";
+const FEED_UI_VERSION = "feed-v3-20260329.1";
 
 // Maps tool names to user-facing labels for feed preview filtering.
 // Returns undefined for internal/noisy tools that should not appear in the feed label.
@@ -1309,7 +1309,14 @@ export default {
       if (it.kind === "tool_result_persist") {
         const details = (it.details as Record<string, unknown> | null) || null;
         const intent = extractTaskIntent(details) || fallbackTaskIntentForTool(String(it.toolName || ""), details);
-        return !intent;
+        if (intent) return false;
+        const resolvedAgentId = resolveVisibleFeedItemAgentId(it, "");
+        if (resolvedAgentId === UNKNOWN_CHILD_ACTOR_ID) return false;
+        const sessionKey = typeof it.sessionKey === "string" ? it.sessionKey.trim() : "";
+        if (!sessionKey) return false;
+        const sameSessionVisible = allItems.filter((candidate) => candidate !== it && candidate.sessionKey === sessionKey && isUserVisibleFeedItem(candidate));
+        const hasStory = sameSessionVisible.some((candidate) => candidate.kind === "before_agent_start" || candidate.kind === "before_tool_call" || candidate.kind === "after_tool_call" || candidate.kind === "message_sent");
+        return hasStory;
       }
       if (it.kind === "agent_end" && it.success !== false) {
         const sameSession = allItems.filter((candidate) => candidate.sessionKey && candidate.sessionKey === it.sessionKey);
@@ -1317,6 +1324,47 @@ export default {
         return hasStory;
       }
       return false;
+    };
+
+    const feedItemLatestPriority = (it: FeedItem): number => {
+      const resolvedAgentId = resolveVisibleFeedItemAgentId(it, "");
+      const sessionKey = typeof it.sessionKey === "string" ? it.sessionKey.trim() : "";
+      const parsed = sessionKey ? parseSessionIdentity(sessionKey, it.agentId) : { lane: "main" };
+      const isChildLane = isAdoptableChildLane(parsed.lane);
+      const details = (it.details as Record<string, unknown> | null) || null;
+      const hasIntent = !!(extractTaskIntent(details) || fallbackTaskIntentForTool(String(it.toolName || ""), details));
+      switch (it.kind) {
+        case "message_sent":
+        case "message_sending":
+          return 90;
+        case "after_tool_call":
+          return isChildLane ? 82 : 74;
+        case "before_tool_call":
+          if (String(it.toolName || "") === "sessions_spawn") return isChildLane ? 64 : 28;
+          return isChildLane ? 78 : 70;
+        case "tool_result_persist":
+          if (resolvedAgentId === UNKNOWN_CHILD_ACTOR_ID) return 76;
+          return hasIntent ? (isChildLane ? 80 : 72) : (isChildLane ? 68 : 40);
+        case "before_agent_start":
+          return isChildLane ? 62 : 52;
+        case "agent_end":
+          return it.success === false || !!it.error ? 85 : 18;
+        default:
+          return isChildLane ? 60 : 50;
+      }
+    };
+
+    const pickLatestVisibleFeedItem = (items: FeedItem[]): FeedItem | null => {
+      let best: FeedItem | null = null;
+      let bestScore = -Infinity;
+      for (const it of items) {
+        const score = feedItemLatestPriority(it);
+        if (!best || score > bestScore || (score === bestScore && Number(it.ts || 0) >= Number(best.ts || 0))) {
+          best = it;
+          bestScore = score;
+        }
+      }
+      return best;
     };
 
     const pushFeed = (item: FeedItem) => {
@@ -2885,8 +2933,10 @@ export default {
                   items: t.items ? t.items.filter((it) => isUserVisibleFeedItem(it)).map((it) => sanitizeFeedItemForApi(it, includeRaw)) : undefined,
                 }));
 
-              // Latest preview = most recent visible event, including unresolved child work as @unknown until canonical proof arrives.
-              const last = visibleItems.length ? visibleItems[visibleItems.length - 1] : null;
+              // Latest preview should reflect the most meaningful currently-visible work,
+              // not merely the most recent orchestration/helper bookkeeping row.
+              // Keep unresolved child work visible as @unknown until canonical proof arrives.
+              const last = pickLatestVisibleFeedItem(visibleItems);
 
               // api.logger.info("[lobster-room] feedGet before sendJson", { itemsLen: items.length, tasksLen: tasks.length });
               sendJson(res, 200, {
