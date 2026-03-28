@@ -1212,6 +1212,19 @@ export default {
       return firstToolItem ? fallbackTaskIntentForTool(String(firstToolItem.toolName || ""), (firstToolItem.details as Record<string, unknown> | null) || null) : "";
     };
 
+    const inferTaskTitleIntentFromItems = (items: FeedItem[]): string => {
+      for (const it of items) {
+        if (it.kind !== "before_tool_call") continue;
+        const details = (it.details as Record<string, unknown> | null) || null;
+        const cronLabel = cronJobLabelFromSessionKey(details?.sessionKey);
+        if (cronLabel) return cronLabel;
+        const intent = extractTaskIntent(details);
+        if (intent) return intent;
+      }
+      const firstToolItem = items.find((x) => x.kind === "before_tool_call" && x.toolName);
+      return firstToolItem ? fallbackTaskIntentForTool(String(firstToolItem.toolName || ""), (firstToolItem.details as Record<string, unknown> | null) || null) : "";
+    };
+
     const GENERIC_TASK_TITLE_RE = /^(working|in progress|run command|check process|summarize)$/i;
 
     const taskTitleFromIntent = (intent: string): string => {
@@ -1318,7 +1331,7 @@ export default {
     };
 
     const taskTitleFromItems = (items: FeedItem[]): string => {
-      const intent = inferTaskIntentFromItems(items);
+      const intent = inferTaskTitleIntentFromItems(items);
       return taskTitleFromIntent(intent);
     };
 

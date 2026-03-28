@@ -19,11 +19,39 @@ function sentenceCase(value) {
   return text ? text.charAt(0).toUpperCase() + text.slice(1) : '';
 }
 
+function cronJobLabelFromSessionKey(sessionKey) {
+  const sk = typeof sessionKey === 'string' ? sessionKey.trim() : '';
+  const match = sk.match(/^agent:([^:]+):cron:([^:]+)$/i);
+  if (!match) return '';
+  const rawJobId = String(match[2] || '').trim();
+  if (!rawJobId) return '';
+  const named = new Map([
+    ['8267978b-1135-4736-973b-ed370beec448', 'Gmail Checker (pre-gate)'],
+    ['807dbcb2-16df-4eef-b2ec-a74fdce0ed96', 'AI News Digest'],
+  ]).get(rawJobId);
+  if (named) return named;
+  return rawJobId.replace(/[_-]+/g, ' ').replace(/\s+/g, ' ').trim();
+}
+
+function cronFriendlyIntent(sessionKey, toolName, phase = 'active', opts) {
+  const label = cronJobLabelFromSessionKey(sessionKey);
+  if (!label) return '';
+  const verb = (() => {
+    const tn = String(toolName || '').trim();
+    if (tn === 'message') return phase === 'done' ? 'posted' : 'posting';
+    if (tn === 'browser' || tn === 'web_fetch') return phase === 'done' ? 'checked' : 'checking';
+    return phase === 'done' ? 'ran' : 'running';
+  })();
+  return `${verb} ${label}`.trim();
+}
+
 function extractTaskIntent(details) {
   for (const candidate of [details?.task, details?.label, details?.prompt, details?.goal, details?.summary, details?.title, details?.purpose, details?.name]) {
     const text = normalizeIntentText(candidate, 120);
     if (text) return text;
   }
+  const cronIntent = cronFriendlyIntent(details?.sessionKey, details?.toolName, 'active', { includeActor: false });
+  if (cronIntent) return cronIntent;
   return '';
 }
 
@@ -63,6 +91,18 @@ function inferTaskIntentFromItems(items) {
   return firstToolItem ? fallbackTaskIntentForTool(firstToolItem.toolName, firstToolItem.details || null) : '';
 }
 
+function inferTaskTitleIntentFromItems(items) {
+  for (const it of items) {
+    if (it.kind !== 'before_tool_call') continue;
+    const cronLabel = cronJobLabelFromSessionKey(it.details?.sessionKey);
+    if (cronLabel) return cronLabel;
+    const intent = extractTaskIntent(it.details || null);
+    if (intent) return intent;
+  }
+  const firstToolItem = items.find((x) => x.kind === 'before_tool_call' && x.toolName);
+  return firstToolItem ? fallbackTaskIntentForTool(firstToolItem.toolName, firstToolItem.details || null) : '';
+}
+
 const GENERIC_TASK_TITLE_RE = /^(working|in progress|run command|check process|summarize)$/i;
 function taskTitleFromIntent(intent) {
   const clean = normalizeIntentText(intent, 120);
@@ -83,7 +123,7 @@ function taskSummaryFromIntent(intent, status, steps = 0, msgSent = 0, msgFail =
 }
 
 function taskTitleFromItems(items) {
-  return taskTitleFromIntent(inferTaskIntentFromItems(items));
+  return taskTitleFromIntent(inferTaskTitleIntentFromItems(items));
 }
 
 function taskSummaryFromItems(items, status) {
@@ -121,5 +161,19 @@ const genericUnknownItems = [
 assert.equal(taskTitleFromItems(genericUnknownItems), 'Inspect runtime');
 assert.equal(taskSummaryFromItems(genericUnknownItems, 'running'), 'Now inspect runtime');
 assert.ok(!/Active task|run a check/i.test(`${taskTitleFromItems(genericUnknownItems)} :: ${taskSummaryFromItems(genericUnknownItems, 'running')}`));
+
+const cronNamedItems = [
+  {
+    kind: 'before_tool_call',
+    toolName: 'browser',
+    details: {
+      toolName: 'browser',
+      sessionKey: 'agent:main:cron:8267978b-1135-4736-973b-ed370beec448',
+    },
+  },
+];
+assert.equal(taskTitleFromItems(cronNamedItems), 'Gmail Checker (pre-gate)');
+assert.equal(taskSummaryFromItems(cronNamedItems, 'running'), 'Now checking Gmail Checker (pre-gate)');
+assert.ok(!/^Checking Gmail Checker/i.test(taskTitleFromItems(cronNamedItems)));
 
 console.log('feed-task-humanization: PASS');
