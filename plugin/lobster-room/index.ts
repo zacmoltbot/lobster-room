@@ -2524,13 +2524,20 @@ export default {
       // BEFORE the async resolveFeedAgentIdentity call. The child session's hooks
       // fire during sessions_spawn execution (before parent receives result),
       // so this write must happen at start-up, not after sessions_spawn returns.
+      // NOTE: Use parentAgentId DIRECTLY (not canonicalVisibleAgentId) because
+      // canonicalVisibleAgentId("main") = "" (empty/falsy), causing the set() to be
+      // skipped. This left spawnedSessionAgentIds empty for "main" parent agents,
+      // making Plan B's adoption the ONLY path — but if adoption missed (e.g. due to
+      // timing or parentSessionKey not in ctx), feed fell back to "main" incorrectly.
+      // Writing the raw parentAgentId as a placeholder ensures spawnedSessionAgentIds
+      // is never empty; Plan B's adoptPendingSpawnAttributionForSession will overwrite
+      // it with the correct actorId = "qa_agent" when adoption succeeds.
       const childSessionKey = typeof ctx?.sessionKey === "string" ? ctx.sessionKey.trim() : "";
       const parentSessionKey = hookCtx?.parentSessionKey || (ctx as any)?.parentSessionKey;
       if (childSessionKey && parentSessionKey && isAdoptableChildLane(parseSessionIdentity(childSessionKey).lane)) {
         const parentAgentId = hookCtx?.residentAgentId || (ctx as any)?.residentAgentId;
-        if (parentAgentId) {
-          const visible = canonicalVisibleAgentId(parentAgentId);
-          if (visible) spawnedSessionAgentIds.set(childSessionKey, visible);
+        if (parentAgentId && String(parentAgentId).trim()) {
+          spawnedSessionAgentIds.set(childSessionKey, String(parentAgentId).trim());
         }
       }
 
