@@ -2496,13 +2496,22 @@ export default {
     };
 
     // Hooks → real runtime state
-    const resolveAgentId = async (ctx: any): Promise<string> => {
-      const identity = await resolveFeedAgentIdentity(ctx);
+    const buildHookAttributionContext = (event: any, ctx: any): any => {
+      const merged = ctx && typeof ctx === "object" ? { ...ctx } : {};
+      if (event !== undefined && merged.event === undefined) merged.event = event;
+      if (merged.payload === undefined) merged.payload = event?.params ?? event?.payload;
+      if (merged.data === undefined) merged.data = event?.data;
+      if (merged.details === undefined) merged.details = event?.details ?? event?.result?.details;
+      return merged;
+    };
+
+    const resolveAgentId = async (ctx: any, event?: any): Promise<string> => {
+      const identity = await resolveFeedAgentIdentity(buildHookAttributionContext(event, ctx));
       return identity.agentId;
     };
 
-    api.on("before_agent_start", async (_event, ctx) => {
-      const agentIdentity = await resolveFeedAgentIdentity(ctx);
+    api.on("before_agent_start", async (event, ctx) => {
+      const agentIdentity = await resolveFeedAgentIdentity(buildHookAttributionContext(event, ctx));
       const agentId = agentIdentity.agentId;
       const snapshotAgentId = resolveSnapshotWriterAgentId(agentIdentity);
       // api.logger.info("[lobster-room] hook before_agent_start", { buildTag: BUILD_TAG, agentId, sessionKey: ctx?.sessionKey });
@@ -2512,12 +2521,13 @@ export default {
     });
 
     api.on("before_tool_call", async (event, ctx) => {
+      const hookCtx = buildHookAttributionContext(event, ctx);
       const toolName = event?.toolName || event?.tool || event?.name;
       const p = event?.params || null;
       const pendingAttribution = toolName === "sessions_spawn"
         ? await rememberPendingSpawnAttribution(ctx?.sessionKey, p)
         : undefined;
-      const agentIdentity = await resolveFeedAgentIdentity(ctx);
+      const agentIdentity = await resolveFeedAgentIdentity(hookCtx);
       const agentId = agentIdentity.agentId;
       const snapshotAgentId = resolveSnapshotWriterAgentId(agentIdentity);
       const internalObservation = isInternalObservationToolCall(toolName, ctx);
@@ -2582,7 +2592,8 @@ export default {
     });
 
     api.on("after_tool_call", async (event, ctx) => {
-      const agentIdentity = await resolveFeedAgentIdentity(ctx);
+      const hookCtx = buildHookAttributionContext(event, ctx);
+      const agentIdentity = await resolveFeedAgentIdentity(hookCtx);
       const agentId = agentIdentity.agentId;
       const snapshotAgentId = resolveSnapshotWriterAgentId(agentIdentity);
       const toolName = event?.toolName;
@@ -2649,7 +2660,8 @@ export default {
 
     // Some tools may not reliably fire after_tool_call in all paths; use persist as a backup.
     api.on("tool_result_persist", async (event, ctx) => {
-      const agentIdentity = await resolveFeedAgentIdentity(ctx);
+      const hookCtx = buildHookAttributionContext(event, ctx);
+      const agentIdentity = await resolveFeedAgentIdentity(hookCtx);
       const agentId = agentIdentity.agentId;
       const snapshotAgentId = resolveSnapshotWriterAgentId(agentIdentity);
       const toolName = event?.toolName;
@@ -2716,7 +2728,7 @@ export default {
     });
 
     api.on("agent_end", async (event, ctx) => {
-      const agentIdentity = await resolveFeedAgentIdentity(ctx);
+      const agentIdentity = await resolveFeedAgentIdentity(buildHookAttributionContext(event, ctx));
       const agentId = agentIdentity.agentId;
       const snapshotAgentId = resolveSnapshotWriterAgentId(agentIdentity);
       pushEvent("agent_end", { agentId, data: { success: event?.success, error: event?.error, sessionKey: ctx?.sessionKey } });
