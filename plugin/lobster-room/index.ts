@@ -2203,7 +2203,7 @@ export default {
         return adopted;
       }
 
-      const resident = canonicalVisibleAgentId(parsed.residentAgentId);
+      const resident = canonicalResidentAgentId(parsed.residentAgentId);
       if (!resident) return undefined;
       const eligible = (pendingSpawnAttributionsByResident.get(resident) || []).filter((candidate) => {
         if (!candidate) return false;
