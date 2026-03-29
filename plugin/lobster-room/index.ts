@@ -2755,7 +2755,9 @@ export default {
         }
         if (!found) {
           const fallback = canonicalVisibleAgentId(rawSessionAgentId)
-            || (isAdoptableChildLane(parsed.lane) ? UNKNOWN_CHILD_ACTOR_ID : (canonicalVisibleAgentId(parsed.residentAgentId) || "main"));
+            || (isAdoptableChildLane(parsed.lane)
+              ? (parsed.residentAgentId ? canonicalVisibleAgentId(parsed.residentAgentId) : UNKNOWN_CHILD_ACTOR_ID)
+              : (canonicalVisibleAgentId(parsed.residentAgentId) || "main"));
           agentId = fallback;
           rawAgentId = rawSessionAgentId && rawSessionAgentId !== fallback ? rawSessionAgentId : undefined;
           identitySource = "fallback";
