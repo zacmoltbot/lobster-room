@@ -1587,6 +1587,7 @@ export default {
     };
 
     type PendingSpawnAttribution = {
+      intentId: string;
       actorId: string;
       parentSessionKey: string;
       residentAgentId: string;
@@ -1594,6 +1595,8 @@ export default {
       task?: string;
       source: "explicit" | "inferred";
       createdAt: number;
+      childSessionKey?: string;
+      boundAt?: number;
     };
 
     type ObservedChildSession = {
@@ -1616,20 +1619,13 @@ export default {
     let spawnAttributionStateHydrated = false;
 
     const PENDING_SPAWN_ATTRIBUTION_TTL_MS = 30 * 60 * 1000;
+    let spawnIntentSeq = 0;
 
-    const pendingSpawnAttributionIdentityKey = (entry: PendingSpawnAttribution): string => [
-      entry.parentSessionKey,
-      entry.residentAgentId,
-      entry.actorId,
-      entry.label || "",
-      entry.task || "",
-      entry.source,
-    ].join("\u0000");
+    const nextSpawnIntentId = (): string => `spawn-intent:${Date.now()}:${process.pid}:${spawnIntentSeq += 1}`;
 
-    const pendingSpawnAttributionKey = (entry: PendingSpawnAttribution): string => [
-      pendingSpawnAttributionIdentityKey(entry),
-      String(entry.createdAt || 0),
-    ].join("\u0000");
+    const pendingSpawnAttributionIdentityKey = (entry: PendingSpawnAttribution): string => String(entry.intentId || "").trim();
+
+    const pendingSpawnAttributionKey = (entry: PendingSpawnAttribution): string => String(entry.intentId || "").trim();
 
     const isAdoptableChildLane = (lane: unknown): boolean => String(lane || "").trim().toLowerCase() === "subagent";
 
@@ -1720,6 +1716,9 @@ export default {
             task: normalizeSpawnText(raw?.task, 240) || undefined,
             source: raw?.source === "explicit" ? "explicit" : "inferred",
             createdAt: typeof raw?.createdAt === "number" && Number.isFinite(raw.createdAt) ? raw.createdAt : referenceNow,
+            intentId: typeof raw?.intentId === "string" && raw.intentId.trim() ? raw.intentId.trim() : nextSpawnIntentId(),
+            childSessionKey: typeof raw?.childSessionKey === "string" && raw.childSessionKey.trim() ? raw.childSessionKey.trim() : undefined,
+            boundAt: typeof raw?.boundAt === "number" && Number.isFinite(raw.boundAt) ? raw.boundAt : undefined,
           };
           mergePendingSpawnAttribution(entry);
         }
@@ -2019,31 +2018,9 @@ export default {
       const queue = bucket.get(key) || [];
       if (!queue.length) return undefined;
       const actorId = canonicalVisibleAgentId(matcher?.actorId);
-      const label = normalizeSpawnText(matcher?.label, 120);
-      const task = normalizeSpawnText(matcher?.task, 240);
-      const scored = queue.map((entry, index) => {
-        let score = 0;
-        if (actorId) {
-          if (entry.actorId !== actorId) return { entry, index, score: -1 };
-          score += 8;
-        }
-        if (label) {
-          if (normalizeSpawnText(entry.label, 120) !== label) return { entry, index, score: -1 };
-          score += 4;
-        }
-        if (task) {
-          if (normalizeSpawnText(entry.task, 240) !== task) return { entry, index, score: -1 };
-          score += 4;
-        }
-        if (!actorId && !label && !task) score = 1;
-        else if (entry.source === "explicit") score += 1;
-        return { entry, index, score };
-      }).filter((candidate) => candidate.score >= 0);
-      if (!scored.length) return undefined;
-      const bestScore = Math.max(...scored.map((candidate) => candidate.score));
-      const winners = scored.filter((candidate) => candidate.score === bestScore);
-      if (bestScore <= 0 || winners.length !== 1) return undefined;
-      const [picked] = queue.splice(winners[0]!.index, 1);
+      const matchingIndex = actorId ? queue.findIndex((entry) => entry.actorId === actorId) : 0;
+      if (matchingIndex < 0) return undefined;
+      const [picked] = queue.splice(matchingIndex, 1);
       if (queue.length) bucket.set(key, queue);
       else bucket.delete(key);
       return picked;
@@ -2066,6 +2043,7 @@ export default {
       if (!residentAgentId) return undefined;
       const explicit = resolveExplicitSpawnAgentId(payload);
       const entry: PendingSpawnAttribution = {
+        intentId: nextSpawnIntentId(),
         actorId,
         parentSessionKey: sk,
         residentAgentId,
@@ -2093,7 +2071,7 @@ export default {
       const sk = typeof parentSessionKey === "string" ? String(parentSessionKey).trim() : "";
       if (!sk) return undefined;
       const next = matcher
-        ? (pickPendingSpawnAttribution(pendingSpawnAttributionsByParent, sk, matcher) || dequeuePendingSpawnAttribution(pendingSpawnAttributionsByParent, sk))
+        ? pickPendingSpawnAttribution(pendingSpawnAttributionsByParent, sk, matcher)
         : dequeuePendingSpawnAttribution(pendingSpawnAttributionsByParent, sk);
       if (!next) return undefined;
       forgetPendingSpawnAttributionFromResident(next.residentAgentId, next);
@@ -2128,29 +2106,27 @@ export default {
       if (existingActorId) {
         observedChildSessions.delete(sk);
         return {
+          intentId: `bound:${sk}`,
           actorId: existingActorId,
           parentSessionKey: "",
           residentAgentId: canonicalResidentAgentId(parsed.residentAgentId),
           source: "explicit",
           createdAt: 0,
+          childSessionKey: sk,
+          boundAt: nowMs(),
         };
       }
 
       const observed = observedChildSessions.get(sk);
       const childMatcher = childAdoptionMatcherFromSources(ctx, observed);
-      const childMatcherVariants = childAdoptionMatcherVariants(childMatcher);
+      const actorScopedMatcher = childMatcher.actorId ? { actorId: childMatcher.actorId } : undefined;
       for (const parentSessionKey of childParentSessionKeysFromSources(ctx, observed)) {
-        let adopted: PendingSpawnAttribution | undefined;
-        for (const matcherVariant of childMatcherVariants) {
-          adopted = pickPendingSpawnAttribution(pendingSpawnAttributionsByParent, parentSessionKey, matcherVariant);
-          if (adopted) break;
-        }
-        if (!adopted && !(childMatcher.actorId || childMatcher.label || childMatcher.task)) {
-          adopted = dequeuePendingSpawnAttribution(pendingSpawnAttributionsByParent, parentSessionKey);
-        }
+        const adopted = pickPendingSpawnAttribution(pendingSpawnAttributionsByParent, parentSessionKey, actorScopedMatcher);
         if (!adopted) continue;
         forgetPendingSpawnAttributionFromResident(adopted.residentAgentId, adopted);
-        bindSpawnedSessionAgent(sk, adopted.actorId, { reason: "pending_adoption:parent" });
+        adopted.childSessionKey = sk;
+        adopted.boundAt = nowMs();
+        bindSpawnedSessionAgent(sk, adopted.actorId, { reason: "pending_adoption:parent_intent" });
         await persistSpawnAttributionState();
         return adopted;
       }
@@ -2162,23 +2138,19 @@ export default {
         const parentParsed = parseSessionIdentity(candidate.parentSessionKey, candidate.residentAgentId);
         return parentParsed.residentAgentId === resident && parentParsed.lane !== "cron";
       });
-      if (!eligible.length) return undefined;
-      const syntheticKey = `resident:${resident}`;
-      pendingSpawnAttributionsByResident.set(syntheticKey, eligible.slice());
-      let matchedEligible: PendingSpawnAttribution | undefined;
-      for (const matcherVariant of childMatcherVariants) {
-        matchedEligible = pickPendingSpawnAttribution(pendingSpawnAttributionsByResident, syntheticKey, matcherVariant);
-        if (matchedEligible) break;
-      }
-      pendingSpawnAttributionsByResident.delete(syntheticKey);
-      const adopted = matchedEligible || (eligible.length === 1 && !(childMatcher.actorId || childMatcher.label || childMatcher.task) ? eligible[0] : undefined);
+      if (eligible.length !== 1) return undefined;
+      const adopted = childMatcher.actorId && eligible[0]?.actorId !== canonicalVisibleAgentId(childMatcher.actorId)
+        ? undefined
+        : eligible[0];
       if (!adopted) return undefined;
       forgetPendingSpawnAttributionFromResident(resident, adopted);
       const parentQueue = pendingSpawnAttributionsByParent.get(adopted.parentSessionKey) || [];
       const nextParentQueue = parentQueue.filter((candidate) => candidate !== adopted);
       if (nextParentQueue.length) pendingSpawnAttributionsByParent.set(adopted.parentSessionKey, nextParentQueue);
       else pendingSpawnAttributionsByParent.delete(adopted.parentSessionKey);
-      bindSpawnedSessionAgent(sk, adopted.actorId, { reason: "pending_adoption:resident" });
+      adopted.childSessionKey = sk;
+      adopted.boundAt = nowMs();
+      bindSpawnedSessionAgent(sk, adopted.actorId, { reason: "pending_adoption:resident_single_intent" });
       await persistSpawnAttributionState();
       return adopted;
     };
