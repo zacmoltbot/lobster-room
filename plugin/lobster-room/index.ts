@@ -2018,9 +2018,31 @@ export default {
       const queue = bucket.get(key) || [];
       if (!queue.length) return undefined;
       const actorId = canonicalVisibleAgentId(matcher?.actorId);
-      const matchingIndex = actorId ? queue.findIndex((entry) => entry.actorId === actorId) : 0;
-      if (matchingIndex < 0) return undefined;
-      const [picked] = queue.splice(matchingIndex, 1);
+      const label = normalizeSpawnText(matcher?.label, 120);
+      const task = normalizeSpawnText(matcher?.task, 240);
+      const scored = queue.map((entry, index) => {
+        let score = 0;
+        if (actorId) {
+          if (entry.actorId !== actorId) return { entry, index, score: -1 };
+          score += 8;
+        }
+        if (label) {
+          if (normalizeSpawnText(entry.label, 120) !== label) return { entry, index, score: -1 };
+          score += 4;
+        }
+        if (task) {
+          if (normalizeSpawnText(entry.task, 240) !== task) return { entry, index, score: -1 };
+          score += 4;
+        }
+        if (!actorId && !label && !task) score = 1;
+        else if (entry.source === "explicit") score += 1;
+        return { entry, index, score };
+      }).filter((candidate) => candidate.score >= 0);
+      if (!scored.length) return undefined;
+      const bestScore = Math.max(...scored.map((candidate) => candidate.score));
+      const winners = scored.filter((candidate) => candidate.score === bestScore);
+      if (bestScore <= 0 || winners.length !== 1) return undefined;
+      const [picked] = queue.splice(winners[0].index, 1);
       if (queue.length) bucket.set(key, queue);
       else bucket.delete(key);
       return picked;
@@ -2119,9 +2141,12 @@ export default {
 
       const observed = observedChildSessions.get(sk);
       const childMatcher = childAdoptionMatcherFromSources(ctx, observed);
-      const actorScopedMatcher = childMatcher.actorId ? { actorId: childMatcher.actorId } : undefined;
       for (const parentSessionKey of childParentSessionKeysFromSources(ctx, observed)) {
-        const adopted = pickPendingSpawnAttribution(pendingSpawnAttributionsByParent, parentSessionKey, actorScopedMatcher);
+        let adopted: PendingSpawnAttribution | undefined;
+        for (const variant of childAdoptionMatcherVariants(childMatcher)) {
+          adopted = pickPendingSpawnAttribution(pendingSpawnAttributionsByParent, parentSessionKey, variant);
+          if (adopted) break;
+        }
         if (!adopted) continue;
         forgetPendingSpawnAttributionFromResident(adopted.residentAgentId, adopted);
         adopted.childSessionKey = sk;
