@@ -2511,6 +2511,11 @@ export default {
     };
 
     api.on("before_agent_start", async (event, ctx) => {
+      api.logger.info("[lobster-room] before_agent_start ctx.session.agentId", {
+        agentId: ctx?.session?.agentId,
+        sessionKey: ctx?.sessionKey,
+        rawAgentId: ctx?.session?.agentId
+      });
       const hookCtx = buildHookAttributionContext(event, ctx);
 
       // Plan A fix: for child sessions, synchronously write spawnedSessionAgentIds
