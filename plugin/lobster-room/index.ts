@@ -2163,10 +2163,42 @@ export default {
         const parentParsed = parseSessionIdentity(candidate.parentSessionKey, candidate.residentAgentId);
         return parentParsed.residentAgentId === resident && parentParsed.lane !== "cron";
       });
-      if (eligible.length !== 1) return undefined;
-      const adopted = childMatcher.actorId && eligible[0]?.actorId !== canonicalVisibleAgentId(childMatcher.actorId)
-        ? undefined
-        : eligible[0];
+      if (!eligible.length) return undefined;
+      let adopted: PendingSpawnAttribution | undefined;
+      const residentMatcherVariants = childAdoptionMatcherVariants(childMatcher);
+      for (const variant of residentMatcherVariants) {
+        const actorId = canonicalVisibleAgentId(variant.actorId);
+        const label = normalizeSpawnText(variant.label, 120);
+        const task = normalizeSpawnText(variant.task, 240);
+        const scored = eligible.map((entry, index) => {
+          let score = 0;
+          if (actorId) {
+            if (entry.actorId !== actorId) return { entry, index, score: -1 };
+            score += 8;
+          }
+          if (label) {
+            if (normalizeSpawnText(entry.label, 120) !== label) return { entry, index, score: -1 };
+            score += 4;
+          }
+          if (task) {
+            if (normalizeSpawnText(entry.task, 240) !== task) return { entry, index, score: -1 };
+            score += 4;
+          }
+          if (!actorId && !label && !task) {
+            if (eligible.length !== 1) return { entry, index, score: -1 };
+            score = 1;
+          } else if (entry.source === "explicit") {
+            score += 1;
+          }
+          return { entry, index, score };
+        }).filter((candidate) => candidate.score >= 0);
+        if (!scored.length) continue;
+        const bestScore = Math.max(...scored.map((candidate) => candidate.score));
+        const winners = scored.filter((candidate) => candidate.score === bestScore);
+        if (bestScore <= 0 || winners.length !== 1) continue;
+        adopted = winners[0]?.entry;
+        if (adopted) break;
+      }
       if (!adopted) return undefined;
       forgetPendingSpawnAttributionFromResident(resident, adopted);
       const parentQueue = pendingSpawnAttributionsByParent.get(adopted.parentSessionKey) || [];
@@ -2175,7 +2207,7 @@ export default {
       else pendingSpawnAttributionsByParent.delete(adopted.parentSessionKey);
       adopted.childSessionKey = sk;
       adopted.boundAt = nowMs();
-      bindSpawnedSessionAgent(sk, adopted.actorId, { reason: "pending_adoption:resident_single_intent" });
+      bindSpawnedSessionAgent(sk, adopted.actorId, { reason: "pending_adoption:resident_scored_match" });
       await persistSpawnAttributionState();
       return adopted;
     };
@@ -3309,6 +3341,13 @@ export default {
           const snapAgentIds = snapDisk && snapDisk.agents ? Object.keys(snapDisk.agents) : [];
           for (const rawId of snapAgentIds) {
             const id = canonicalResidentAgentId(rawId);
+            if (id && !seen.has(id)) {
+              ids.push(id);
+              seen.add(id);
+            }
+          }
+          for (const visibleActorId of spawnedSessionAgentIds.values()) {
+            const id = canonicalResidentAgentId(visibleActorId);
             if (id && !seen.has(id)) {
               ids.push(id);
               seen.add(id);
