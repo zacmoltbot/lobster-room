@@ -1421,7 +1421,8 @@ export default {
           const explicit = canonicalVisibleAgentId(it.agentId);
           const resident = canonicalVisibleAgentId(parsed.residentAgentId);
           const rawAgentId = typeof it.rawAgentId === "string" ? it.rawAgentId.trim() : "";
-          if (explicit && !(resident && explicit === resident && (rawAgentId || parsed.agentId !== explicit))) return explicit;
+          if (explicit && !(resident && explicit === resident && !!rawAgentId && parsed.agentId !== explicit)) return explicit;
+          if (explicit && parsed.agentId !== explicit) return explicit;
           return UNKNOWN_CHILD_ACTOR_ID;
         }
       }
