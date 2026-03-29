@@ -2637,6 +2637,19 @@ export default {
           if (resolvedAgentId) {
             const visible = canonicalVisibleAgentId(resolvedAgentId);
             spawnedSessionAgentIds.set(childSessionKey, visible);
+          } else {
+            // Fallback: try to find pending attribution by resident agent ID
+            // This helps when child session hooks fire before parent's sessions_spawn returns
+            await loadSpawnAttributionState();
+            const resident = canonicalVisibleAgentId(ctx?.agentId || ctx?.session?.agentId);
+            const residentPending = pendingSpawnAttributionsByResident.get(resident) || [];
+            if (residentPending.length > 0) {
+              const pending = residentPending[0]; // Use first pending
+              if (pending?.actorId) {
+                const fallbackVisible = canonicalVisibleAgentId(pending.actorId);
+                spawnedSessionAgentIds.set(childSessionKey, fallbackVisible);
+              }
+            }
           }
           await rememberSpawnedSessionAgent(childSessionKey, resolvedAgentId, {
             allowOverwrite: false,
