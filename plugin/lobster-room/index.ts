@@ -2506,7 +2506,7 @@ export default {
     };
 
     const resolveAgentId = async (ctx: any, event?: any): Promise<string> => {
-      const identity = await resolveFeedAgentIdentity(buildHookAttributionContext(event, ctx));
+      const identity = await resolveFeedAgentIdentity(buildHookAttributionContext(event, ctx), ctx?.session?.agentId);
       return identity.agentId;
     };
 
@@ -2543,7 +2543,7 @@ export default {
       const pendingAttribution = toolName === "sessions_spawn"
         ? await rememberPendingSpawnAttribution(ctx?.sessionKey, p)
         : undefined;
-      const agentIdentity = await resolveFeedAgentIdentity(hookCtx);
+      const agentIdentity = await resolveFeedAgentIdentity(hookCtx, ctx?.session?.agentId);
       const agentId = agentIdentity.agentId;
       const snapshotAgentId = resolveSnapshotWriterAgentId(agentIdentity);
       const internalObservation = isInternalObservationToolCall(toolName, ctx);
@@ -2609,7 +2609,7 @@ export default {
 
     api.on("after_tool_call", async (event, ctx) => {
       const hookCtx = buildHookAttributionContext(event, ctx);
-      const agentIdentity = await resolveFeedAgentIdentity(hookCtx);
+      const agentIdentity = await resolveFeedAgentIdentity(hookCtx, ctx?.session?.agentId);
       const agentId = agentIdentity.agentId;
       const snapshotAgentId = resolveSnapshotWriterAgentId(agentIdentity);
       const toolName = event?.toolName;
@@ -2774,7 +2774,7 @@ export default {
       // Kick off async child-session adoption in the background (fire-and-forget).
       // This does not block the synchronous state write below.
       if (childSessionKey && isAdoptableChildLane(parsed.lane) && identitySource !== "spawned") {
-        resolveFeedAgentIdentity(hookCtx).catch(() => {/* intentionally ignored */});
+        resolveFeedAgentIdentity(hookCtx, ctx?.session?.agentId).catch(() => {/* intentionally ignored */});
       }
 
       if (!internalObservation) {
@@ -2839,7 +2839,7 @@ export default {
     });
 
     api.on("agent_end", async (event, ctx) => {
-      const agentIdentity = await resolveFeedAgentIdentity(buildHookAttributionContext(event, ctx));
+      const agentIdentity = await resolveFeedAgentIdentity(buildHookAttributionContext(event, ctx), ctx?.session?.agentId);
       const agentId = agentIdentity.agentId;
       const snapshotAgentId = resolveSnapshotWriterAgentId(agentIdentity);
       pushEvent("agent_end", { agentId, data: { success: event?.success, error: event?.error, sessionKey: ctx?.sessionKey } });
