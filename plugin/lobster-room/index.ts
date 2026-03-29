@@ -2659,13 +2659,79 @@ export default {
     });
 
     // Some tools may not reliably fire after_tool_call in all paths; use persist as a backup.
-    api.on("tool_result_persist", async (event, ctx) => {
+    // NOTE: this hook is intentionally synchronous (no async/await at top level) because the
+    // OpenClaw plugin hook system registers it as a synchronous handler and ignores any
+    // returned Promise.  When the handler was `async`, the await on resolveFeedAgentIdentity
+    // suspended and returned a Promise immediately, causing agentId to be a Promise<string>
+    // instead of a string at the setState call below — which meant canonical attribution state
+    // was never written.  The async child-session adoption work is handled via a fire-and-forget
+    // .then() that runs after the synchronous part completes.
+    api.on("tool_result_persist", (event, ctx) => {
       const hookCtx = buildHookAttributionContext(event, ctx);
-      const agentIdentity = await resolveFeedAgentIdentity(hookCtx);
-      const agentId = agentIdentity.agentId;
-      const snapshotAgentId = resolveSnapshotWriterAgentId(agentIdentity);
+      const childSessionKey = typeof hookCtx?.sessionKey === "string" ? hookCtx.sessionKey.trim() : "";
+      const parsed = parseSessionIdentity(childSessionKey, hookCtx?.agentId);
+
+      // Synchronous path: resolve agentId from in-memory state without awaiting async I/O.
+      // This mirrors resolveFeedAgentIdentity but skips the async observe/adopt calls.
+      let agentId: string;
+      let rawAgentId: string | undefined;
+      let identitySource: "spawned" | "explicit" | "fallback" = "fallback";
+
+      if (childSessionKey && isAdoptableChildLane(parsed.lane)) {
+        const spawnedVisible = spawnedSessionAgentIds.get(childSessionKey) || "";
+        if (spawnedVisible) {
+          agentId = spawnedVisible;
+          rawAgentId = parsed.agentId && parsed.agentId !== spawnedVisible ? parsed.agentId : undefined;
+          identitySource = "spawned";
+        }
+      }
+
+      if (identitySource === "fallback") {
+        const rawSessionAgentId = parsed.agentId;
+        const explicitCandidates = [
+          hookCtx?.agentId,
+          hookCtx?.agent?.id,
+          hookCtx?.agent?.agentId,
+          hookCtx?.session?.agentId,
+          hookCtx?.residentAgentId,
+        ];
+        let found = false;
+        for (const candidate of explicitCandidates) {
+          const visible = canonicalVisibleAgentId(candidate);
+          if (visible) {
+            const raw = typeof candidate === "string" ? String(candidate).trim() : "";
+            if (isAdoptableChildLane(parsed.lane) && visible === canonicalVisibleAgentId(parsed.residentAgentId) && rawSessionAgentId !== visible) {
+              continue;
+            }
+            agentId = visible;
+            rawAgentId = raw && raw !== visible ? raw : (rawSessionAgentId !== visible ? rawSessionAgentId : undefined);
+            identitySource = "explicit";
+            found = true;
+            break;
+          }
+        }
+        if (!found) {
+          const fallback = canonicalVisibleAgentId(rawSessionAgentId)
+            || (isAdoptableChildLane(parsed.lane) ? UNKNOWN_CHILD_ACTOR_ID : (canonicalVisibleAgentId(parsed.residentAgentId) || "main"));
+          agentId = fallback;
+          rawAgentId = rawSessionAgentId && rawSessionAgentId !== fallback ? rawSessionAgentId : undefined;
+          identitySource = "fallback";
+        }
+      }
+
+      const snapshotAgentId = (identitySource === "spawned" || identitySource === "explicit" || parsed.lane === "main")
+        ? canonicalVisibleAgentId(agentId)
+        : (agentId === UNKNOWN_CHILD_ACTOR_ID ? "" : "");
+
       const toolName = event?.toolName;
       const internalObservation = isInternalObservationToolCall(toolName, ctx);
+
+      // Kick off async child-session adoption in the background (fire-and-forget).
+      // This does not block the synchronous state write below.
+      if (childSessionKey && isAdoptableChildLane(parsed.lane) && identitySource !== "spawned") {
+        resolveFeedAgentIdentity(hookCtx).catch(() => {/* intentionally ignored */});
+      }
+
       if (!internalObservation) {
         pushEvent("tool_result_persist", {
           agentId,
@@ -2675,7 +2741,7 @@ export default {
           ts: nowMs(),
           kind: "tool_result_persist",
           agentId,
-          rawAgentId: agentIdentity.rawAgentId,
+          rawAgentId,
           sessionKey: typeof ctx?.sessionKey === "string" ? ctx.sessionKey : undefined,
           toolName: typeof toolName === "string" ? toolName : undefined,
           details: {
