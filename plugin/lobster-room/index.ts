@@ -2666,7 +2666,7 @@ export default {
     // instead of a string at the setState call below — which meant canonical attribution state
     // was never written.  The async child-session adoption work is handled via a fire-and-forget
     // .then() that runs after the synchronous part completes.
-    api.on("tool_result_persist", (event, ctx) => {
+    api.on("tool_result_persist", async (event, ctx) => {
       const hookCtx = buildHookAttributionContext(event, ctx);
       const childSessionKey = typeof hookCtx?.sessionKey === "string" ? hookCtx.sessionKey.trim() : "";
       const parsed = parseSessionIdentity(childSessionKey, hookCtx?.agentId);
