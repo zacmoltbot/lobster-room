@@ -2527,7 +2527,7 @@ export default {
         }
       }
 
-      const agentIdentity = await resolveFeedAgentIdentity(hookCtx);
+      const agentIdentity = await resolveFeedAgentIdentity(hookCtx, ctx?.session?.agentId);
       const agentId = agentIdentity.agentId;
       const snapshotAgentId = resolveSnapshotWriterAgentId(agentIdentity);
       // api.logger.info("[lobster-room] hook before_agent_start", { buildTag: BUILD_TAG, agentId, sessionKey: ctx?.sessionKey });
