@@ -2511,7 +2511,23 @@ export default {
     };
 
     api.on("before_agent_start", async (event, ctx) => {
-      const agentIdentity = await resolveFeedAgentIdentity(buildHookAttributionContext(event, ctx));
+      const hookCtx = buildHookAttributionContext(event, ctx);
+
+      // Plan A fix: for child sessions, synchronously write spawnedSessionAgentIds
+      // BEFORE the async resolveFeedAgentIdentity call. The child session's hooks
+      // fire during sessions_spawn execution (before parent receives result),
+      // so this write must happen at start-up, not after sessions_spawn returns.
+      const childSessionKey = typeof ctx?.sessionKey === "string" ? ctx.sessionKey.trim() : "";
+      const parentSessionKey = hookCtx?.parentSessionKey || (ctx as any)?.parentSessionKey;
+      if (childSessionKey && parentSessionKey && isAdoptableChildLane(parseSessionIdentity(childSessionKey).lane)) {
+        const parentAgentId = hookCtx?.residentAgentId || (ctx as any)?.residentAgentId;
+        if (parentAgentId) {
+          const visible = canonicalVisibleAgentId(parentAgentId);
+          if (visible) spawnedSessionAgentIds.set(childSessionKey, visible);
+        }
+      }
+
+      const agentIdentity = await resolveFeedAgentIdentity(hookCtx);
       const agentId = agentIdentity.agentId;
       const snapshotAgentId = resolveSnapshotWriterAgentId(agentIdentity);
       // api.logger.info("[lobster-room] hook before_agent_start", { buildTag: BUILD_TAG, agentId, sessionKey: ctx?.sessionKey });
