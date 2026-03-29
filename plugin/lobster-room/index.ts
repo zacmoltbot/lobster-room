@@ -2108,6 +2108,13 @@ export default {
         ctx?.session?.parentSessionKey,
         ctx?.session?.parentKey,
         ctx?.parent?.key,
+        ctx?.details?.parentSessionKey,
+        ctx?.details?.parent?.sessionKey,
+        ctx?.details?.session?.parentSessionKey,
+        ctx?.data?.parentSessionKey,
+        ctx?.payload?.parentSessionKey,
+        ctx?.event?.parentSessionKey,
+        ctx?.event?.details?.parentSessionKey,
       ];
       const out: string[] = [];
       for (const candidate of candidates) {
@@ -2116,6 +2123,46 @@ export default {
         out.push(sk);
       }
       return out;
+    };
+
+    const traceSpawnAttributionChain = (params: {
+      childSessionKey?: unknown;
+      agentId?: unknown;
+      residentAgentId?: unknown;
+      feedTruth?: FeedItem | null;
+      nowState?: { details?: any } | null;
+    }) => {
+      const childSessionKey = typeof params?.childSessionKey === "string" ? params.childSessionKey.trim() : "";
+      const visibleAgentId = canonicalVisibleAgentId(params?.agentId || params?.residentAgentId || "") || "";
+      const observed = childSessionKey ? observedChildSessions.get(childSessionKey) : undefined;
+      const parentSessionKeys = Array.isArray(observed?.parentSessionKeys) ? observed.parentSessionKeys.filter(Boolean) : [];
+      const pendingMatches = parentSessionKeys.flatMap((parentSessionKey) => (pendingSpawnAttributionsByParent.get(parentSessionKey) || []).filter((entry) => {
+        if (!entry) return false;
+        if (!visibleAgentId) return true;
+        return canonicalVisibleAgentId(entry.actorId) === visibleAgentId;
+      }));
+      const spawnedActorId = childSessionKey ? (spawnedSessionAgentIds.get(childSessionKey) || null) : null;
+      const feedTruth = params?.feedTruth || null;
+      const nowDetails = params?.nowState?.details || null;
+      return {
+        childSessionKey: childSessionKey || null,
+        observedChildExists: !!observed,
+        observedParentSessionKeys: parentSessionKeys,
+        pendingParentIntentCount: pendingMatches.length,
+        pendingParentIntents: pendingMatches.map((entry) => ({
+          intentId: entry.intentId,
+          actorId: entry.actorId,
+          parentSessionKey: entry.parentSessionKey,
+          residentAgentId: entry.residentAgentId,
+          label: entry.label || null,
+          task: entry.task || null,
+        })),
+        spawnedSessionAgentId: spawnedActorId,
+        feedTruthAgentId: feedTruth ? resolveVisibleFeedItemAgentId(feedTruth, "") : null,
+        feedTruthSessionKey: feedTruth?.sessionKey || null,
+        nowFeedTruthSessionKey: nowDetails?.feedTruthSessionKey || null,
+        freshCanonicalChildFeedCluster: nowDetails?.freshCanonicalChildFeedCluster ?? null,
+      };
     };
 
     const adoptPendingSpawnAttributionForSession = async (sessionKey: unknown, ctx: any): Promise<PendingSpawnAttribution | undefined> => {
@@ -3013,6 +3060,24 @@ export default {
               } catch (err: any) {
                 api.logger.warn("[lobster-room] feedGet failed", { error: String(err?.message || err), stack: err?.stack });
                 sendJson(res, 500, { ok: false, error: "feedGet_failed: " + String(err?.message || err), path: "/lobster-room/api/lobster-room" });
+              }
+              return true;
+            }
+
+            if (op === "debugSpawnTrace") {
+              try {
+                await loadSpawnAttributionState();
+                const childSessionKey = typeof payload?.childSessionKey === "string" ? payload.childSessionKey.trim() : "";
+                const agentId = typeof payload?.agentId === "string" ? payload.agentId.trim() : "";
+                const visibleItems = feedBuf.filter((it) => isUserVisibleFeedItem(it) && !shouldSuppressFeedItem(it, feedBuf));
+                const feedTruth = agentId ? latestVisibleFeedItemForAgent(agentId) : visibleItems.find((it) => String(it.sessionKey || "").trim() === childSessionKey) || null;
+                sendJson(res, 200, {
+                  ok: true,
+                  buildTag: BUILD_TAG,
+                  trace: traceSpawnAttributionChain({ childSessionKey, agentId, feedTruth }),
+                });
+              } catch (err: any) {
+                sendJson(res, 500, { ok: false, error: "debugSpawnTrace_failed: " + String(err?.message || err) });
               }
               return true;
             }
