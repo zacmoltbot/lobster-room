@@ -2502,6 +2502,7 @@ export default {
       if (merged.payload === undefined) merged.payload = event?.params ?? event?.payload;
       if (merged.data === undefined) merged.data = event?.data;
       if (merged.details === undefined) merged.details = event?.details ?? event?.result?.details;
+      if (!merged.agentId && ctx?.session?.agentId) merged.agentId = ctx.session.agentId;
       return merged;
     };
 
