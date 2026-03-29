@@ -2640,9 +2640,15 @@ export default {
           } else {
             // Fallback: try to find pending attribution by resident agent ID
             // This helps when child session hooks fire before parent's sessions_spawn returns
+            // IMPORTANT: use canonicalResidentAgentId(sessionKey), NOT canonicalVisibleAgentId(agentId)
+            // canonicalVisibleAgentId("main") = "" (empty, wrong key)
+            // canonicalResidentAgentId(sessionKey) = "main" (correct key)
             await loadSpawnAttributionState();
-            const resident = canonicalVisibleAgentId(ctx?.agentId || ctx?.session?.agentId);
-            const residentPending = pendingSpawnAttributionsByResident.get(resident) || [];
+            const parentSessionKey = ctx?.session?.sessionKey || ctx?.sessionKey;
+            const residentKey = parentSessionKey
+              ? canonicalResidentAgentId(parentSessionKey)
+              : (ctx?.agentId || ctx?.session?.agentId || "");
+            const residentPending = pendingSpawnAttributionsByResident.get(residentKey) || [];
             if (residentPending.length > 0) {
               const pending = residentPending[0]; // Use first pending
               if (pending?.actorId) {
