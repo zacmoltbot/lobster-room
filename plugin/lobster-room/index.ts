@@ -2614,7 +2614,15 @@ export default {
             || pendingAttribution?.actorId;
           const noisyInferredAgentId = resolveRequestedSpawnAgentId(event?.result)
             || resolveRequestedSpawnAgentId(event);
-          await rememberSpawnedSessionAgent(childSessionKey, requestedSpawnAgentId || noisyInferredAgentId, {
+          const resolvedAgentId = requestedSpawnAgentId || noisyInferredAgentId;
+          // Plan A fix: synchronously write to spawnedSessionAgentIds BEFORE the async adoption.
+          // This ensures the child's first tool_result_persist can read the attribution
+          // even if the child's hooks fire during the sessions_spawn execution.
+          if (resolvedAgentId) {
+            const visible = canonicalVisibleAgentId(resolvedAgentId);
+            spawnedSessionAgentIds.set(childSessionKey, visible);
+          }
+          await rememberSpawnedSessionAgent(childSessionKey, resolvedAgentId, {
             allowOverwrite: false,
             reason: requestedSpawnAgentId ? "sessions_spawn:payload_or_pending" : "sessions_spawn:fallback_result_inference",
           });
