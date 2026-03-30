@@ -1411,7 +1411,9 @@ export default {
 
     const resolveVisibleFeedItemAgentId = (it: FeedItem | null | undefined, fallback = "main"): string => {
       if (!it) return fallback;
-      if (isUnknownChildActor(it.agentId)) return UNKNOWN_CHILD_ACTOR_ID;
+      // Check sessionKey-based lookup FIRST — the adoption pipeline may have
+      // corrected spawnedSessionAgentIds after the FeedItem was written with
+      // a stale/unknown agentId. This must run before the "unknown" early return.
       const sessionKey = typeof it.sessionKey === "string" ? it.sessionKey.trim() : "";
       if (sessionKey) {
         const parsed = parseSessionIdentity(sessionKey, it.agentId);
@@ -1427,6 +1429,7 @@ export default {
         }
       }
       // Non-child session: use stored agentId directly.
+      if (isUnknownChildActor(it.agentId)) return UNKNOWN_CHILD_ACTOR_ID;
       return visibleFeedAgentId(it.agentId, fallback);
     };
 
@@ -2340,8 +2343,12 @@ export default {
           };
         }
       }
-      const fallback = canonicalVisibleAgentId(rawSessionAgentId)
-        || (isAdoptableChildLane(parsed.lane) ? UNKNOWN_CHILD_ACTOR_ID : (canonicalVisibleAgentId(parsed.residentAgentId) || "main"));
+      // For child (subagent) lanes, never fall back to the parent/resident agent —
+      // canonicalVisibleAgentId("main/subagent:...") incorrectly returns "main".
+      // Return UNKNOWN_CHILD_ACTOR_ID and let the adoption pipeline fix it later.
+      const fallback = isAdoptableChildLane(parsed.lane)
+        ? UNKNOWN_CHILD_ACTOR_ID
+        : (canonicalVisibleAgentId(rawSessionAgentId) || canonicalVisibleAgentId(parsed.residentAgentId) || "main");
       return {
         agentId: fallback,
         rawAgentId: rawSessionAgentId && rawSessionAgentId !== fallback ? rawSessionAgentId : undefined,
