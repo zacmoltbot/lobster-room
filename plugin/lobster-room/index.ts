@@ -1916,7 +1916,8 @@ export default {
       const visible = canonicalVisibleAgentId(agentId);
       if (!sk || !visible || !shouldPersistSpawnedSessionAgent(sk, visible)) return false;
       const existing = spawnedSessionAgentIds.get(sk);
-      if (existing && existing !== visible && !options?.allowOverwrite) {
+      if (existing === visible) return true;
+      if (existing && existing !== visible && !options?.allowOverwrite && existing !== UNKNOWN_CHILD_ACTOR_ID) {
         api.logger.warn("[lobster-room] spawned session actor mismatch; keeping original attribution", {
           sessionKey: sk,
           existingActorId: existing,
@@ -1925,6 +1926,33 @@ export default {
         });
         return false;
       }
+      
+      // Retrospective Upgrade: If we just discovered the true identity of a session that
+      // booted concurrently and received the 'unknown' tracking label, patch its UI history instantly.
+      if (existing === UNKNOWN_CHILD_ACTOR_ID && visible !== UNKNOWN_CHILD_ACTOR_ID) {
+        for (let i = 0; i < feedBuf.length; i += 1) {
+          const item = feedBuf[i];
+          if (item?.sessionKey === sk && item?.agentId === UNKNOWN_CHILD_ACTOR_ID) {
+            item.agentId = visible;
+          }
+        }
+        const unknownState = activity.get(UNKNOWN_CHILD_ACTOR_ID);
+        if (unknownState && unknownState.details?.sessionKey === sk) {
+          unknownState.agentId = visible;
+          activity.set(visible, unknownState);
+          activity.delete(UNKNOWN_CHILD_ACTOR_ID);
+          try {
+            const snapPrev = snap?.agents?.[UNKNOWN_CHILD_ACTOR_ID];
+            if (snapPrev && snapPrev.details?.sessionKey === sk) {
+              snap.agents[visible] = snapPrev;
+              delete snap.agents[UNKNOWN_CHILD_ACTOR_ID];
+              snap.updatedAtMs = nowMs();
+              writeSnapshotSoon();
+            }
+          } catch {}
+        }
+      }
+
       spawnedSessionAgentIds.set(sk, visible);
       observedChildSessions.delete(sk);
       return true;
