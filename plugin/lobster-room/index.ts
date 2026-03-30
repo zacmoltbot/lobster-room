@@ -1417,7 +1417,11 @@ export default {
         const parsed = parseSessionIdentity(sessionKey, it.agentId);
         if (isAdoptableChildLane(parsed.lane)) {
           const bound = spawnedSessionAgentIds.get(sessionKey);
-          if (bound && bound !== UNKNOWN_CHILD_ACTOR_ID) return bound;
+          // Option C: Don't trust a binding that merely echoes the parent/resident agent.
+          // If the bound value equals the resident agent, treat it as unbound so we
+          // return UNKNOWN_CHILD_ACTOR_ID instead of mis-attributing to the parent.
+          const resident = canonicalVisibleAgentId(parsed.residentAgentId);
+          if (bound && bound !== UNKNOWN_CHILD_ACTOR_ID && bound !== resident) return bound;
           const explicit = canonicalVisibleAgentId(it.agentId);
           const resident = canonicalVisibleAgentId(parsed.residentAgentId);
           const rawAgentId = typeof it.rawAgentId === "string" ? it.rawAgentId.trim() : "";
@@ -2520,26 +2524,21 @@ export default {
       });
       const hookCtx = buildHookAttributionContext(event, ctx);
 
-      // Plan A fix: for child sessions, synchronously write spawnedSessionAgentIds
-      // BEFORE the async resolveFeedAgentIdentity call. The child session's hooks
-      // fire during sessions_spawn execution (before parent receives result),
-      // so this write must happen at start-up, not after sessions_spawn returns.
-      // NOTE: Use parentAgentId DIRECTLY (not canonicalVisibleAgentId) because
-      // canonicalVisibleAgentId("main") = "" (empty/falsy), causing the set() to be
-      // skipped. This left spawnedSessionAgentIds empty for "main" parent agents,
-      // making Plan B's adoption the ONLY path — but if adoption missed (e.g. due to
-      // timing or parentSessionKey not in ctx), feed fell back to "main" incorrectly.
-      // Writing the raw parentAgentId as a placeholder ensures spawnedSessionAgentIds
-      // is never empty; Plan B's adoptPendingSpawnAttributionForSession will overwrite
-      // it with the correct actorId = "qa_agent" when adoption succeeds.
-      const childSessionKey = typeof ctx?.sessionKey === "string" ? ctx.sessionKey.trim() : "";
-      const parentSessionKey = hookCtx?.parentSessionKey || (ctx as any)?.parentSessionKey;
-      if (childSessionKey && parentSessionKey && isAdoptableChildLane(parseSessionIdentity(childSessionKey).lane)) {
-        const parentAgentId = hookCtx?.residentAgentId || (ctx as any)?.residentAgentId;
-        if (parentAgentId && String(parentAgentId).trim()) {
-          spawnedSessionAgentIds.set(childSessionKey, String(parentAgentId).trim());
-        }
-      }
+      // Option A (DISABLED): DO NOT write the parent's agentId as placeholder here.
+      // Writing the parent agentId as a placeholder causes child events to be
+      // attributed to the parent instead of the child. Let the adoption pipeline
+      // set the correct value. If adoption hasn't completed,
+      // resolveVisibleFeedItemAgentId will return UNKNOWN_CHILD_ACTOR_ID.
+      // (Previously this wrote parentAgentId into spawnedSessionAgentIds, which
+      // caused child tool_result_persist events to be misattributed to the parent.)
+      // const childSessionKey = typeof ctx?.sessionKey === "string" ? ctx.sessionKey.trim() : "";
+      // const parentSessionKey = hookCtx?.parentSessionKey || (ctx as any)?.parentSessionKey;
+      // if (childSessionKey && parentSessionKey && isAdoptableChildLane(parseSessionIdentity(childSessionKey).lane)) {
+      //   const parentAgentId = hookCtx?.residentAgentId || (ctx as any)?.residentAgentId;
+      //   if (parentAgentId && String(parentAgentId).trim()) {
+      //     spawnedSessionAgentIds.set(childSessionKey, String(parentAgentId).trim());
+      //   }
+      // }
 
       const agentIdentity = await resolveFeedAgentIdentity(hookCtx, ctx?.session?.agentId);
       const agentId = agentIdentity.agentId;
@@ -2768,10 +2767,12 @@ export default {
           }
         }
         if (!found) {
-          const fallback = canonicalVisibleAgentId(rawSessionAgentId)
-            || (isAdoptableChildLane(parsed.lane)
-              ? (parsed.residentAgentId ? canonicalVisibleAgentId(parsed.residentAgentId) : UNKNOWN_CHILD_ACTOR_ID)
-              : (canonicalVisibleAgentId(parsed.residentAgentId) || "main"));
+          // Option B: for subagent lanes, don't fall back to resident — that causes
+          // child events to be attributed to the parent. Return UNKNOWN_CHILD_ACTOR_ID
+          // and let the async adoption pipeline fix the binding later.
+          const fallback = isAdoptableChildLane(parsed.lane)
+            ? UNKNOWN_CHILD_ACTOR_ID
+            : (canonicalVisibleAgentId(rawSessionAgentId) || canonicalVisibleAgentId(parsed.residentAgentId) || "main");
           agentId = fallback;
           rawAgentId = rawSessionAgentId && rawSessionAgentId !== fallback ? rawSessionAgentId : undefined;
           identitySource = "fallback";
