@@ -1829,7 +1829,7 @@ export default {
 
     const resolveExplicitSpawnAgentId = (payload: any): string => {
       const explicitCandidates: string[] = [];
-      collectSpawnActorCandidates(payload, explicitCandidates);
+      collectSpawnActorCandidates(payload, explicitCandidates, new Set(), true);
       const unique = uniqueVisibleAgentIds(explicitCandidates);
       return unique.length === 1 ? (unique[0] || "") : "";
     };
@@ -2028,8 +2028,8 @@ export default {
       const scored = queue.map((entry, index) => {
         let score = 0;
         if (actorId) {
-          if (entry.actorId !== actorId) return { entry, index, score: -1 };
-          score += 8;
+          if (entry.actorId !== actorId && entry.actorId !== UNKNOWN_CHILD_ACTOR_ID) return { entry, index, score: -1 };
+          if (entry.actorId === actorId) score += 8;
         }
         if (label) {
           if (normalizeSpawnText(entry.label, 120) !== label) return { entry, index, score: -1 };
@@ -2041,6 +2041,10 @@ export default {
         }
         if (!actorId && !label && !task) score = 1;
         else if (entry.source === "explicit") score += 1;
+        
+        // If the actor matches explicitly, give it a tiny bump to break ties vs "unknown" entry
+        if (actorId && entry.actorId === actorId && entry.actorId !== UNKNOWN_CHILD_ACTOR_ID) score += 2;
+        
         return { entry, index, score };
       }).filter((candidate) => candidate.score >= 0);
       if (!scored.length) return undefined;
@@ -2064,11 +2068,10 @@ export default {
       await loadSpawnAttributionState();
       const sk = typeof parentSessionKey === "string" ? String(parentSessionKey).trim() : "";
       if (!sk) return undefined;
-      const actorId = inferSpawnActorId(payload);
-      if (!actorId) return undefined;
+      const explicit = resolveExplicitSpawnAgentId(payload);
+      const actorId = inferSpawnActorId(payload) || UNKNOWN_CHILD_ACTOR_ID;
       const residentAgentId = canonicalResidentAgentId(sk);
       if (!residentAgentId) return undefined;
-      const explicit = resolveExplicitSpawnAgentId(payload);
       const entry: PendingSpawnAttribution = {
         intentId: nextSpawnIntentId(),
         actorId,
