@@ -1422,6 +1422,7 @@ export default {
           // return UNKNOWN_CHILD_ACTOR_ID instead of mis-attributing to the parent.
           const resident = canonicalVisibleAgentId(parsed.residentAgentId);
           if (bound && bound !== UNKNOWN_CHILD_ACTOR_ID && bound !== resident) return bound;
+          if (bound === UNKNOWN_CHILD_ACTOR_ID) return UNKNOWN_CHILD_ACTOR_ID;
           const explicit = canonicalVisibleAgentId(it.agentId);
           const resident = canonicalVisibleAgentId(parsed.residentAgentId);
           const rawAgentId = typeof it.rawAgentId === "string" ? it.rawAgentId.trim() : "";
