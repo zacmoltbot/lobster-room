@@ -2042,6 +2042,12 @@ export default {
         if (!actorId && !label && !task) score = 1;
         else if (entry.source === "explicit") score += 1;
         
+        // Add a wildcard baseline so completely anonymous intents don't get rejected (score 0)
+        // when an agent connects with an identity and is the only candidate available.
+        if (entry.actorId === UNKNOWN_CHILD_ACTOR_ID && !entry.label && !entry.task) {
+          score += 1;
+        }
+        
         // If the actor matches explicitly, give it a tiny bump to break ties vs "unknown" entry
         if (actorId && entry.actorId === actorId && entry.actorId !== UNKNOWN_CHILD_ACTOR_ID) score += 2;
         
@@ -3550,15 +3556,17 @@ export default {
           // won't see hook-updated in-memory `activity`, but it *will* see the on-disk snapshot.
           const snapAgentIds = snapDisk && snapDisk.agents ? Object.keys(snapDisk.agents) : [];
           for (const rawId of snapAgentIds) {
+            if (rawId === UNKNOWN_CHILD_ACTOR_ID) continue;
             const id = canonicalResidentAgentId(rawId);
-            if (id && !seen.has(id)) {
+            if (id && id !== UNKNOWN_CHILD_ACTOR_ID && !seen.has(id)) {
               ids.push(id);
               seen.add(id);
             }
           }
           for (const visibleActorId of spawnedSessionAgentIds.values()) {
+            if (visibleActorId === UNKNOWN_CHILD_ACTOR_ID) continue;
             const id = canonicalResidentAgentId(visibleActorId);
-            if (id && !seen.has(id)) {
+            if (id && id !== UNKNOWN_CHILD_ACTOR_ID && !seen.has(id)) {
               ids.push(id);
               seen.add(id);
             }
