@@ -1417,20 +1417,16 @@ export default {
         const parsed = parseSessionIdentity(sessionKey, it.agentId);
         if (isAdoptableChildLane(parsed.lane)) {
           const bound = spawnedSessionAgentIds.get(sessionKey);
-          // Option C: Don't trust a binding that merely echoes the parent/resident agent.
-          // If the bound value equals the resident agent, treat it as unbound so we
-          // return UNKNOWN_CHILD_ACTOR_ID instead of mis-attributing to the parent.
           const resident = canonicalVisibleAgentId(parsed.residentAgentId);
+          // Trust the binding only if it's a real child agent (not unknown, not parent).
           if (bound && bound !== UNKNOWN_CHILD_ACTOR_ID && bound !== resident) return bound;
-          if (bound === UNKNOWN_CHILD_ACTOR_ID) return UNKNOWN_CHILD_ACTOR_ID;
+          // No valid binding — check explicit agentId on the item itself.
           const explicit = canonicalVisibleAgentId(it.agentId);
-          const resident = canonicalVisibleAgentId(parsed.residentAgentId);
-          const rawAgentId = typeof it.rawAgentId === "string" ? it.rawAgentId.trim() : "";
-          if (explicit && !(resident && explicit === resident && !!rawAgentId && parsed.agentId !== explicit)) return explicit;
-          if (explicit && parsed.agentId !== explicit) return explicit;
+          if (explicit && explicit !== resident && parsed.agentId !== explicit) return explicit;
           return UNKNOWN_CHILD_ACTOR_ID;
         }
       }
+      // Non-child session: use stored agentId directly.
       return visibleFeedAgentId(it.agentId, fallback);
     };
 
