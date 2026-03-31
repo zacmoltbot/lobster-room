@@ -2385,14 +2385,17 @@ export default {
           };
         }
       }
-      // For child (subagent) lanes: try to use parsed.residentAgentId from the session key.
-      // The session key format agent:{RESIDENT}:subagent:... contains the agent identity.
-      // Only return UNKNOWN_CHILD_ACTOR_ID if even the resident is "main" (generic parent),
-      // since that means OpenClaw didn't assign a specific child agent identity.
+      // For child (subagent) lanes: use parsed.residentAgentId from the session key.
+      // If the resident is "main" (generic parent), show "helper" instead of UNKNOWN.
+      // canonicalVisibleAgentId("main") returns "" which breaks the naive check.
       let fallback: string;
       if (isAdoptableChildLane(parsed.lane)) {
-        const residentVisible = canonicalVisibleAgentId(parsed.residentAgentId);
-        fallback = (residentVisible && residentVisible !== "main") ? residentVisible : UNKNOWN_CHILD_ACTOR_ID;
+        if (parsed.residentAgentId === "main") {
+          fallback = "helper";
+        } else {
+          const residentVisible = canonicalVisibleAgentId(parsed.residentAgentId);
+          fallback = residentVisible || UNKNOWN_CHILD_ACTOR_ID;
+        }
       } else {
         fallback = canonicalVisibleAgentId(rawSessionAgentId) || canonicalVisibleAgentId(parsed.residentAgentId) || "main";
       }
