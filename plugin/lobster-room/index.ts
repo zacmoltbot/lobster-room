@@ -1425,6 +1425,9 @@ export default {
           // No valid binding — check explicit agentId on the item itself.
           const explicit = canonicalVisibleAgentId(it.agentId);
           if (explicit && explicit !== "main" && parsed.agentId !== explicit) return explicit;
+          // Fallback: if resident is 'main' (generic parent), show 'helper' instead of 'unknown'.
+          // This gives users a meaningful label for unnamed child agents.
+          if (resident === "main" || resident === "") return "helper";
           return UNKNOWN_CHILD_ACTOR_ID;
         }
       }
