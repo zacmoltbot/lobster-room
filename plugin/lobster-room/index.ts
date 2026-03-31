@@ -3400,7 +3400,11 @@ export default {
 
             if (op === "feedDevSpawn") {
               // Dev-only helper: spawn a non-main agent session so QA can validate multi-agent feed grouping.
-              const spawnAgentId = typeof payload?.spawnAgentId === "string" ? payload.spawnAgentId.trim() : "coding_agent";
+              // IMPORTANT: sessions_spawn uses 'agentId' parameter (not 'spawnAgentId') to set the child
+              // session's resident agent. Using 'spawnAgentId' causes the child session to be attributed
+              // to 'main' instead. Verified 2026-03-31: agentId="qa_agent" → sk="agent:qa_agent:subagent:..."
+              const spawnAgentId = typeof payload?.agentId === "string" ? payload.agentId.trim()
+                : (typeof payload?.spawnAgentId === "string" ? payload.spawnAgentId.trim() : "coding_agent");
               const label = typeof payload?.label === "string" ? payload.label.trim().slice(0, 120) : "QA: multi-agent validation";
               const task = typeof payload?.task === "string" ? payload.task.trim().slice(0, 400) : "Quick QA test task: respond with a short message and then finish.";
 
@@ -3443,7 +3447,7 @@ export default {
                   body: JSON.stringify({
                     tool: "sessions_spawn",
                     // Be liberal in what we send: different runtimes have used different arg names.
-                    args: { spawnAgentId, agentId: spawnAgentId, label, task },
+                    args: { agentId: spawnAgentId, label, task },
                   }),
                 });
 
