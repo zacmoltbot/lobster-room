@@ -2382,12 +2382,17 @@ export default {
           };
         }
       }
-      // For child (subagent) lanes, never fall back to the parent/resident agent —
-      // canonicalVisibleAgentId("main/subagent:...") incorrectly returns "main".
-      // Return UNKNOWN_CHILD_ACTOR_ID and let the adoption pipeline fix it later.
-      const fallback = isAdoptableChildLane(parsed.lane)
-        ? UNKNOWN_CHILD_ACTOR_ID
-        : (canonicalVisibleAgentId(rawSessionAgentId) || canonicalVisibleAgentId(parsed.residentAgentId) || "main");
+      // For child (subagent) lanes: try to use parsed.residentAgentId from the session key.
+      // The session key format agent:{RESIDENT}:subagent:... contains the agent identity.
+      // Only return UNKNOWN_CHILD_ACTOR_ID if even the resident is "main" (generic parent),
+      // since that means OpenClaw didn't assign a specific child agent identity.
+      let fallback: string;
+      if (isAdoptableChildLane(parsed.lane)) {
+        const residentVisible = canonicalVisibleAgentId(parsed.residentAgentId);
+        fallback = (residentVisible && residentVisible !== "main") ? residentVisible : UNKNOWN_CHILD_ACTOR_ID;
+      } else {
+        fallback = canonicalVisibleAgentId(rawSessionAgentId) || canonicalVisibleAgentId(parsed.residentAgentId) || "main";
+      }
       return {
         agentId: fallback,
         rawAgentId: rawSessionAgentId && rawSessionAgentId !== fallback ? rawSessionAgentId : undefined,
@@ -2560,10 +2565,16 @@ export default {
     };
 
     api.on("before_agent_start", async (event, ctx) => {
-      api.logger.info("[lobster-room] before_agent_start ctx.session.agentId", {
-        agentId: ctx?.session?.agentId,
+      // DEBUG: log full ctx keys to diagnose what OpenClaw provides
+      api.logger.info("[lobster-room] before_agent_start ctx keys", {
         sessionKey: ctx?.sessionKey,
-        rawAgentId: ctx?.session?.agentId
+        "ctx.agentId": ctx?.agentId,
+        "ctx.session?.agentId": ctx?.session?.agentId,
+        "ctx.session?.sessionKey": ctx?.session?.sessionKey,
+        "ctx.agent?.id": ctx?.agent?.id,
+        "ctx.agent?.agentId": ctx?.agent?.agentId,
+        "ctx.residentAgentId": ctx?.residentAgentId,
+        allKeys: ctx ? Object.keys(ctx).join(", ") : "null",
       });
       const hookCtx = buildHookAttributionContext(event, ctx);
 
