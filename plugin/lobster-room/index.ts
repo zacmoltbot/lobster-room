@@ -1420,11 +1420,11 @@ export default {
         if (isAdoptableChildLane(parsed.lane)) {
           const bound = spawnedSessionAgentIds.get(sessionKey);
           const resident = canonicalVisibleAgentId(parsed.residentAgentId);
-          // Trust the binding only if it's a real child agent (not unknown, not parent).
-          if (bound && bound !== UNKNOWN_CHILD_ACTOR_ID && bound !== resident) return bound;
+          // Trust the binding only if it's a real child agent (not unknown, not generic 'main' parent).
+          if (bound && bound !== UNKNOWN_CHILD_ACTOR_ID && bound !== "main") return bound;
           // No valid binding — check explicit agentId on the item itself.
           const explicit = canonicalVisibleAgentId(it.agentId);
-          if (explicit && explicit !== resident && parsed.agentId !== explicit) return explicit;
+          if (explicit && explicit !== "main" && parsed.agentId !== explicit) return explicit;
           return UNKNOWN_CHILD_ACTOR_ID;
         }
       }
@@ -2368,7 +2368,9 @@ export default {
         const visible = canonicalVisibleAgentId(candidate);
         if (visible) {
           const raw = typeof candidate === "string" ? String(candidate).trim() : "";
-          if (isAdoptableChildLane(parsed.lane) && visible === canonicalVisibleAgentId(parsed.residentAgentId) && rawSessionAgentId !== visible) {
+          // Child session explicitly carrying the name 'main' is usually due to hook context bleed.
+          // However, if the resident is explicitly 'qa_agent', we MUST accept it. 
+          if (isAdoptableChildLane(parsed.lane) && visible === "main" && rawSessionAgentId !== visible) {
             continue;
           }
           return {
