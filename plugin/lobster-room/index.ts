@@ -2435,18 +2435,22 @@ export default {
         }
       }
       // For child (subagent) lanes: use parsed.residentAgentId from the session key.
-      // If the resident is "main" (generic parent), prefer pending attribution actorId;
-      // fallback to "main" itself if none (NOT to "helper").
+      // If the resident is "main" (generic parent), look through ALL pending attributions
+      // across all resident keys to find one with a real actorId. Parent's pending
+      // attribution is stored under parent's residentAgentId (e.g. "coding_agent"), not "main".
+      // Fallback to "main" itself if none found (NOT to "helper").
       let fallback: string;
       if (isAdoptableChildLane(parsed.lane)) {
         if (parsed.residentAgentId === "main") {
-          const pending = pendingSpawnAttributionsByResident.get("main") || [];
           let bestActor: string | undefined;
-          for (const attr of pending) {
-            if (attr.actorId && attr.actorId !== "helper" && attr.actorId !== UNKNOWN_CHILD_ACTOR_ID) {
-              bestActor = attr.actorId;
-              break;
+          for (const arr of pendingSpawnAttributionsByResident.values()) {
+            for (const attr of arr) {
+              if (attr.actorId && attr.actorId !== "helper" && attr.actorId !== UNKNOWN_CHILD_ACTOR_ID) {
+                bestActor = attr.actorId;
+                break;
+              }
             }
+            if (bestActor) break;
           }
           fallback = bestActor || "main";
         } else {
