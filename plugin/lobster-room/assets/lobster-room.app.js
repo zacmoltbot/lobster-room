@@ -2909,23 +2909,14 @@
             agent.className = 'feed-now-agent';
             agent.textContent = line.agent;
             agent.style.color = agentColor(line.agent);
-            const copy = document.createElement('div');
+            // Format: Agent · state · last act: X ago
+            const copy = document.createElement('span');
             copy.className = 'feed-now-copy';
             const state = document.createElement('span');
             state.className = 'feed-now-state';
-            const isIdle = (line.state === 'idle');
-            const bits = [line.state];
-            // Only add age to bits when summary is empty — if summary is shown it already contains the age
-            if(line.age && !(line.summaryView && line.summaryView.show)) bits.push(line.age);
-            state.textContent = bits.join(' · ');
+            const ageLabel = line.age ? ' · last act: ' + line.age : '';
+            state.textContent = line.state + ageLabel;
             copy.appendChild(state);
-            if(line.summaryView && line.summaryView.show){
-              const summary = document.createElement('span');
-              summary.className = 'feed-now-summary' + (line.summaryView.stale ? ' stale' : '');
-              summary.textContent = line.summaryView.text;
-              summary.title = line.summaryView.title;
-              copy.appendChild(summary);
-            }
             row.appendChild(agent);
             row.appendChild(copy);
             nowEl.appendChild(row);

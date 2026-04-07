@@ -333,8 +333,57 @@ export default {
       await writeRoomsIndex(idx);
     };
 
+    // --- Bundled rooms (ships with plugin) ---
+    const bundledRoomsDir = join(pluginDir, "assets", "bundled-rooms");
+    const seedBundledRooms = async (): Promise<void> => {
+      let bundledEntries: string[] = [];
+      try {
+        const ents = await fs.readdir(bundledRoomsDir);
+        bundledEntries = ents.filter((e) => /^room-\d+$/.test(e));
+      } catch {
+        return;
+      }
+      if (!bundledEntries.length) return;
+
+      const idx = await readRoomsIndex();
+      const existingIds = new Set((idx?.rooms || []).map((r) => r.id));
+
+      for (const roomId of bundledEntries) {
+        if (existingIds.has(roomId)) continue;
+        const srcRoom = join(bundledRoomsDir, roomId);
+        const dstRoom = roomPath(roomId, "");
+        await fs.mkdir(dstRoom, { recursive: true });
+        const srcImg = join(srcRoom, "room.jpg");
+        const srcMap = join(srcRoom, "manual-map.json");
+        const dstImg = join(dstRoom, "room.jpg");
+        const dstMap = join(dstRoom, "manual-map.json");
+        try {
+          const imgBuf = await fs.readFile(srcImg);
+          await fs.writeFile(dstImg, imgBuf);
+        } catch {}
+        try {
+          const mapBuf = await fs.readFile(srcMap);
+          await fs.writeFile(dstMap, mapBuf);
+        } catch {}
+
+        // Derive display name from the bundled image filename (e.g. "Creative_color_loft.jpg" → "Creative_color_loft")
+        let displayName = roomId;
+        try {
+          const files = await fs.readdir(srcRoom);
+          const imgFile = files.find((f) => f.endsWith(".jpg") || f.endsWith(".png") || f.endsWith(".jpeg"));
+          if (imgFile) displayName = imgFile.replace(/\.(jpg|png|jpeg)$/i, "");
+        } catch {}
+
+        const newIdx = await readRoomsIndex();
+        const rooms = newIdx ? [...newIdx.rooms] : [];
+        rooms.push({ id: roomId, name: displayName, createdAt: t, updatedAt: t });
+        await writeRoomsIndex({ activeRoomId: newIdx?.activeRoomId || defaultRoomId, rooms });
+      }
+    };
+
     // Kick migration/initialization (best-effort, no throw)
     ensureDefaultRoomInitialized().catch(() => undefined);
+    seedBundledRooms().catch(() => undefined);
 
     const getActiveRoomId = async (): Promise<string> => {
       const idx = await readRoomsIndex();
