@@ -8,7 +8,7 @@
         const v = cur && cur.searchParams ? cur.searchParams.get('v') : '';
         if(v) return String(v);
       }catch{}
-      return 'feed-v3-20260326.2';
+      return 'feed-v3-20260402.3';
     })();
 
     // Soft muted color palette for agent name coloring (deterministic, dark-background friendly).
@@ -2293,7 +2293,7 @@
     const FEED = {
       show: true, // feed always visible
 
-      // v3: human-friendly rows (newest-first) with folded low-level ops.
+      // v4: minimal high-signal rows only (newest-first).
       rows: [],
 
       // v2/raw: latest polled items/tasks (still useful for debug and segment details)
@@ -2362,6 +2362,42 @@
     function feedUpdatedAge(ts){
       const age = feedAge(ts);
       return age ? age : ''; // "Xs ago" without "updated" prefix - more human
+    }
+
+    const FEED_NOW_SUMMARY_DECAY_MS = 2 * 60 * 1000;
+    const FEED_NOW_SUMMARY_HIDE_MS = 10 * 60 * 1000;
+    const FEED_NOW_SUMMARY_TRIM_SOFT = 140;
+    const FEED_NOW_SUMMARY_TRIM_STALE = 88;
+
+    function feedTrimSummaryText(raw, maxLen){
+      try{
+        let out = String(raw || '').replace(/\s+/g, ' ').trim();
+        const lim = Math.max(24, Number(maxLen || FEED_NOW_SUMMARY_TRIM_SOFT));
+        if(!out) return '';
+        if(out.length > lim) out = out.slice(0, lim - 1).trimEnd() + '…';
+        return out;
+      }catch{return ''}
+    }
+
+    function feedNowSummaryDisplay(lineState, ageMs, summary){
+      const clean = String(summary || '').trim();
+      if(!clean) return { show:false, text:'', title:'', stale:false, expired:false };
+      const st = String(lineState || '').trim().toLowerCase();
+      const ms = Number(ageMs || 0);
+      const isIdle = (st === 'idle' || st === 'wait');
+      if(!isIdle || !isFinite(ms) || ms <= 0){
+        const text = feedTrimSummaryText(clean, FEED_NOW_SUMMARY_TRIM_SOFT);
+        return { show:!!text, text, title:clean, stale:false, expired:false };
+      }
+      if(ms >= FEED_NOW_SUMMARY_HIDE_MS) return { show:false, text:'', title:clean, stale:true, expired:true };
+      const age = feedUpdatedAge(Date.now() - ms);
+      if(ms >= FEED_NOW_SUMMARY_DECAY_MS){
+        const trimmed = feedTrimSummaryText(clean, FEED_NOW_SUMMARY_TRIM_STALE);
+        const text = age ? (age + ' · ' + trimmed) : trimmed;
+        return { show:!!text, text, title:clean, stale:true, expired:false };
+      }
+      const text = feedTrimSummaryText(clean, FEED_NOW_SUMMARY_TRIM_SOFT);
+      return { show:!!text, text, title:clean, stale:false, expired:false };
     }
 
     function feedReplyPreviewValue(details, recentEvents){
@@ -2799,29 +2835,65 @@
         feedPanelEl.style.setProperty('--feed-agent-col-ch', String(agentColCh) + 'ch');
       }
 
-      // "Now" section (per-agent activity snapshot)
+      // "Now" section — all agents always shown, with current state as label
       if(nowEl){
         const lines = [];
         const agents = Array.isArray(MODEL.agents) ? MODEL.agents : [];
+        const latestRowByAgent = new Map();
+        for(const row of rows){
+          const rowAgent = feedNormalizeAgentId(row && row.agentId);
+          if(!rowAgent || latestRowByAgent.has(rowAgent)) continue;
+          latestRowByAgent.set(rowAgent, row);
+        }
         for(const a of agents){
           const id0 = String(a && a.id || '').trim();
           if(!id0) continue;
           const id = feedNormalizeAgentId(id0);
           if(!feedMatchesAgentFilter(id)) continue;
           const st = String((a && a.state) || 'idle');
-          const details = (a && a.debug && a.debug.decision && a.debug.decision.details) ? a.debug.decision.details : null;
-          const recentEvents = (a && a.debug && a.debug.decision && Array.isArray(a.debug.decision.recentEvents))
-            ? a.debug.decision.recentEvents
-            : [];
-          const tn = (details && details.toolName)
-            ? String(details.toolName)
-            : '';
-          const lastMs = (a && a.debug && a.debug.decision && typeof a.debug.decision.lastEventMs === 'number')
-            ? a.debug.decision.lastEventMs
-            : ((a && a.meta && typeof a.meta.maxUpdatedAt === 'number') ? a.meta.maxUpdatedAt : null);
+          const meta = (a && a.meta) ? a.meta : null;
+          const latestRow = latestRowByAgent.get(id) || null;
+          // Use FEED.rows latest row timestamp as primary source — meta.maxUpdatedAt from
+          // MODEL.agents does NOT update when subagents (coding_agent/qa_agent) run, so it is
+          // stale. FEED.rows is updated whenever any agent/subagent produces a feed event.
+          const lastMs = (latestRow && typeof latestRow.ts === 'number') ? latestRow.ts : null;
           const age = lastMs ? feedUpdatedAge(lastMs) : '';
-          lines.push({ agent: '@' + id, state: feedHumanState(st, tn, details, recentEvents), age });
+          const ageMs = lastMs ? Math.max(0, Date.now() - Number(lastMs || 0)) : null;
+          // summary: prefer taskTitle, then recentSummary, then row what
+          const summaryRaw = String((meta && meta.recentSummary) || (latestRow && (latestRow.details && latestRow.details.taskTitle) || latestRow?.what) || '').trim();
+          let previewRaw = String((latestRow && (latestRow.preview || latestRow.previewWithActor)) || '').trim();
+          if(previewRaw && (previewRaw.startsWith('[Subagent Context]') || previewRaw.startsWith('[cron:'))) previewRaw = '';
+          const summaryFinal = summaryRaw || previewRaw || '';
+          // Show as "active now" only if non-idle AND has recent feed activity (within 10s)
+          const isActive = st !== 'idle' && ageMs != null && ageMs <= 10*1000;
+          // NEVER continue/skip — all agents always shown in Now panel
+          let humanState = isActive ? 'active now' : st;
+          if(st === 'error') humanState = 'error';
+          const summary = summaryFinal && summaryFinal.toLowerCase() !== humanState.toLowerCase() ? summaryFinal : '';
+          const summaryView = feedNowSummaryDisplay(humanState, ageMs, summary);
+          lines.push({ agent: '@' + id, state: humanState, age, ageMs, summary, summaryView });
         }
+        // Also show running subagent tasks from FEED.tasks — these reflect actual live subagent
+        // work even when MODEL.agents heartbeat hasn't updated (subagent activity is not
+        // reflected in the parent agent's state). Skip agents already covered by the loop above.
+        const runningTasks = (FEED.tasks || []).filter(t => t && t.status === 'running');
+        for (const t of runningTasks) {
+          const taskAgentId = feedNormalizeAgentId(t && t.agentId);
+          if (!taskAgentId || !feedMatchesAgentFilter(taskAgentId)) continue;
+          // Skip if this agent was already added to lines by the MODEL.agents loop above
+          if (lines.some(line => line.agent === '@' + taskAgentId)) continue;
+          const taskTitle = String(t.title || '').trim();
+          const taskEndTs = Number(t.endTs || 0);
+          const taskStartTs = Number(t.startTs || 0);
+          const taskLastTs = taskEndTs || taskStartTs || 0;
+          const taskAge = taskLastTs ? feedUpdatedAge(taskLastTs) : '';
+          const taskAgeMs = taskLastTs ? Math.max(0, Date.now() - taskLastTs) : null;
+          const humanState = 'active now';
+          const summary = taskTitle || '';
+          const summaryView = feedNowSummaryDisplay(humanState, taskAgeMs, summary);
+          lines.push({ agent: '@' + taskAgentId, state: humanState, age: taskAge, ageMs: taskAgeMs, summary, summaryView });
+        }
+        // Sort agents alphabetically — stable every poll, no active-first reordering
         lines.sort((a, b)=> String(a.agent).localeCompare(String(b.agent)));
         if(lines.length){
           nowEl.style.display = '';
@@ -2837,20 +2909,40 @@
             agent.className = 'feed-now-agent';
             agent.textContent = line.agent;
             agent.style.color = agentColor(line.agent);
+            const copy = document.createElement('div');
+            copy.className = 'feed-now-copy';
             const state = document.createElement('span');
             state.className = 'feed-now-state';
             const isIdle = (line.state === 'idle');
-            // For idle, don't show time suffix (more human, less noisy)
             const bits = [line.state];
-            if(line.age && !isIdle) bits.push(line.age);
+            if(line.age && (!isIdle || (line.summaryView && (line.summaryView.stale || line.summaryView.expired)))) bits.push(line.age);
             state.textContent = bits.join(' · ');
+            copy.appendChild(state);
+            if(line.summaryView && line.summaryView.show){
+              const summary = document.createElement('span');
+              summary.className = 'feed-now-summary' + (line.summaryView.stale ? ' stale' : '');
+              summary.textContent = line.summaryView.text;
+              summary.title = line.summaryView.title;
+              copy.appendChild(summary);
+            }
             row.appendChild(agent);
-            row.appendChild(state);
+            row.appendChild(copy);
             nowEl.appendChild(row);
           }
         }else{
-          nowEl.style.display = 'none';
-          nowEl.textContent = '';
+          // Always show Now panel, even with empty content
+          nowEl.style.display = '';
+          nowEl.innerHTML = '';
+          const title = document.createElement('div');
+          title.className = 'feed-now-title';
+          title.textContent = 'Now';
+          nowEl.appendChild(title);
+          const emptyMsg = document.createElement('div');
+          emptyMsg.className = 'feed-now-line';
+          emptyMsg.style.color = '#888';
+          emptyMsg.style.fontSize = '11px';
+          emptyMsg.textContent = 'no recent activity';
+          nowEl.appendChild(emptyMsg);
         }
       }
 
@@ -3044,10 +3136,10 @@
         if(!(r && r.sessionKey && r.segment)) return;
         body = Object.assign(body, { sessionKey: r.sessionKey, startMs: r.segment.startTs, endMs: r.segment.endTs });
       }else if(scope === 'since'){
-        const since = (typeof FEED.lastViewedMs === 'number' && isFinite(FEED.lastViewedMs)) ? FEED.lastViewedMs : (now - 60*60*1000);
+        const since = (typeof FEED.lastViewedMs === 'number' && isFinite(FEED.lastViewedMs)) ? FEED.lastViewedMs : (now - 60*10*1000);
         body = Object.assign(body, { sinceMs: since });
       }else{
-        body = Object.assign(body, { sinceMs: now - 60*60*1000 });
+        body = Object.assign(body, { sinceMs: now - 60*10*1000 });
       }
 
       FEED.summaryText = 'Summarizing…';
@@ -3146,6 +3238,8 @@
       const btnAgentLabelsOpen = document.getElementById('btn-agent-labels-open');
       const retentionSelect = document.getElementById('retention-select');
       const retentionStatus = document.getElementById('retention-status');
+      const btnResetSnapshot = document.getElementById('btn-reset-snapshot');
+      const snapshotResetStatus = document.getElementById('snapshot-reset-status');
 
       // Labels modal
       const labelsBackdrop = document.getElementById('labels-backdrop');
@@ -3484,6 +3578,19 @@
             if(labelsStatus) labelsStatus.textContent = 'Save failed.';
           }
         });
+
+        if(btnResetSnapshot){
+          btnResetSnapshot.addEventListener('click', async ()=>{
+            try{
+              const r = await fetch(apiPath('./api/snapshot-reset'), {method:'POST', headers:{'content-type':'application/json'}, body: '{}'});
+              const j = r.ok ? await r.json() : null;
+              if(j && j.ok){
+                if(snapshotResetStatus) snapshotResetStatus.style.display = 'block';
+                setTimeout(()=>{ if(snapshotResetStatus) snapshotResetStatus.style.display = 'none'; }, 3000);
+              }
+            }catch{}
+          });
+        }
       })();
 
       async function loadManualMapFromServer(){
