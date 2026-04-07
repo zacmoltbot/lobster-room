@@ -2915,7 +2915,7 @@
             state.className = 'feed-now-state';
             const isIdle = (line.state === 'idle');
             const bits = [line.state];
-            if(line.age && !line.summaryView?.stale) bits.push(line.age);
+            if(line.age) bits.push(line.age);
             state.textContent = bits.join(' · ');
             copy.appendChild(state);
             if(line.summaryView && line.summaryView.show){
