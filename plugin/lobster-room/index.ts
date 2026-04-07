@@ -392,7 +392,7 @@ export default {
     };
 
     // --- Retention (per-active-room) ---
-    const RETENTION_DEFAULT_MS = 604800000; // 7 days
+    const RETENTION_DEFAULT_MS = 3 * 60 * 60 * 1000; // 3 hours
 
     const readRetention = async (roomId: string): Promise<number> => {
       try {

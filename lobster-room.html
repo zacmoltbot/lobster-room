@@ -231,6 +231,7 @@
     .modal-h{flex:0 0 auto;display:flex;align-items:center;justify-content:space-between;padding:14px 16px;border-bottom:1px solid rgba(255,255,255,.08)}
     .modal-h .t{font-weight:800;color:var(--textStrong)}
     .modal-b{flex:1 1 auto;padding:14px 16px;display:flex;flex-direction:column;gap:12px;overflow:auto}
+    .modal-b hr{border:none;border-top:1px solid rgba(255,255,255,.10);margin:4px 0}
 
     /* Room editor */
     .editor{border:1px solid rgba(255,255,255,.10);border-radius:14px;background:rgba(255,255,255,.03);padding:12px;display:flex;flex-direction:column;gap:10px}
@@ -249,6 +250,7 @@
     .btn.danger{border-color:rgba(248,113,113,.35);color:rgba(248,113,113,.95)}
     .hint{font-size:12px;color:var(--dim);line-height:1.4}
     .hint.section-label{font-size:11px;color:var(--dim);opacity:.65;text-transform:uppercase;letter-spacing:.06em;margin-bottom:1px}
+    .settings-section-title{font-size:11px;font-weight:700;color:var(--textStrong);text-transform:uppercase;letter-spacing:.08em;padding:2px 0 6px}
   </style>
 </head>
 <body>
@@ -424,6 +426,7 @@
         <button class="btn" id="btn-settings-close">Close</button>
       </div>
       <div class="modal-b">
+        <div class="settings-section-title">ROOM SETUP</div>
         <div class="hint">Room background image (top-down). Upload creates a new Room. Each Room has its own manual walkable map.</div>
         <div class="row">
           <div class="hint" style="min-width:52px">Room</div>
@@ -437,48 +440,6 @@
           <button class="btn danger" id="btn-reset-room">Switch to default</button>
           <button class="btn danger" id="btn-delete-room" type="button" style="display:none">Delete room</button>
           <div class="hint" id="room-status">—</div>
-        </div>
-
-        <div class="hint">Background opacity</div>
-        <div class="row">
-          <input id="bg-opacity" type="range" min="0" max="1" step="0.01" value="0.8" class="grow" />
-          <div class="hint" id="bg-opacity-val">80%</div>
-        </div>
-
-        <div class="hint">Lobster size</div>
-        <div class="row">
-          <input id="lobster-size" type="range" min="18" max="72" step="1" value="38" class="grow" />
-          <div class="hint" id="lobster-size-val">38px</div>
-        </div>
-
-        <div class="hint section-label">History retention</div>
-        <div class="row">
-          <select id="retention-select" style="background:#0f1115;border:1px solid rgba(255,255,255,.10);color:var(--text);padding:10px 12px;border-radius:10px;min-width:180px">
-            <option value="3600000">1 hour</option>
-            <option value="10800000" selected>3 hours</option>
-            <option value="21600000">6 hours</option>
-            <option value="43200000">12 hours</option>
-            <option value="86400000">1 day</option>
-            <option value="259200000">3 days</option>
-          </select>
-          <div class="hint" id="retention-status"></div>
-        </div>
-
-        <div class="row">
-          <label class="hint" style="display:flex;gap:8px;align-items:center">
-            <input id="toggle-regions" type="checkbox" /> Show zones (debug)
-          </label>
-        </div>
-
-        <div class="row">
-          <label class="hint" style="display:flex;gap:8px;align-items:center">
-            <input id="toggle-agent-detail" type="checkbox" /> Show agent detail
-          </label>
-        </div>
-
-        <div class="row" style="justify-content:flex-start;gap:10px;margin-top:12px">
-          <button class="btn" id="btn-agent-labels-open" type="button">Edit agent names</button>
-          <div class="hint" id="agent-labels-status"></div>
         </div>
 
         <div class="editor" id="room-editor">
@@ -514,6 +475,54 @@
             <span class="sw"><i style="background:rgba(34,211,238,.40)"></i>Corridor</span>
             <span class="sw"><i style="background:rgba(0,0,0,.45);border:1px solid rgba(255,255,255,.10)"></i>Blocked</span>
           </div>
+        </div>
+
+        <hr>
+
+        <div class="settings-section-title">APPEARANCE</div>
+        <div class="hint">Background opacity</div>
+        <div class="row">
+          <input id="bg-opacity" type="range" min="0" max="1" step="0.01" value="0.8" class="grow" />
+          <div class="hint" id="bg-opacity-val">80%</div>
+        </div>
+
+        <div class="hint">Lobster size</div>
+        <div class="row">
+          <input id="lobster-size" type="range" min="18" max="72" step="1" value="38" class="grow" />
+          <div class="hint" id="lobster-size-val">38px</div>
+        </div>
+
+        <div class="row">
+          <label class="hint" style="display:flex;gap:8px;align-items:center">
+            <input id="toggle-regions" type="checkbox" /> Show zones (debug)
+          </label>
+        </div>
+
+        <hr>
+
+        <div class="settings-section-title">HISTORY &amp; AGENTS</div>
+        <div class="hint section-label">History retention</div>
+        <div class="row">
+          <select id="retention-select" style="background:#0f1115;border:1px solid rgba(255,255,255,.10);color:var(--text);padding:10px 12px;border-radius:10px;min-width:180px">
+            <option value="3600000">1 hour</option>
+            <option value="10800000" selected>3 hours</option>
+            <option value="21600000">6 hours</option>
+            <option value="43200000">12 hours</option>
+            <option value="86400000">1 day</option>
+            <option value="259200000">3 days</option>
+          </select>
+          <div class="hint" id="retention-status"></div>
+        </div>
+
+        <div class="row">
+          <label class="hint" style="display:flex;gap:8px;align-items:center">
+            <input id="toggle-agent-detail" type="checkbox" /> Show agent detail
+          </label>
+        </div>
+
+        <div class="row" style="justify-content:flex-start;gap:10px;margin-top:12px">
+          <button class="btn" id="btn-agent-labels-open" type="button">Edit agent names</button>
+          <div class="hint" id="agent-labels-status"></div>
         </div>
       </div>
     </div>
