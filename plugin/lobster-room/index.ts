@@ -2440,22 +2440,16 @@ export default {
       let fallback: string;
       if (isAdoptableChildLane(parsed.lane)) {
         if (parsed.residentAgentId === "main") {
-          // Find the most recent pending attribution with a real (non-helper/non-main) agentId.
-          let realActor: string | undefined;
-          let bestAge = Infinity;
-          const now = nowMs();
+          // Prefer pending attribution actorId over plain "main"; fallback to "main" only if none.
+          let bestActor: string | undefined;
           for (const arr of pendingSpawnAttributionsByParent.values()) {
             for (const attr of arr) {
-              const actor = attr.actorId || "";
-              if (!actor || actor === "main" || actor === "helper" || actor === UNKNOWN_CHILD_ACTOR_ID) continue;
-              const age = Math.abs((attr.createdAt || 0) - now);
-              if (age < bestAge) {
-                bestAge = age;
-                realActor = actor;
+              if (attr.actorId && attr.actorId !== "helper" && attr.actorId !== UNKNOWN_CHILD_ACTOR_ID) {
+                bestActor = attr.actorId;
               }
             }
           }
-          fallback = realActor || "helper";
+          fallback = bestActor || "main";
         } else {
           const residentVisible = canonicalVisibleAgentId(parsed.residentAgentId);
           fallback = residentVisible || UNKNOWN_CHILD_ACTOR_ID;
