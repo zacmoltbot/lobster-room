@@ -2266,7 +2266,7 @@ export default {
       const parsed = parseSessionIdentity(sk, ctx?.agentId);
       if (!hasAdoptableChildProof(sk, parsed.residentAgentId)) return undefined;
       const existingActorId = spawnedSessionAgentIds.get(sk);
-      if (existingActorId) {
+      if (existingActorId && existingActorId !== "helper" && existingActorId !== UNKNOWN_CHILD_ACTOR_ID) {
         observedChildSessions.delete(sk);
         return {
           intentId: `bound:${sk}`,
@@ -2397,8 +2397,17 @@ export default {
       const adoptedAttribution = childSessionKey && isAdoptableChildLane(parsed.lane)
         ? await adoptPendingSpawnAttributionForSession(childSessionKey, ctx)
         : undefined;
+      const spawnedFromMap = spawnedSessionAgentIds.get(childSessionKey);
+      api.logger.info("[lobster-room] resolveFeedAgentIdentity spawned check", {
+        childSessionKey,
+        hasAdopted: !!adoptedAttribution,
+        adoptedActorId: adoptedAttribution?.actorId,
+        spawnedFromMap,
+        parsedLane: parsed.lane,
+        parsedResident: parsed.residentAgentId,
+      });
       const spawnedVisible = childSessionKey
-        ? (adoptedAttribution?.actorId || spawnedSessionAgentIds.get(childSessionKey) || "")
+        ? (adoptedAttribution?.actorId || spawnedFromMap || "")
         : "";
       if (spawnedVisible) {
         return {
