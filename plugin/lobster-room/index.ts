@@ -2398,7 +2398,7 @@ export default {
         ? await adoptPendingSpawnAttributionForSession(childSessionKey, ctx)
         : undefined;
       const spawnedVisible = childSessionKey
-        ? (spawnedSessionAgentIds.get(childSessionKey) || adoptedAttribution?.actorId || "")
+        ? (adoptedAttribution?.actorId || spawnedSessionAgentIds.get(childSessionKey) || "")
         : "";
       if (spawnedVisible) {
         return {
@@ -2435,18 +2435,17 @@ export default {
         }
       }
       // For child (subagent) lanes: use parsed.residentAgentId from the session key.
-      // If the resident is "main" (generic parent), show "helper" instead of UNKNOWN.
-      // canonicalVisibleAgentId("main") returns "" which breaks the naive check.
+      // If the resident is "main" (generic parent), prefer pending attribution actorId;
+      // fallback to "main" itself if none (NOT to "helper").
       let fallback: string;
       if (isAdoptableChildLane(parsed.lane)) {
         if (parsed.residentAgentId === "main") {
-          // Prefer pending attribution actorId over plain "main"; fallback to "main" only if none.
+          const pending = pendingSpawnAttributionsByResident.get("main") || [];
           let bestActor: string | undefined;
-          for (const arr of pendingSpawnAttributionsByParent.values()) {
-            for (const attr of arr) {
-              if (attr.actorId && attr.actorId !== "helper" && attr.actorId !== UNKNOWN_CHILD_ACTOR_ID) {
-                bestActor = attr.actorId;
-              }
+          for (const attr of pending) {
+            if (attr.actorId && attr.actorId !== "helper" && attr.actorId !== UNKNOWN_CHILD_ACTOR_ID) {
+              bestActor = attr.actorId;
+              break;
             }
           }
           fallback = bestActor || "main";
