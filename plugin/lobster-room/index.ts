@@ -3874,7 +3874,9 @@ export default {
           );
           const snapState = snapFresh ? (snapRow.state as ActivityState) : null;
           const feedTruth = latestVisibleFeedItemForAgent(agentId);
-          const feedTruthState = inferActivityFromFeedItem(feedTruth);
+          // Now panel enforces a stricter 10s window for feed-based activity (vs staleMs 15s used elsewhere)
+          const nowPanelFeedTruth = (feedTruth && (t - Number(feedTruth.ts)) <= 10000) ? feedTruth : null;
+          const feedTruthState = inferActivityFromFeedItem(nowPanelFeedTruth);
           const freshCanonicalChildFeedCluster = hasFreshCanonicalChildFeedCluster(agentId, feedTruth);
           const freshActiveCorroborated = hasFreshCorroboratedActiveSignal({ snapFresh, snapState, snapRow, feedTruth, feedTruthState });
           const activeGrace = freshActiveCorroborated || freshCanonicalChildFeedCluster;
