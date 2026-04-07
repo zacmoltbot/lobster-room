@@ -2796,9 +2796,11 @@
       return id0;
     }
 
+    // Always filter out system placeholder agentIds from all rendering.
+    const HIDDEN_AGENTS = new Set(["helper", "unknown"]);
     function feedMatchesAgentFilter(v){
       const want = feedNormalizeAgentId(FEED._agentFilter || '');
-      if(!want) return true;
+      if(!want) return !HIDDEN_AGENTS.has(feedNormalizeAgentId(v));
       return feedNormalizeAgentId(v) === want;
     }
 
@@ -3056,6 +3058,7 @@
           FEED.items = [];
 
           // Build filter list from known agent ids so selecting one agent doesn't hide the others.
+          // Filter out system placeholder agentIds that should not appear in the UI.
           const agents = [...new Set(
             ([]).concat(
               FEED._knownAgents || [],
@@ -3066,7 +3069,7 @@
                 return m ? m[1] : id0;
               }),
               agentId || ''
-            ).filter(Boolean)
+            ).filter(id => id && !HIDDEN_AGENTS.has(id))
           )].sort();
           FEED._knownAgents = agents.slice();
           if(agentSel){
