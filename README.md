@@ -1,10 +1,19 @@
 # Lobster Room 🦞
 
-A cute, practical dashboard that visualizes your OpenClaw **agents & sessions** as lobsters in a bird’s‑eye room view, with live status bubbles (replying / thinking / tool / idle / error).
+A cute, practical OpenClaw room dashboard that visualizes your **agents, sessions, and active work** as lobsters in a bird’s-eye room view — with a docked task feed, consistent resident identity, and room-aware movement.
 
 > Served as an **OpenClaw Gateway plugin** at: `https://<openclaw-host>/lobster-room/`
 
 ![Demo (animated)](docs/screenshots/demo.gif)
+
+## What's New in v0.3.0
+
+- **Bundled starter rooms**: ship with multiple built-in room backgrounds + walk maps so first-run looks polished immediately
+- **Canonical agent identity**: feed rows, resident avatars, and the Now panel resolve to the same visible agent instead of leaking child/internal ids
+- **Room consistency fixes**: switching rooms, rehydration, and default-room reset now stay visually and logically in sync
+- **Cleaner Settings IA**: Settings is reorganized into **Room Setup**, **Appearance**, and **History & Agents** for faster editing
+- **Stronger feed UX**: humanized task wording, better parent/child attribution, and fewer duplicate / unknown agent rows
+- **Homepage demo refresh**: updated animated demo and screenshots now match the current v0.3.0 UI behavior
 
 **Links**
 - Portal: `https://<openclaw-host>/lobster-room/`
@@ -127,7 +136,7 @@ This is an OpenClaw **plugin**. After updating, you must restart/redeploy the Op
 
 ### UI version stamp
 
-Open the Move Debug panel (Settings → *Show Move Debug panel*) and check the `ui=<hash>` stamp. It’s the fastest way to confirm which frontend build is being served.
+Check the `ui=<hash>` stamp shown in the Move Debug panel, or the `?v=` cache-bust in the script tag. It’s the fastest way to confirm which frontend build is being served.
 
 ## How status works (truth + evidence)
 
@@ -137,14 +146,7 @@ This project monitors OpenClaw **in-process** via plugin lifecycle hooks.
 - `tool` comes from: `before_tool_call` (with `toolName`)
 - Tool completion is inferred from: `tool_result_persist` and/or `after_tool_call`
 - `idle` is entered after a short cooldown, and watchdogs prevent “stuck” states
-
-### Replying
-
-`replying` is driven by outbound message hooks (`message_sending` / `message_sent`) **when available**.
-
-Some OpenClaw builds/environments may not emit these hooks; in that case we fall back to a **synthetic** `replying` blip on successful `agent_end` so the UI matches user-perceived behavior.
-
-Privacy note: by default we **do not** store outbound message previews in debug traces. If you really need that for debugging, set plugin config `debugCaptureMessagePreview=true`.
+- `replying` shows when an agent is sending a message back to the user
 
 ## Settings (features)
 
@@ -159,7 +161,7 @@ Lobster Room ships with a small Settings UI so you can tweak behavior without re
 
 - Settings → **Room**
 - Create/switch rooms
-- Upload a background image
+- Start from bundled rooms or upload your own background image
 - Reset back to Default room
 
 ### Manual map editor
@@ -170,9 +172,9 @@ Lobster Room ships with a small Settings UI so you can tweak behavior without re
 
 ### HUD / debug
 
-- **Move Debug panel** (HUD + log) for screenshots and collaboration
-- Options like **Freeze roaming** (only move on zone change)
-- Optional overlays/debug toggles
+The Move Debug panel is a developer tool, hidden from Settings by default.
+Use `?moveDebug=1` in the URL or run `MVDBG.visible=true` in the browser console to show it.
+It provides movement HUD, log, and overlay controls.
 
 ### Background opacity
 
@@ -180,9 +182,13 @@ Lobster Room ships with a small Settings UI so you can tweak behavior without re
 
 ## Debug
 
-### Move Debug panel
+### Move Debug panel (developer tool)
 
-The Move Debug panel is **hidden by default**. Enable it in Settings when needed.
+The Move Debug panel is **hidden from Settings by default**. To enable it:
+- URL: append `?moveDebug=1` to the Lobster Room URL
+- Console: run `MVDBG.visible=true`
+
+The panel shows movement HUD, log, and overlay controls for debugging agent roaming.
 
 ### Activity traces
 

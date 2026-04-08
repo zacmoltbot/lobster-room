@@ -1,0 +1,12 @@
+[
+  {
+    "tag": "v0.3.0",
+    "message": "Bundled starter rooms, canonical identity fixes, room consistency repairs, Settings IA cleanup, and refreshed homepage assets",
+    "date": "2026-04-09"
+  },
+  {
+    "tag": "[P1.6]",
+    "message": "Now/Face wording: removed 'updated' prefix and hide time for idle state",
+    "date": "2026-03-24"
+  }
+]

@@ -1,5 +1,15 @@
-    // UI build stamp (bump this when you deploy so we can confirm which frontend is running).
-    const UI_VERSION = 'feed-v3-20260323.1';
+    // UI build stamp injected by the HTML shell / backend source of truth.
+    const UI_VERSION = (function(){
+      try{
+        if(typeof window !== 'undefined' && window.__LOBSTER_ROOM_UI_VERSION) return String(window.__LOBSTER_ROOM_UI_VERSION);
+      }catch{}
+      try{
+        const cur = document.currentScript && document.currentScript.src ? new URL(document.currentScript.src, window.location.href) : null;
+        const v = cur && cur.searchParams ? cur.searchParams.get('v') : '';
+        if(v) return String(v);
+      }catch{}
+      return 'feed-v3-20260402.3';
+    })();
 
     // Soft muted color palette for agent name coloring (deterministic, dark-background friendly).
     const AGENT_COLORS = ['#7eb8da','#b4a7d6','#8dd49e','#e6b89c','#d4a5c9','#8ecfc9','#d4c88a'];
@@ -42,14 +52,23 @@
     try { window.MODEL = MODEL; } catch {}
     try { window.UI_VERSION = UI_VERSION; } catch {}
 
+    function apiPath(path){
+      const raw = String(path || '');
+      if(!raw) return raw;
+      if(/^(?:https?:)?\/\//i.test(raw)) return raw;
+      const clean = raw.replace(/^\.\//, '').replace(/^\/+/, '');
+      const base = (typeof window !== 'undefined' && window.__LOBSTER_ROOM_API_BASE__) ? String(window.__LOBSTER_ROOM_API_BASE__) : '/lobster-room/';
+      return base.replace(/\/?$/, '/') + clean;
+    }
+
     async function apiGetJson(path){
-      const r = await fetch(path, {cache:'no-store'});
+      const r = await fetch(apiPath(path), {cache:'no-store'});
       if(!r.ok) throw new Error('HTTP ' + r.status);
       return await r.json();
     }
     async function apiPostJson(path, body, opts){
       const o = opts || {};
-      const r = await fetch(path, {method:'POST', headers:{'content-type':'application/json'}, body: JSON.stringify(body), signal: o.signal});
+      const r = await fetch(apiPath(path), {method:'POST', headers:{'content-type':'application/json'}, body: JSON.stringify(body), signal: o.signal});
       if(!r.ok) throw new Error('HTTP ' + r.status);
       return await r.json().catch(()=>({ok:true}));
     }
@@ -403,7 +422,7 @@
     async function saveLayout(layout){
       try{ localStorage.setItem('lobsterRoom.layout', JSON.stringify(layout)); }catch{}
       // best-effort persist to server if endpoint exists
-      try{ await fetch('./api/room-layout', {method:'POST', headers:{'content-type':'application/json'}, body: JSON.stringify(layout)}); }catch{}
+      try{ await fetch(apiPath('./api/room-layout'), {method:'POST', headers:{'content-type':'application/json'}, body: JSON.stringify(layout)}); }catch{}
     }
 
     function tileMetricsFromImage(img, TX, TY, scale=6){
@@ -1201,8 +1220,48 @@
       }
     }
 
-    function refreshLegend(){
+    function inferTaskResidentState(task){
+      const items = Array.isArray(task && task.items) ? task.items : [];
+      for(let i=items.length-1;i>=0;i--){
+        const uiState = inferActivityFromFeedItem(items[i]);
+        if(uiState) return mapActivityToUiState(uiState);
+      }
+      return (task && task.status === 'running') ? 'think' : 'wait';
+    }
+
+    function currentResidents(){
+      const byId = new Map();
       const agents = Array.isArray(MODEL.agents) ? MODEL.agents : [];
+      for(const raw of agents){
+        const agent = raw && typeof raw === 'object' ? raw : null;
+        if(!agent) continue;
+        const canonicalId = feedNormalizeAgentId(agent.id || agent.rawId || agent.name || '');
+        if(!canonicalId) continue;
+        byId.set(canonicalId, Object.assign({}, agent, {
+          id: canonicalId,
+          name: agent.name || canonicalId,
+        }));
+      }
+
+      const tasks = Array.isArray(FEED.tasks) ? FEED.tasks : [];
+      for(const task of tasks){
+        if(!task || task.status !== 'running') continue;
+        const canonicalId = feedNormalizeAgentId(task.agentId || '');
+        if(!canonicalId || byId.has(canonicalId)) continue;
+        byId.set(canonicalId, {
+          id: canonicalId,
+          name: canonicalId,
+          state: inferTaskResidentState(task),
+          meta: { taskFallback: true },
+          debug: { decision: { currentTruthSource: 'feed-task-fallback', taskId: task.id || null, sessionKey: task.sessionKey || null } },
+        });
+      }
+
+      return Array.from(byId.values()).sort((a, b)=> String(a && a.id || '').localeCompare(String(b && b.id || '')));
+    }
+
+    function refreshLegend(){
+      const agents = currentResidents();
       const counts = { reply: 0, think: 0, tool: 0, build: 0, wait: 0, err: 0 };
       for(const a of agents){
         const st = String(a && a.state || 'idle').toLowerCase();
@@ -1752,7 +1811,7 @@
       const room = document.getElementById('room');
       if(!MODEL.nodeById) MODEL.nodeById = {};
 
-      const placed = layoutAgentsByZone(MODEL.agents);
+      const placed = layoutAgentsByZone(currentResidents());
       const nextIds = new Set(placed.map(a=>a.id));
 
       // Remove nodes that disappeared
@@ -1897,9 +1956,9 @@
               txt = feedReplyingText(d, evs);
             }else if(kind === 'before_tool_call' && d && d.toolName){
               const tool = String(d.toolName || '').trim();
-              if(tool === 'browser') txt = 'Inspecting in browser';
+              if(tool === 'browser') txt = 'Checking the live page';
               else if(tool === 'exec') txt = feedCommandIntent(d.command||'');
-              else if(tool === 'read') txt = 'Reading project files';
+              else if(tool === 'read') txt = 'Reviewing project files';
               else if(tool === 'write') txt = 'Updating project files';
               else if(tool === 'edit') txt = 'Updating project files';
               else if(tool === 'sessions_spawn') { const label = feedDetailTaskLabel(d, evs); txt = label ? ('Starting a helper task — ' + label) : 'Starting a helper task'; }
@@ -2116,11 +2175,9 @@
       // Lightweight build/activity monitor. Keep MODEL.activity fresh, but do not render agent status in the footer.
       if(MODEL.activityPollDisabled) return;
       try{
-        const r = await fetch('./api/lobster-room', {
-          method: 'POST',
-          headers: {'content-type':'application/json'},
+        const r = await fetch(apiPath('./api/lobster-room?view=activity'), {
+          method: 'GET',
           cache: 'no-store',
-          body: JSON.stringify({op: 'activityGet'}),
         });
         if(!r.ok){
           if(r.status === 404){ MODEL.activityPollDisabled = true; }
@@ -2174,22 +2231,29 @@
         // to avoid initial "teleport/jitter" caused by placing with empty pools.
         if(MODEL.manualReady === false) return;
         // Use relative URL so Lobster Room can be mounted under a subpath (e.g. /lobster-room/).
-        const res = await fetch('./api/lobster-room', {cache:'no-store'});
+        const res = await fetch(apiPath('./api/lobster-room'), {cache:'no-store'});
         if(res.ok){
           const data = await res.json();
 
           // Build tag (backend)
           MODEL.buildTag = data.buildTag || '';
 
-          // Agents from API.
-          MODEL.agents = (data.agents || []).map(a => ({
-            id: a.id,
-            name: a.name,
-            state: a.state || 'wait',
-            x: a.x,
-            y: a.y,
-            meta: a.meta || null,
-            debug: a.debug,
+          // Agents from API — canonicalize ids first, then collapse to one row per canonical agent.
+          MODEL.agents = feedCollapseCanonicalAgents((data.agents || []).map(a => {
+            const debugDecision = a && a.debug && a.debug.decision ? a.debug.decision : null;
+            const debugDetails = debugDecision && debugDecision.details && typeof debugDecision.details === 'object' ? debugDecision.details : null;
+            const sessionKey = String((debugDetails && (debugDetails.sessionKey || debugDetails.feedTruthSessionKey)) || (debugDecision && debugDecision.sessionKey) || '').trim();
+            const canonicalId = feedCanonicalAgentId(a && a.id, {sessionKey}) || feedCanonicalAgentId(debugDecision && debugDecision.agentId, {sessionKey}) || feedCanonicalAgentId(a && a.name, {sessionKey}) || String(a && a.id || '').trim();
+            return {
+              id: canonicalId,
+              rawId: a && a.id,
+              name: a.name,
+              state: a.state || 'wait',
+              x: a.x,
+              y: a.y,
+              meta: a.meta || null,
+              debug: a.debug,
+            };
           }));
           // Keep last-known-good snapshot so we can keep rendering on transient errors.
           MODEL.lastGoodAgents = MODEL.agents;
@@ -2274,7 +2338,7 @@
     const FEED = {
       show: true, // feed always visible
 
-      // v3: human-friendly rows (newest-first) with folded low-level ops.
+      // v4: minimal high-signal rows only (newest-first).
       rows: [],
 
       // v2/raw: latest polled items/tasks (still useful for debug and segment details)
@@ -2343,6 +2407,42 @@
     function feedUpdatedAge(ts){
       const age = feedAge(ts);
       return age ? age : ''; // "Xs ago" without "updated" prefix - more human
+    }
+
+    const FEED_NOW_SUMMARY_DECAY_MS = 2 * 60 * 1000;
+    const FEED_NOW_SUMMARY_HIDE_MS = 10 * 60 * 1000;
+    const FEED_NOW_SUMMARY_TRIM_SOFT = 140;
+    const FEED_NOW_SUMMARY_TRIM_STALE = 88;
+
+    function feedTrimSummaryText(raw, maxLen){
+      try{
+        let out = String(raw || '').replace(/\s+/g, ' ').trim();
+        const lim = Math.max(24, Number(maxLen || FEED_NOW_SUMMARY_TRIM_SOFT));
+        if(!out) return '';
+        if(out.length > lim) out = out.slice(0, lim - 1).trimEnd() + '…';
+        return out;
+      }catch{return ''}
+    }
+
+    function feedNowSummaryDisplay(lineState, ageMs, summary){
+      const clean = String(summary || '').trim();
+      if(!clean) return { show:false, text:'', title:'', stale:false, expired:false };
+      const st = String(lineState || '').trim().toLowerCase();
+      const ms = Number(ageMs || 0);
+      const isIdle = (st === 'idle' || st === 'wait');
+      if(!isIdle || !isFinite(ms) || ms <= 0){
+        const text = feedTrimSummaryText(clean, FEED_NOW_SUMMARY_TRIM_SOFT);
+        return { show:!!text, text, title:clean, stale:false, expired:false };
+      }
+      if(ms >= FEED_NOW_SUMMARY_HIDE_MS) return { show:false, text:'', title:clean, stale:true, expired:true };
+      const age = feedUpdatedAge(Date.now() - ms);
+      if(ms >= FEED_NOW_SUMMARY_DECAY_MS){
+        const trimmed = feedTrimSummaryText(clean, FEED_NOW_SUMMARY_TRIM_STALE);
+        const text = age ? (age + ' · ' + trimmed) : trimmed;
+        return { show:!!text, text, title:clean, stale:true, expired:false };
+      }
+      const text = feedTrimSummaryText(clean, FEED_NOW_SUMMARY_TRIM_SOFT);
+      return { show:!!text, text, title:clean, stale:false, expired:false };
     }
 
     function feedReplyPreviewValue(details, recentEvents){
@@ -2560,8 +2660,7 @@
           [/\b(cat|sed|awk|head|tail|grep)\b/i, 'running a command — inspect file contents'],
         ];
         for(const [re, label] of tests){ if(re.test(cmd)) return label; }
-        const safe = feedRedact(cmd).slice(0, 80).trim();
-        return safe ? ('running a command — ' + safe) : 'running a command';
+        return 'running a command';
       }catch{return 'running a command'}
     }
 
@@ -2592,9 +2691,9 @@
       const compact = !!(opts && opts.compact);
       const tn = String(toolName || '').trim().toLowerCase();
       if(tn === 'channel' || tn === 'conversation' || tn === 'thread' || tn === 'session') return '';
-      if(tn === 'browser') return compact ? 'checking in browser' : 'inspecting in browser';
+      if(tn === 'browser') return compact ? 'checking the live page' : 'checking the live page';
       if(tn === 'exec') return compact ? feedCommandActivity(details && details.command) : feedCommandIntent(details && details.command);
-      if(tn === 'read') return compact ? 'reviewing project files' : 'reading project files';
+      if(tn === 'read') return compact ? 'reviewing project files' : 'reviewing project files';
       if(tn === 'write' || tn === 'edit') return compact ? 'updating project files' : 'updating project files';
       if(tn === 'message') return compact ? feedReplyingNow(details, recentEvents) : 'preparing a reply';
       if(tn === 'web_fetch') return compact ? 'checking a page' : 'checking a page';
@@ -2724,21 +2823,97 @@
       return (t && Array.isArray(t.items)) ? t.items : [];
     }
 
-    function feedNormalizeAgentId(v){
-      const id0 = String(v || '').trim();
+    const FEED_RUNTIME_AGENT_ALIASES = {
+      helper: '',
+      unknown: '',
+      'workspace-main': 'main',
+      'workspace-main-agent': 'main',
+      'workspace-coding-agent': 'coding_agent',
+      'workspace-qa-agent': 'qa_agent',
+    };
+
+    function feedSessionParentAgentId(sessionKey){
+      try{
+        const sk = String(sessionKey || '').trim();
+        const m = sk.match(/^agent:([^:]+):subagent:[^:]+$/i);
+        return m ? String(m[1] || '').trim() : '';
+      }catch{return ''}
+    }
+
+    function feedCanonicalAgentId(value, opts){
+      const options = (opts && typeof opts === 'object') ? opts : {};
+      const sessionParent = feedSessionParentAgentId(options.sessionKey || options.childSessionKey || '');
+      if(sessionParent) return feedCanonicalAgentId(sessionParent);
+      let id0 = String(value || '').trim();
       if(!id0) return '';
-      // Suppress internal agent IDs
-      const lower = id0.toLowerCase();
-      if(lower === 'subagent' || lower === 'spawn') return '';
-      if(/^(agent|spawn):/i.test(id0)) return '';
       const m = id0.match(/^[^@]+@(.+)$/);
-      return m ? m[1] : id0;
+      if(m) id0 = String(m[1] || '').trim();
+      if(!id0) return '';
+      if(/^agent:/i.test(id0)){
+        const parsedParent = feedSessionParentAgentId(id0);
+        if(parsedParent) return feedCanonicalAgentId(parsedParent);
+        const parts = id0.split(':').filter(Boolean);
+        if(parts.length >= 2) id0 = String(parts[1] || '').trim();
+      }
+      id0 = id0.replace(/^resident@/i, '').trim();
+      if(id0.includes('/')) id0 = id0.split('/')[0].trim();
+      const lower = id0.toLowerCase();
+      if(!id0) return '';
+      if(Object.prototype.hasOwnProperty.call(FEED_RUNTIME_AGENT_ALIASES, lower)) return FEED_RUNTIME_AGENT_ALIASES[lower] || '';
+      if(lower === 'subagent' || lower === 'spawn' || lower === 'cron' || lower === 'discord') return '';
+      return id0;
+    }
+
+    function feedNormalizeAgentId(v, opts){
+      return feedCanonicalAgentId(v, opts);
     }
 
     function feedMatchesAgentFilter(v){
       const want = feedNormalizeAgentId(FEED._agentFilter || '');
       if(!want) return true;
       return feedNormalizeAgentId(v) === want;
+    }
+
+    function feedAgentStateRank(state){
+      const s = String(state || '').trim().toLowerCase();
+      if(s === 'error') return 5;
+      if(s === 'reply') return 4;
+      if(s === 'tool') return 3;
+      if(s === 'think' || s === 'thinking') return 2;
+      if(s === 'build') return 1;
+      return 0;
+    }
+
+    function feedAgentFreshness(agent){
+      const meta = agent && agent.meta && typeof agent.meta === 'object' ? agent.meta : null;
+      const sinceMs = Number(meta && meta.sinceMs || 0);
+      const maxUpdatedAt = Number(meta && meta.maxUpdatedAt || 0);
+      return Math.max(sinceMs, maxUpdatedAt, 0);
+    }
+
+    function feedPreferAgentEntry(current, candidate){
+      if(!current) return candidate;
+      if(!candidate) return current;
+      const currentFreshness = feedAgentFreshness(current);
+      const candidateFreshness = feedAgentFreshness(candidate);
+      if(candidateFreshness !== currentFreshness) return candidateFreshness > currentFreshness ? candidate : current;
+      const currentRank = feedAgentStateRank(current && current.state);
+      const candidateRank = feedAgentStateRank(candidate && candidate.state);
+      if(candidateRank !== currentRank) return candidateRank > currentRank ? candidate : current;
+      return candidate;
+    }
+
+    function feedCollapseCanonicalAgents(list){
+      const byId = new Map();
+      for(const raw of Array.isArray(list) ? list : []){
+        const agent = raw && typeof raw === 'object' ? raw : null;
+        if(!agent) continue;
+        const canonicalId = feedNormalizeAgentId(agent.id || agent.rawId || agent.name || '');
+        if(!canonicalId) continue;
+        const normalized = Object.assign({}, agent, {id: canonicalId});
+        byId.set(canonicalId, feedPreferAgentEntry(byId.get(canonicalId) || null, normalized));
+      }
+      return Array.from(byId.values());
     }
 
     function feedRender(){
@@ -2774,29 +2949,45 @@
         feedPanelEl.style.setProperty('--feed-agent-col-ch', String(agentColCh) + 'ch');
       }
 
-      // "Now" section (per-agent activity snapshot)
+      // "Now" section — all agents always shown, with current state as label
       if(nowEl){
         const lines = [];
-        const agents = Array.isArray(MODEL.agents) ? MODEL.agents : [];
+        const agents = currentResidents();
+        const latestRowByAgent = new Map();
+        for(const row of rows){
+          const rowAgent = feedNormalizeAgentId(row && row.agentId);
+          if(!rowAgent || latestRowByAgent.has(rowAgent)) continue;
+          latestRowByAgent.set(rowAgent, row);
+        }
         for(const a of agents){
           const id0 = String(a && a.id || '').trim();
           if(!id0) continue;
           const id = feedNormalizeAgentId(id0);
           if(!feedMatchesAgentFilter(id)) continue;
           const st = String((a && a.state) || 'idle');
-          const details = (a && a.debug && a.debug.decision && a.debug.decision.details) ? a.debug.decision.details : null;
-          const recentEvents = (a && a.debug && a.debug.decision && Array.isArray(a.debug.decision.recentEvents))
-            ? a.debug.decision.recentEvents
-            : [];
-          const tn = (details && details.toolName)
-            ? String(details.toolName)
-            : '';
-          const lastMs = (a && a.debug && a.debug.decision && typeof a.debug.decision.lastEventMs === 'number')
-            ? a.debug.decision.lastEventMs
-            : ((a && a.meta && typeof a.meta.maxUpdatedAt === 'number') ? a.meta.maxUpdatedAt : null);
+          const meta = (a && a.meta) ? a.meta : null;
+          const latestRow = latestRowByAgent.get(id) || null;
+          // Use FEED.rows latest row timestamp as primary source — meta.maxUpdatedAt from
+          // MODEL.agents does NOT update when subagents (coding_agent/qa_agent) run, so it is
+          // stale. FEED.rows is updated whenever any agent/subagent produces a feed event.
+          const lastMs = (latestRow && typeof latestRow.ts === 'number') ? latestRow.ts : null;
           const age = lastMs ? feedUpdatedAge(lastMs) : '';
-          lines.push({ agent: '@' + id, state: feedHumanState(st, tn, details, recentEvents), age });
+          const ageMs = lastMs ? Math.max(0, Date.now() - Number(lastMs || 0)) : null;
+          // summary: prefer taskTitle, then recentSummary, then row what
+          const summaryRaw = String((meta && meta.recentSummary) || (latestRow && (latestRow.details && latestRow.details.taskTitle) || latestRow?.what) || '').trim();
+          let previewRaw = String((latestRow && (latestRow.preview || latestRow.previewWithActor)) || '').trim();
+          if(previewRaw && (previewRaw.startsWith('[Subagent Context]') || previewRaw.startsWith('[cron:'))) previewRaw = '';
+          const summaryFinal = summaryRaw || previewRaw || '';
+          // Show as "active now" only if non-idle AND has recent feed activity (within 10s)
+          const isActive = st !== 'idle' && ageMs != null && ageMs <= 10*1000;
+          // NEVER continue/skip — all agents always shown in Now panel
+          let humanState = isActive ? 'active now' : st;
+          if(st === 'error') humanState = 'error';
+          const summary = summaryFinal && summaryFinal.toLowerCase() !== humanState.toLowerCase() ? summaryFinal : '';
+          const summaryView = feedNowSummaryDisplay(humanState, ageMs, summary);
+          lines.push({ agent: '@' + id, state: humanState, age, ageMs, summary, summaryView });
         }
+        // Sort agents alphabetically — stable every poll, no active-first reordering
         lines.sort((a, b)=> String(a.agent).localeCompare(String(b.agent)));
         if(lines.length){
           nowEl.style.display = '';
@@ -2812,20 +3003,32 @@
             agent.className = 'feed-now-agent';
             agent.textContent = line.agent;
             agent.style.color = agentColor(line.agent);
+            // Format: Agent · state · last act: X ago
+            const copy = document.createElement('span');
+            copy.className = 'feed-now-copy';
             const state = document.createElement('span');
             state.className = 'feed-now-state';
-            const isIdle = (line.state === 'idle');
-            // For idle, don't show time suffix (more human, less noisy)
-            const bits = [line.state];
-            if(line.age && !isIdle) bits.push(line.age);
-            state.textContent = bits.join(' · ');
+            const ageLabel = line.age ? ' · last act: ' + line.age : '';
+            state.textContent = line.state + ageLabel;
+            copy.appendChild(state);
             row.appendChild(agent);
-            row.appendChild(state);
+            row.appendChild(copy);
             nowEl.appendChild(row);
           }
         }else{
-          nowEl.style.display = 'none';
-          nowEl.textContent = '';
+          // Always show Now panel, even with empty content
+          nowEl.style.display = '';
+          nowEl.innerHTML = '';
+          const title = document.createElement('div');
+          title.className = 'feed-now-title';
+          title.textContent = 'Now';
+          nowEl.appendChild(title);
+          const emptyMsg = document.createElement('div');
+          emptyMsg.className = 'feed-now-line';
+          emptyMsg.style.color = '#888';
+          emptyMsg.style.fontSize = '11px';
+          emptyMsg.textContent = 'no recent activity';
+          nowEl.appendChild(emptyMsg);
         }
       }
 
@@ -2983,6 +3186,8 @@
           // Keep UI stable: show only "live" (latency is noisy and looks like a timer).
           FEED.pollStatus = 'live';
           feedRender();
+          try{ renderAgents(); }catch{}
+          try{ refreshLegend(); }catch{}
         }
       }catch(e){
         feedLog('poll error', e);
@@ -3019,10 +3224,10 @@
         if(!(r && r.sessionKey && r.segment)) return;
         body = Object.assign(body, { sessionKey: r.sessionKey, startMs: r.segment.startTs, endMs: r.segment.endTs });
       }else if(scope === 'since'){
-        const since = (typeof FEED.lastViewedMs === 'number' && isFinite(FEED.lastViewedMs)) ? FEED.lastViewedMs : (now - 60*60*1000);
+        const since = (typeof FEED.lastViewedMs === 'number' && isFinite(FEED.lastViewedMs)) ? FEED.lastViewedMs : (now - 60*10*1000);
         body = Object.assign(body, { sinceMs: since });
       }else{
-        body = Object.assign(body, { sinceMs: now - 60*60*1000 });
+        body = Object.assign(body, { sinceMs: now - 60*10*1000 });
       }
 
       FEED.summaryText = 'Summarizing…';
@@ -3121,6 +3326,8 @@
       const btnAgentLabelsOpen = document.getElementById('btn-agent-labels-open');
       const retentionSelect = document.getElementById('retention-select');
       const retentionStatus = document.getElementById('retention-status');
+      const btnResetSnapshot = document.getElementById('btn-reset-snapshot');
+      const snapshotResetStatus = document.getElementById('snapshot-reset-status');
 
       // Labels modal
       const labelsBackdrop = document.getElementById('labels-backdrop');
@@ -3145,7 +3352,7 @@
         (async ()=>{
           if(!retentionSelect) return;
           try{
-            const r = await fetch('./api/retention?ts=' + Date.now(), {cache:'no-store'});
+            const r = await fetch(apiPath('./api/retention?ts=' + Date.now()), {cache:'no-store'});
             const j = r.ok ? await r.json() : null;
             if(j && j.retentionMs != null){
               retentionSelect.value = String(j.retentionMs);
@@ -3156,7 +3363,7 @@
         (async ()=>{
           if(!agentLabelsTa) return;
           try{
-            const r = await fetch('./api/agent-labels?ts=' + Date.now(), {cache:'no-store'});
+            const r = await fetch(apiPath('./api/agent-labels?ts=' + Date.now()), {cache:'no-store'});
             const j = r.ok ? await r.json() : null;
             if(j && j.ok && j.labels && typeof j.labels === 'object'){
               agentLabelsTa.value = JSON.stringify(j.labels, null, 2);
@@ -3181,12 +3388,14 @@
       async function refreshRoomBg(){
         applyBgOpacity();
         try{
-          const r = await fetch('./api/room-image/info', {cache:'no-store'});
+          const r = await fetch(apiPath('./api/room-image/info'), {cache:'no-store'});
           const j = r.ok ? await r.json() : null;
           const room = document.getElementById('room');
           const img = document.getElementById('room-bg');
           if(!room || !img) return;
           room.classList.add('has-bg');
+          const roomId = (j && j.roomId) ? String(j.roomId) : 'default';
+          MODEL.activeRoomId = roomId;
           let fallbackApplied = false;
           img.onload = () => {
             ensureLayout(false);
@@ -3204,9 +3413,11 @@
             try{ img.src = './assets/default-room.jpg?v=' + Date.now(); }catch{}
             try{ statusEl.textContent = 'Current room: (fallback image)'; }catch{}
           };
-          // Cache-busting strategy A: use versioned URL param derived from room-image/info.updatedAt.
-          // Backend serves ./api/room-image with long-lived immutable caching.
-          img.src = './api/room-image?v=' + ((j && j.updatedAt) ? j.updatedAt : 0);
+          // Cache-busting must include roomId as well as updatedAt.
+          // Bundled rooms can persist the same updatedAt value across sessions, and /api/room-image
+          // is served immutable, so room-only switches need their own cache namespace.
+          const cacheKey = encodeURIComponent(roomId) + ':' + String((j && j.updatedAt) ? j.updatedAt : 0);
+          img.src = apiPath('./api/room-image?v=' + cacheKey);
           const nm = (j && j.roomName) ? j.roomName : '—';
           statusEl.textContent = 'Current room: ' + nm;
         }catch{
@@ -3281,7 +3492,7 @@
           const val = retentionSelect.value;
           if(retentionStatus) retentionStatus.textContent = 'Saving…';
           try{
-            const r = await fetch('./api/retention', {method:'POST', headers:{'content-type':'application/json'}, body: JSON.stringify({retentionMs: Number(val)})});
+            const r = await fetch(apiPath('./api/retention'), {method:'POST', headers:{'content-type':'application/json'}, body: JSON.stringify({retentionMs: Number(val)})});
             const j = r.ok ? await r.json().catch(()=>null) : null;
             if(j && j.ok){
               if(retentionStatus) retentionStatus.textContent = 'Saved.';
@@ -3384,19 +3595,18 @@
           labelsList.innerHTML = '';
           try{
             // Get known agentIds from the live API.
-            const r0 = await fetch('./api/lobster-room?ts=' + Date.now(), {cache:'no-store'});
+            const r0 = await fetch(apiPath('./api/lobster-room?ts=' + Date.now()), {cache:'no-store'});
             const j0 = r0.ok ? await r0.json() : null;
             const agentIds = new Set();
             if(j0 && Array.isArray(j0.agents)){
               for(const a of j0.agents){
-                const id = String(a && a.id || '');
-                const m = id.match(/^resident@(.+)$/);
-                agentIds.add(m ? m[1] : id);
+                const id = feedCanonicalAgentId(a && a.id, {sessionKey: a && a.debug && a.debug.decision && a.debug.decision.details && a.debug.decision.details.sessionKey});
+                if(id) agentIds.add(id);
               }
             }
 
             // Get existing mapping.
-            const r = await fetch('./api/agent-labels?ts=' + Date.now(), {cache:'no-store'});
+            const r = await fetch(apiPath('./api/agent-labels?ts=' + Date.now()), {cache:'no-store'});
             const j = r.ok ? await r.json() : null;
             const labels = (j && j.ok && j.labels && typeof j.labels === 'object') ? j.labels : {};
 
@@ -3444,7 +3654,7 @@
           if(agentLabelsStatus) agentLabelsStatus.textContent = 'Saving…';
           if(labelsStatus) labelsStatus.textContent = 'Saving…';
           try{
-            const r = await fetch('./api/agent-labels', {method:'POST', headers:{'content-type':'application/json'}, body: JSON.stringify({labels: obj})});
+            const r = await fetch(apiPath('./api/agent-labels'), {method:'POST', headers:{'content-type':'application/json'}, body: JSON.stringify({labels: obj})});
             const j = r.ok ? await r.json() : null;
             if(!j || !j.ok) throw new Error('save_failed');
             if(agentLabelsStatus) agentLabelsStatus.textContent = 'Saved.';
@@ -3459,11 +3669,24 @@
             if(labelsStatus) labelsStatus.textContent = 'Save failed.';
           }
         });
+
+        if(btnResetSnapshot){
+          btnResetSnapshot.addEventListener('click', async ()=>{
+            try{
+              const r = await fetch(apiPath('./api/snapshot-reset'), {method:'POST', headers:{'content-type':'application/json'}, body: '{}'});
+              const j = r.ok ? await r.json() : null;
+              if(j && j.ok){
+                if(snapshotResetStatus) snapshotResetStatus.style.display = 'block';
+                setTimeout(()=>{ if(snapshotResetStatus) snapshotResetStatus.style.display = 'none'; }, 3000);
+              }
+            }catch{}
+          });
+        }
       })();
 
       async function loadManualMapFromServer(){
         try{
-          const r = await fetch('./api/manual-map?ts=' + Date.now(), {cache:'no-store'});
+          const r = await fetch(apiPath('./api/manual-map?ts=' + Date.now()), {cache:'no-store'});
           if(!r.ok) return false;
           const mm = await r.json();
           if(mm && mm.tx && mm.ty && Array.isArray(mm.cells)){
@@ -3635,7 +3858,7 @@
             try{ localStorage.setItem('lobsterRoom.manualMap', JSON.stringify(MODEL.manualMap)); }catch{}
             // Persist to server so all browsers/profiles see the same walkable map.
             try{
-              const r = await fetch('./api/manual-map', {method:'POST', headers:{'content-type':'application/json'}, body: JSON.stringify(MODEL.manualMap)});
+              const r = await fetch(apiPath('./api/manual-map'), {method:'POST', headers:{'content-type':'application/json'}, body: JSON.stringify(MODEL.manualMap)});
               if(!r.ok) throw new Error('HTTP ' + r.status);
               const j = await r.json().catch(()=>null);
               if(!j || !j.ok) throw new Error('save_failed');
@@ -3681,7 +3904,7 @@
         const fd = new FormData();
         fd.append('file', f, f.name);
         try{
-          const r = await fetch('./api/room-image', {method:'POST', body: fd});
+          const r = await fetch(apiPath('./api/room-image'), {method:'POST', body: fd});
           if(!r.ok){ statusEl.textContent = 'Upload failed (HTTP ' + r.status + ')'; return; }
           const j = await r.json().catch(()=>null);
           if(!j || !j.ok){ statusEl.textContent = 'Upload failed.'; return; }
@@ -3709,7 +3932,7 @@
       if(btnReset) btnReset.addEventListener('click', async ()=>{
         if(!confirm('Switch to Default room?')) return;
         statusEl.textContent = 'Switching…';
-        const r = await fetch('./api/room-image/reset', {method:'POST'});
+        const r = await fetch(apiPath('./api/room-image/reset'), {method:'POST'});
         if(!r.ok){ statusEl.textContent = 'Switch failed (HTTP ' + r.status + ')'; return; }
         MODEL.manualReady = false;
         await loadManualMapFromServer();
