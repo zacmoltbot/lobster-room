@@ -1,19 +1,19 @@
 # Lobster Room 🦞
 
-A cute, practical dashboard that visualizes your OpenClaw **agents & sessions** as lobsters in a bird’s‑eye room view, with live status bubbles (replying / thinking / tool / idle / error).
+A cute, practical OpenClaw room dashboard that visualizes your **agents, sessions, and active work** as lobsters in a bird’s-eye room view — with a docked task feed, consistent resident identity, and room-aware movement.
 
 > Served as an **OpenClaw Gateway plugin** at: `https://<openclaw-host>/lobster-room/`
 
 ![Demo (animated)](docs/screenshots/demo.gif)
 
-## What's New in v0.2.0
+## What's New in v0.3.0
 
-- **Permanent Message Feed**: Feed panel is always visible (no toggle needed)
-- **Softer agent colors**: Agent names in feed and Now block are color-coded with muted palette
-- **4:3 room backgrounds**: 4:3 is recommended for best zone alignment; 3:2-ish images are allowed with a warning
-- **Better room/zone alignment**: Room background uses `contain` sizing so zones always match
-- **Removed Move Debug from Settings**: Developer tool hidden from end-user UI, accessible via `?moveDebug=1`
-- **Improved feed UX**: Tighter agent column, reduced row gaps, stable header without jumping "last event" text
+- **Bundled starter rooms**: ship with multiple built-in room backgrounds + walk maps so first-run looks polished immediately
+- **Canonical agent identity**: feed rows, resident avatars, and the Now panel resolve to the same visible agent instead of leaking child/internal ids
+- **Room consistency fixes**: switching rooms, rehydration, and default-room reset now stay visually and logically in sync
+- **Cleaner Settings IA**: Settings is reorganized into **Room Setup**, **Appearance**, and **History & Agents** for faster editing
+- **Stronger feed UX**: humanized task wording, better parent/child attribution, and fewer duplicate / unknown agent rows
+- **Homepage demo refresh**: updated animated demo and screenshots now match the current v0.3.0 UI behavior
 
 **Links**
 - Portal: `https://<openclaw-host>/lobster-room/`
@@ -146,7 +146,7 @@ This project monitors OpenClaw **in-process** via plugin lifecycle hooks.
 - `tool` comes from: `before_tool_call` (with `toolName`)
 - Tool completion is inferred from: `tool_result_persist` and/or `after_tool_call`
 - `idle` is entered after a short cooldown, and watchdogs prevent “stuck” states
-`replying` shows when an agent is sending a message back to the user.
+- `replying` shows when an agent is sending a message back to the user
 
 ## Settings (features)
 
@@ -161,7 +161,7 @@ Lobster Room ships with a small Settings UI so you can tweak behavior without re
 
 - Settings → **Room**
 - Create/switch rooms
-- Upload a background image
+- Start from bundled rooms or upload your own background image
 - Reset back to Default room
 
 ### Manual map editor
