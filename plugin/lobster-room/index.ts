@@ -197,7 +197,7 @@ function contentTypeByExt(ext: string): string | null {
   return null;
 }
 
-const BUILD_TAG = "2026-03-08-debug-hooks-1";
+const BUILD_TAG = "2026-04-08-reset-identity-state-1";
 
 export default {
   id: "lobster-room",
@@ -858,28 +858,16 @@ export default {
       agents: Record<string, { state: ActivityState; sinceMs: number; lastEventMs: number; details?: any }>;
       events: Array<{ ts: number; kind: string; agentId?: string; data?: any }>;
     };
-    let snap: ActivitySnapshot = {
+    const emptyActivitySnapshot = (): ActivitySnapshot => ({
       buildTag: BUILD_TAG,
       updatedAtMs: nowMs(),
       agents: {},
       events: [],
-    };
-
-    // Best-effort: load existing snapshot from disk so multiple isolates can converge.
-    // NOTE: Avoid top-level `await` in case the plugin loader parses register() as sync.
-    fs
-      .readFile(snapshotPath, "utf8")
-      .then((txt) => {
-        const obj = JSON.parse(txt);
-        if (obj && typeof obj === "object") {
-          if (obj.agents && typeof obj.agents === "object") snap.agents = pruneSnapshotAgents(obj.agents);
-          if (Array.isArray(obj.events)) snap.events = obj.events;
-          if (typeof obj.updatedAtMs === "number") snap.updatedAtMs = obj.updatedAtMs;
-        }
-      })
-      .catch(() => {});
+    });
+    let snap: ActivitySnapshot = emptyActivitySnapshot();
 
     const mergeAndWriteSnapshot = async () => {
+      await identityPersistenceResetReady;
       try {
         await fs.mkdir(rootUserDir, { recursive: true });
       } catch {}
@@ -1794,6 +1782,26 @@ export default {
     const spawnAttributionStatePath = join(rootUserDir, "spawn-attribution-state.json");
     let spawnAttributionStateHydrated = false;
 
+    const resetIdentityPersistenceOnInit = async () => {
+      snap = emptyActivitySnapshot();
+      activity.clear();
+      eventBuf.splice(0, eventBuf.length);
+      feedBuf.splice(0, feedBuf.length);
+      spawnedSessionAgentIds.clear();
+      pendingSpawnAttributionsByParent.clear();
+      pendingSpawnAttributionsByResident.clear();
+      observedChildSessions.clear();
+      spawnAttributionStateHydrated = true;
+      try {
+        await fs.mkdir(rootUserDir, { recursive: true });
+      } catch {}
+      await Promise.allSettled([
+        fs.rm(snapshotPath, { force: true }),
+        fs.rm(spawnAttributionStatePath, { force: true }),
+      ]);
+    };
+    const identityPersistenceResetReady = resetIdentityPersistenceOnInit();
+
     const PENDING_SPAWN_ATTRIBUTION_TTL_MS = 30 * 60 * 1000;
     let spawnIntentSeq = 0;
 
@@ -1856,6 +1864,8 @@ export default {
     };
 
     const loadSpawnAttributionState = async () => {
+      await identityPersistenceResetReady;
+      if (spawnAttributionStateHydrated) return;
       try {
         const txt = await fs.readFile(spawnAttributionStatePath, "utf8");
         const data: any = JSON.parse(txt);
@@ -1947,6 +1957,7 @@ export default {
     };
 
     const persistSpawnAttributionState = async () => {
+      await identityPersistenceResetReady;
       try {
         prunePendingSpawnAttributions();
         const pending = new Map<string, PendingSpawnAttribution>();
@@ -3803,6 +3814,7 @@ export default {
           }
         }
 
+        await identityPersistenceResetReady;
         const t = nowMs();
 
         // Load last known activity snapshot written by hook handlers.
