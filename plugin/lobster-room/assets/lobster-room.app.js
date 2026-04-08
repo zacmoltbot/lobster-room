@@ -2198,8 +2198,8 @@
           // Build tag (backend)
           MODEL.buildTag = data.buildTag || '';
 
-          // Agents from API — canonicalize ids for all UI surfaces.
-          MODEL.agents = (data.agents || []).map(a => {
+          // Agents from API — canonicalize ids first, then collapse to one row per canonical agent.
+          MODEL.agents = feedCollapseCanonicalAgents((data.agents || []).map(a => {
             const debugDecision = a && a.debug && a.debug.decision ? a.debug.decision : null;
             const debugDetails = debugDecision && debugDecision.details && typeof debugDecision.details === 'object' ? debugDecision.details : null;
             const sessionKey = String((debugDetails && (debugDetails.sessionKey || debugDetails.feedTruthSessionKey)) || (debugDecision && debugDecision.sessionKey) || '').trim();
@@ -2214,7 +2214,7 @@
               meta: a.meta || null,
               debug: a.debug,
             };
-          });
+          }));
           // Keep last-known-good snapshot so we can keep rendering on transient errors.
           MODEL.lastGoodAgents = MODEL.agents;
           MODEL.lastGoodAt = Date.now();
