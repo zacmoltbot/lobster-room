@@ -241,7 +241,54 @@ export default {
 
     const roomPath = (roomId: string, rel: string) => join(roomsDir, roomId, rel);
 
-    const ensureDefaultRoomInitialized = async () => {
+    const fileExists = async (p: string) => {
+      try {
+        await fs.stat(p);
+        return true;
+      } catch {
+        return false;
+      }
+    };
+
+    const copyIfMissing = async (src: string, dst: string): Promise<boolean> => {
+      if (await fileExists(dst)) return false;
+      try {
+        const buf = await fs.readFile(src);
+        await fs.mkdir(dirname(dst), { recursive: true });
+        await fs.writeFile(dst, buf);
+        return true;
+      } catch {
+        return false;
+      }
+    };
+
+    const ensureEmptyManualMap = async (dstMap: string) => {
+      if (await fileExists(dstMap)) return;
+      const empty = { version: 1, tx: 32, ty: 20, cells: new Array(32 * 20).fill(null), updatedAt: null };
+      await fs.mkdir(dirname(dstMap), { recursive: true });
+      await fs.writeFile(dstMap, JSON.stringify(empty, null, 2));
+    };
+
+    const ensureBundledRoomFiles = async (roomId: string, srcRoomDir: string) => {
+      const dstRoom = roomPath(roomId, "");
+      await fs.mkdir(dstRoom, { recursive: true });
+      await copyIfMissing(join(srcRoomDir, "room.jpg"), join(dstRoom, "room.jpg"));
+      const copiedMap = await copyIfMissing(join(srcRoomDir, "manual-map.json"), join(dstRoom, "manual-map.json"));
+      if (!copiedMap) {
+        await ensureEmptyManualMap(join(dstRoom, "manual-map.json"));
+      }
+    };
+
+    const bundledRoomDisplayName = async (srcRoomDir: string, fallbackRoomId: string): Promise<string> => {
+      try {
+        const files = await fs.readdir(srcRoomDir);
+        const imgFile = files.find((f) => f.endsWith(".jpg") || f.endsWith(".png") || f.endsWith(".jpeg"));
+        if (imgFile) return imgFile.replace(/\.(jpg|png|jpeg)$/i, "");
+      } catch {}
+      return fallbackRoomId;
+    };
+
+    const ensureDefaultRoomInitialized = async (): Promise<void> => {
       // Initialize a usable default room.
       // Priority order for seeding content:
       // 1) Legacy single-file storage under assets/user (migration)
@@ -249,18 +296,8 @@ export default {
       // 3) Empty map fallback
       await fs.mkdir(roomPath(defaultRoomId, ""), { recursive: true });
 
-      const t = Date.now();
       const dstImg = roomPath(defaultRoomId, "room.jpg");
       const dstMap = roomPath(defaultRoomId, "manual-map.json");
-
-      const fileExists = async (p: string) => {
-        try {
-          await fs.stat(p);
-          return true;
-        } catch {
-          return false;
-        }
-      };
 
       // --- Background image seed ---
       // Prefer legacy user room image if present.
@@ -280,18 +317,10 @@ export default {
       if (!(await fileExists(dstImg))) {
         let seeded = false;
         if (srcLegacyImg) {
-          try {
-            const buf = await fs.readFile(srcLegacyImg);
-            await fs.writeFile(dstImg, buf);
-            seeded = true;
-          } catch {}
+          seeded = await copyIfMissing(srcLegacyImg, dstImg);
         }
         if (!seeded) {
-          try {
-            const buf = await fs.readFile(srcBundledImg);
-            await fs.writeFile(dstImg, buf);
-            seeded = true;
-          } catch {}
+          await copyIfMissing(srcBundledImg, dstImg);
         }
       }
 
@@ -301,36 +330,14 @@ export default {
       const srcBundledMap = join(pluginDir, "assets", "default-manual-map.json");
       if (!(await fileExists(dstMap))) {
         let seeded = false;
-        try {
-          const txt = await fs.readFile(legacyMapPath, "utf8");
-          await fs.writeFile(dstMap, txt);
-          seeded = true;
-        } catch {}
+        seeded = await copyIfMissing(legacyMapPath, dstMap);
         if (!seeded) {
-          try {
-            const txt = await fs.readFile(srcBundledMap, "utf8");
-            await fs.writeFile(dstMap, txt);
-            seeded = true;
-          } catch {}
+          seeded = await copyIfMissing(srcBundledMap, dstMap);
         }
         if (!seeded) {
-          const empty = { version: 1, tx: 32, ty: 20, cells: new Array(32 * 20).fill(null), updatedAt: null };
-          await fs.writeFile(dstMap, JSON.stringify(empty, null, 2));
+          await ensureEmptyManualMap(dstMap);
         }
       }
-
-      // --- Rooms index ---
-      const idxExisting = await readRoomsIndex();
-      if (idxExisting && Array.isArray(idxExisting.rooms) && idxExisting.rooms.find((r) => r.id === defaultRoomId)) {
-        // Keep existing index; do not override activeRoomId.
-        return;
-      }
-
-      const idx: RoomsIndex = {
-        activeRoomId: defaultRoomId,
-        rooms: [{ id: defaultRoomId, name: "Default", createdAt: t, updatedAt: t }],
-      };
-      await writeRoomsIndex(idx);
     };
 
     // --- Bundled rooms (ships with plugin) ---
@@ -338,52 +345,54 @@ export default {
     const seedBundledRooms = async (): Promise<void> => {
       let bundledEntries: string[] = [];
       try {
-        const ents = await fs.readdir(bundledRoomsDir);
-        bundledEntries = ents.filter((e) => /^room-\d+$/.test(e));
+        const ents = await fs.readdir(bundledRoomsDir, { withFileTypes: true });
+        bundledEntries = ents.filter((e) => e.isDirectory() && /^room-\d+$/.test(e.name)).map((e) => e.name).sort();
       } catch {
         return;
       }
       if (!bundledEntries.length) return;
 
-      const idx = await readRoomsIndex();
-      const existingIds = new Set((idx?.rooms || []).map((r) => r.id));
+      const idx = (await readRoomsIndex()) || { activeRoomId: defaultRoomId, rooms: [] };
+      const rooms = Array.isArray(idx.rooms) ? [...idx.rooms] : [];
+      const existingIds = new Set(rooms.map((r) => r.id));
+      let mutated = false;
 
       for (const roomId of bundledEntries) {
-        if (existingIds.has(roomId)) continue;
         const srcRoom = join(bundledRoomsDir, roomId);
-        const dstRoom = roomPath(roomId, "");
-        await fs.mkdir(dstRoom, { recursive: true });
-        const srcImg = join(srcRoom, "room.jpg");
-        const srcMap = join(srcRoom, "manual-map.json");
-        const dstImg = join(dstRoom, "room.jpg");
-        const dstMap = join(dstRoom, "manual-map.json");
-        try {
-          const imgBuf = await fs.readFile(srcImg);
-          await fs.writeFile(dstImg, imgBuf);
-        } catch {}
-        try {
-          const mapBuf = await fs.readFile(srcMap);
-          await fs.writeFile(dstMap, mapBuf);
-        } catch {}
+        await ensureBundledRoomFiles(roomId, srcRoom);
+        if (existingIds.has(roomId)) continue;
+        const t = Date.now();
+        rooms.push({ id: roomId, name: await bundledRoomDisplayName(srcRoom, roomId), createdAt: t, updatedAt: t });
+        existingIds.add(roomId);
+        mutated = true;
+      }
 
-        // Derive display name from the bundled image filename (e.g. "Creative_color_loft.jpg" → "Creative_color_loft")
-        let displayName = roomId;
-        try {
-          const files = await fs.readdir(srcRoom);
-          const imgFile = files.find((f) => f.endsWith(".jpg") || f.endsWith(".png") || f.endsWith(".jpeg"));
-          if (imgFile) displayName = imgFile.replace(/\.(jpg|png|jpeg)$/i, "");
-        } catch {}
-
-        const newIdx = await readRoomsIndex();
-        const rooms = newIdx ? [...newIdx.rooms] : [];
-        rooms.push({ id: roomId, name: displayName, createdAt: t, updatedAt: t });
-        await writeRoomsIndex({ activeRoomId: newIdx?.activeRoomId || defaultRoomId, rooms });
+      if (mutated) {
+        await writeRoomsIndex({ activeRoomId: idx.activeRoomId || defaultRoomId, rooms });
       }
     };
 
+    const ensureRoomsIndexInitialized = async (): Promise<void> => {
+      const t = Date.now();
+      const existing = (await readRoomsIndex()) || { activeRoomId: defaultRoomId, rooms: [] };
+      const rooms = Array.isArray(existing.rooms) ? [...existing.rooms] : [];
+      if (!rooms.find((r) => r.id === defaultRoomId)) {
+        rooms.unshift({ id: defaultRoomId, name: "Default", createdAt: t, updatedAt: t });
+      }
+      const activeRoomId = existing.activeRoomId && rooms.some((r) => r.id === existing.activeRoomId)
+        ? existing.activeRoomId
+        : defaultRoomId;
+      await writeRoomsIndex({ activeRoomId, rooms });
+    };
+
+    const ensureRoomsInitialized = async (): Promise<void> => {
+      await ensureDefaultRoomInitialized();
+      await ensureRoomsIndexInitialized();
+      await seedBundledRooms();
+    };
+
     // Kick migration/initialization (best-effort, no throw)
-    ensureDefaultRoomInitialized().catch(() => undefined);
-    seedBundledRooms().catch(() => undefined);
+    ensureRoomsInitialized().catch(() => undefined);
 
     const getActiveRoomId = async (): Promise<string> => {
       const idx = await readRoomsIndex();
