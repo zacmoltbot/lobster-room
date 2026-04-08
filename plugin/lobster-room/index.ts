@@ -219,6 +219,15 @@ export default {
 
     const defaultRoomId = "default";
 
+    const bundledRoomNameById: Record<string, string> = {
+      "room-1775535607890": "Creative_color_loft",
+      "room-1775542197526": "Cyberpunk_lab",
+      "room-1775542560747": "Productive_studio",
+      "room-1775543051834": "Sunlit_minimalist",
+      "room-1775543299777": "The_all_rounder",
+      "room-1775543657409": "Zen_craft_atelier",
+    };
+
     const safeRoomId = (s: string) => /^[a-z0-9][a-z0-9_-]{0,40}$/i.test(s);
 
     const readRoomsIndex = async (): Promise<RoomsIndex | null> => {
@@ -279,13 +288,28 @@ export default {
       }
     };
 
-    const bundledRoomDisplayName = async (srcRoomDir: string, fallbackRoomId: string): Promise<string> => {
-      try {
-        const files = await fs.readdir(srcRoomDir);
-        const imgFile = files.find((f) => f.endsWith(".jpg") || f.endsWith(".png") || f.endsWith(".jpeg"));
-        if (imgFile) return imgFile.replace(/\.(jpg|png|jpeg)$/i, "");
-      } catch {}
-      return fallbackRoomId;
+    const bundledRoomDisplayName = (roomId: string): string => {
+      return bundledRoomNameById[roomId] || roomId;
+    };
+
+    const repairBundledRoomNames = async (): Promise<void> => {
+      const idx = await readRoomsIndex();
+      if (!idx || !Array.isArray(idx.rooms) || !idx.rooms.length) return;
+
+      let mutated = false;
+      const rooms = idx.rooms.map((room) => {
+        if (!room || typeof room.id !== "string" || room.id === defaultRoomId) return room;
+        const bundledName = bundledRoomNameById[room.id];
+        if (!bundledName) return room;
+        if (room.name === bundledName) return room;
+        if (typeof room.name === "string" && room.name !== "room") return room;
+        mutated = true;
+        return { ...room, name: bundledName };
+      });
+
+      if (mutated) {
+        await writeRoomsIndex({ activeRoomId: idx.activeRoomId || defaultRoomId, rooms });
+      }
     };
 
     const ensureDefaultRoomInitialized = async (): Promise<void> => {
@@ -362,7 +386,7 @@ export default {
         await ensureBundledRoomFiles(roomId, srcRoom);
         if (existingIds.has(roomId)) continue;
         const t = Date.now();
-        rooms.push({ id: roomId, name: await bundledRoomDisplayName(srcRoom, roomId), createdAt: t, updatedAt: t });
+        rooms.push({ id: roomId, name: bundledRoomDisplayName(roomId), createdAt: t, updatedAt: t });
         existingIds.add(roomId);
         mutated = true;
       }
@@ -389,6 +413,7 @@ export default {
       await ensureDefaultRoomInitialized();
       await ensureRoomsIndexInitialized();
       await seedBundledRooms();
+      await repairBundledRoomNames();
     };
 
     // Kick migration/initialization (best-effort, no throw)
