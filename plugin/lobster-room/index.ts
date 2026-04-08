@@ -1902,22 +1902,99 @@ export default {
     const resolveExplicitSpawnAgentId = (payload: any): string => {
       const explicitCandidates: string[] = [];
       collectSpawnActorCandidates(payload, explicitCandidates, new Set(), true);
-      const unique = uniqueVisibleAgentIds(explicitCandidates);
+      const unique = uniqueVisibleAgentIds(explicitCandidates.map((value) => normalizeKnownSpawnActorId(value, { requireKnown: false })));
       return unique.length === 1 ? (unique[0] || "") : "";
     };
 
     const uniqueVisibleAgentIds = (values: string[]): string[] => Array.from(new Set(values.filter(Boolean)));
 
+    const SPAWN_AGENT_ID_STOPWORDS = new Set([
+      "a",
+      "an",
+      "the",
+      "this",
+      "that",
+      "these",
+      "those",
+      "only",
+      "one",
+      "someone",
+      "somebody",
+      "anyone",
+      "anybody",
+      "everyone",
+      "everybody",
+      "nobody",
+      "agent",
+      "subagent",
+      "assistant",
+      "helper",
+      "worker",
+      "coder",
+      "writer",
+      "reviewer",
+      "researcher",
+      "main",
+      "you",
+      "yourself",
+      "me",
+      "myself",
+      "him",
+      "her",
+      "them",
+      "it",
+    ]);
+
+    const knownCanonicalSpawnAgentIds = (): Set<string> => {
+      const out = new Set<string>();
+      const envRaw = (process.env.LOBSTER_ROOM_AGENT_IDS || "").trim();
+      if (envRaw) {
+        for (const raw of envRaw.split(",")) {
+          const id = canonicalResidentAgentId(raw);
+          if (id) out.add(id);
+        }
+      }
+      const agentListRaw = Array.isArray(api.config?.agents?.list) ? api.config.agents.list : [];
+      for (const agent of agentListRaw) {
+        const id = canonicalResidentAgentId(agent?.id);
+        if (id) out.add(id);
+      }
+      for (const rawId of activity.keys()) {
+        const id = canonicalResidentAgentId(rawId);
+        if (id && id !== UNKNOWN_CHILD_ACTOR_ID) out.add(id);
+      }
+      const snapAgentIds = snap && snap.agents ? Object.keys(snap.agents) : [];
+      for (const rawId of snapAgentIds) {
+        const id = canonicalResidentAgentId(rawId);
+        if (id && id !== UNKNOWN_CHILD_ACTOR_ID) out.add(id);
+      }
+      for (const visibleActorId of spawnedSessionAgentIds.values()) {
+        const id = canonicalResidentAgentId(visibleActorId);
+        if (id && id !== UNKNOWN_CHILD_ACTOR_ID) out.add(id);
+      }
+      out.add("main");
+      return out;
+    };
+
+    const normalizeKnownSpawnActorId = (value: unknown, options?: { requireKnown?: boolean }): string => {
+      const visible = canonicalVisibleAgentId(value);
+      if (!visible) return "";
+      const lower = visible.toLowerCase();
+      if (SPAWN_AGENT_ID_STOPWORDS.has(lower)) return "";
+      if (options?.requireKnown === false) return visible;
+      return knownCanonicalSpawnAgentIds().has(visible) ? visible : "";
+    };
+
     const extractSpawnDirectiveActorIds = (text: string): string[] => {
       const out: string[] = [];
       const directivePatterns = [
-        /\byou are\s+([a-z][a-z0-9_-]{1,63})\b/gi,
-        /你是\s*([a-z][a-z0-9_-]{1,63})/giu,
-        /角色\s*[:：]?\s*([a-z][a-z0-9_-]{1,63})/giu,
+        /(?:^|[\s([{"'`])you are\s+([a-z][a-z0-9_-]{1,63})(?=$|[\s)\]}",.!?:;]|(?:\s+(?:agent|assistant|subagent))\b)/gim,
+        /(?:^|[\s([{"'`])你是\s*([a-z][a-z0-9_-]{1,63})(?=$|[\s)\]}",.!?:;])/gimu,
+        /(?:^|[\s([{"'`])角色\s*[:：]?\s*([a-z][a-z0-9_-]{1,63})(?=$|[\s)\]}",.!?:;])/gimu,
       ];
       for (const pattern of directivePatterns) {
         for (const match of text.matchAll(pattern)) {
-          const visible = canonicalVisibleAgentId(match?.[1]);
+          const visible = normalizeKnownSpawnActorId(match?.[1]);
           if (visible) out.push(visible);
         }
       }
@@ -1932,7 +2009,7 @@ export default {
       ];
       for (const pattern of mentionPatterns) {
         for (const match of text.matchAll(pattern)) {
-          const visible = canonicalVisibleAgentId(match?.[1]);
+          const visible = normalizeKnownSpawnActorId(match?.[1]);
           if (visible) out.push(visible);
         }
       }
