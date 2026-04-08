@@ -683,6 +683,15 @@ export default {
     });
 
     // --- Room layout API ---
+    const getRoomLayoutPaths = async () => {
+      const roomId = await getActiveRoomId();
+      return {
+        roomId,
+        activePath: roomPath(roomId, "room-layout.json"),
+        legacyPath: join(rootUserDir, "room-layout.json"),
+      };
+    };
+
     registerSafePluginRoute(api, {
       path: "/lobster-room/api/room-layout/reset",
       handler: async (req, res) => {
@@ -691,9 +700,12 @@ export default {
           res.end("method_not_allowed");
           return true;
         }
-        const layoutPath = join(rootUserDir, "room-layout.json");
+        const { activePath, legacyPath, roomId } = await getRoomLayoutPaths();
         try {
-          await fs.unlink(layoutPath).catch(() => undefined);
+          await fs.unlink(activePath).catch(() => undefined);
+          if (roomId === defaultRoomId) {
+            await fs.unlink(legacyPath).catch(() => undefined);
+          }
           sendJson(res, 200, { ok: true });
         } catch (err: any) {
           sendJson(res, 500, { ok: false, error: String(err?.message || err) });
@@ -705,28 +717,32 @@ export default {
     registerSafePluginRoute(api, {
       path: "/lobster-room/api/room-layout",
       handler: async (req, res) => {
-        const layoutPath = join(rootUserDir, "room-layout.json");
+        const { activePath, legacyPath } = await getRoomLayoutPaths();
         if ((req.method || "GET").toUpperCase() === "GET") {
           try {
-            const txt = await fs.readFile(layoutPath, "utf8");
+            let txt = "";
+            try {
+              txt = await fs.readFile(activePath, "utf8");
+            } catch {
+              txt = await fs.readFile(legacyPath, "utf8");
+            }
             res.statusCode = 200;
             res.setHeader("content-type", "application/json; charset=utf-8");
             res.setHeader("cache-control", "no-store");
             res.end(txt);
           } catch {
-            res.statusCode = 404;
-            res.end("not_found");
+            sendJson(res, 200, null);
           }
           return true;
         }
         if ((req.method || "GET").toUpperCase() === "POST") {
           try {
-            await fs.mkdir(rootUserDir, { recursive: true });
+            await fs.mkdir(dirname(activePath), { recursive: true });
             const buf = await readBody(req, 512 * 1024);
             const txt = buf.toString("utf8");
             const obj = JSON.parse(txt);
             if (!obj || typeof obj !== "object") throw new Error("bad_json");
-            await fs.writeFile(layoutPath, JSON.stringify(obj, null, 2));
+            await fs.writeFile(activePath, JSON.stringify(obj, null, 2));
             sendJson(res, 200, { ok: true });
           } catch (err: any) {
             sendJson(res, 400, { ok: false, error: String(err?.message || err) });
@@ -3882,10 +3898,10 @@ export default {
           const seen = new Set<string>();
           const agentListRaw = Array.isArray(api.config?.agents?.list) ? api.config.agents.list : [];
           for (const a of agentListRaw) {
-            const id = a?.id;
-            if (typeof id === "string" && id.trim() && !seen.has(id.trim())) {
-              ids.push(id.trim());
-              seen.add(id.trim());
+            const id = canonicalResidentAgentId(a?.id);
+            if (id && !seen.has(id)) {
+              ids.push(id);
+              seen.add(id);
             }
           }
           for (const rawId of activity.keys()) {

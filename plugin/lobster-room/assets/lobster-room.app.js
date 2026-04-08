@@ -2135,11 +2135,9 @@
       // Lightweight build/activity monitor. Keep MODEL.activity fresh, but do not render agent status in the footer.
       if(MODEL.activityPollDisabled) return;
       try{
-        const r = await fetch(apiPath('./api/lobster-room'), {
-          method: 'POST',
-          headers: {'content-type':'application/json'},
+        const r = await fetch(apiPath('./api/lobster-room?view=activity'), {
+          method: 'GET',
           cache: 'no-store',
-          body: JSON.stringify({op: 'activityGet'}),
         });
         if(!r.ok){
           if(r.status === 404){ MODEL.activityPollDisabled = true; }
@@ -2834,6 +2832,48 @@
       const want = feedNormalizeAgentId(FEED._agentFilter || '');
       if(!want) return true;
       return feedNormalizeAgentId(v) === want;
+    }
+
+    function feedAgentStateRank(state){
+      const s = String(state || '').trim().toLowerCase();
+      if(s === 'error') return 5;
+      if(s === 'reply') return 4;
+      if(s === 'tool') return 3;
+      if(s === 'think' || s === 'thinking') return 2;
+      if(s === 'build') return 1;
+      return 0;
+    }
+
+    function feedAgentFreshness(agent){
+      const meta = agent && agent.meta && typeof agent.meta === 'object' ? agent.meta : null;
+      const sinceMs = Number(meta && meta.sinceMs || 0);
+      const maxUpdatedAt = Number(meta && meta.maxUpdatedAt || 0);
+      return Math.max(sinceMs, maxUpdatedAt, 0);
+    }
+
+    function feedPreferAgentEntry(current, candidate){
+      if(!current) return candidate;
+      if(!candidate) return current;
+      const currentFreshness = feedAgentFreshness(current);
+      const candidateFreshness = feedAgentFreshness(candidate);
+      if(candidateFreshness !== currentFreshness) return candidateFreshness > currentFreshness ? candidate : current;
+      const currentRank = feedAgentStateRank(current && current.state);
+      const candidateRank = feedAgentStateRank(candidate && candidate.state);
+      if(candidateRank !== currentRank) return candidateRank > currentRank ? candidate : current;
+      return candidate;
+    }
+
+    function feedCollapseCanonicalAgents(list){
+      const byId = new Map();
+      for(const raw of Array.isArray(list) ? list : []){
+        const agent = raw && typeof raw === 'object' ? raw : null;
+        if(!agent) continue;
+        const canonicalId = feedNormalizeAgentId(agent.id || agent.rawId || agent.name || '');
+        if(!canonicalId) continue;
+        const normalized = Object.assign({}, agent, {id: canonicalId});
+        byId.set(canonicalId, feedPreferAgentEntry(byId.get(canonicalId) || null, normalized));
+      }
+      return Array.from(byId.values());
     }
 
     function feedRender(){
