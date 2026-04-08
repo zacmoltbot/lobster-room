@@ -1468,15 +1468,17 @@ export default {
         const parsed = parseSessionIdentity(sessionKey, it.agentId);
         if (isAdoptableChildLane(parsed.lane)) {
           const bound = spawnedSessionAgentIds.get(sessionKey);
-          const resident = canonicalVisibleAgentId(parsed.residentAgentId);
+          // Use canonicalResidentAgentId (NOT canonicalVisibleAgentId) to get the parent agent.
+          // canonicalResidentAgentId("main") = "main" (correct key for lookup)
+          // canonicalVisibleAgentId("main") = "" (wrong - returns empty string)
+          const resident = canonicalResidentAgentId(parsed.residentAgentId);
           // Trust the binding only if it's a real child agent (not unknown, not generic 'main' parent).
           if (bound && bound !== UNKNOWN_CHILD_ACTOR_ID && bound !== "main") return bound;
           // No valid binding — check explicit agentId on the item itself.
           const explicit = canonicalVisibleAgentId(it.agentId);
           if (explicit && explicit !== "main" && parsed.agentId !== explicit) return explicit;
-          // Fallback: if resident is 'main' (generic parent), show 'helper' instead of 'unknown'.
-          // This gives users a meaningful label for unnamed child agents.
-          if (resident === "main" || resident === "") return "helper";
+          // Canonical child identity comes from the parent embedded in the session key.
+          if (resident) return resident;
           return UNKNOWN_CHILD_ACTOR_ID;
         }
       }
@@ -1604,26 +1606,44 @@ export default {
       return { agentId: id || "main", residentAgentId: id || "main", lane: "main" };
     };
 
+    const RUNTIME_AGENT_ALIASES: Record<string, string> = {
+      helper: "",
+      unknown: "",
+      "workspace-main": "main",
+      "workspace-main-agent": "main",
+      "workspace-coding-agent": "coding_agent",
+      "workspace-qa-agent": "qa_agent",
+    };
+
+    const canonicalizeRuntimeAgentToken = (value: unknown): string => {
+      if (typeof value !== "string") return "";
+      let raw = String(value).trim();
+      if (!raw) return "";
+      raw = raw.replace(/^resident@/i, "").trim();
+      const atMatch = raw.match(/^[^@]+@(.+)$/);
+      if (atMatch) raw = String(atMatch[1] || "").trim();
+      if (!raw) return "";
+      if (/^agent:/i.test(raw)) return canonicalizeRuntimeAgentToken(parseSessionIdentity(raw).residentAgentId);
+      const slash = raw.indexOf("/");
+      if (slash >= 0) raw = raw.slice(0, slash).trim();
+      const lower = raw.toLowerCase();
+      if (!lower) return "";
+      if (Object.prototype.hasOwnProperty.call(RUNTIME_AGENT_ALIASES, lower)) {
+        return RUNTIME_AGENT_ALIASES[lower] || "";
+      }
+      if (lower === "subagent" || lower === "spawn" || lower === "cron" || lower === "discord") return "";
+      return raw;
+    };
+
     const canonicalResidentAgentId = (value: unknown): string => {
       if (typeof value !== "string") return "";
       const raw = String(value).trim();
       if (!raw) return "";
-      if (raw.startsWith("agent:")) return parseSessionIdentity(raw).residentAgentId;
-      const stripped = raw.replace(/^resident@/, "");
-      const slash = stripped.indexOf("/");
-      return (slash >= 0 ? stripped.slice(0, slash) : stripped).trim();
+      if (raw.startsWith("agent:")) return canonicalizeRuntimeAgentToken(parseSessionIdentity(raw).residentAgentId);
+      return canonicalizeRuntimeAgentToken(raw);
     };
 
-    const canonicalVisibleAgentId = (value: unknown): string => {
-      if (typeof value !== "string") return "";
-      const raw = String(value).trim();
-      if (!raw) return "";
-      const canonical = canonicalResidentAgentId(raw);
-      if (!canonical) return "";
-      const lower = canonical.toLowerCase();
-      if (lower === "subagent" || lower === "spawn" || lower === "cron" || lower === "discord") return "";
-      return canonical;
-    };
+    const canonicalVisibleAgentId = (value: unknown): string => canonicalizeRuntimeAgentToken(value);
 
     const isVisibleSnapshotAgentKey = (value: unknown): boolean => {
       if (typeof value !== "string") return false;
@@ -2443,29 +2463,12 @@ export default {
           };
         }
       }
-      // For child (subagent) lanes: use parsed.residentAgentId from the session key.
-      // If the resident is "main" (generic parent), look through ALL pending attributions
-      // across all resident keys to find one with a real actorId. Parent's pending
-      // attribution is stored under parent's residentAgentId (e.g. "coding_agent"), not "main".
-      // Fallback to "main" itself if none found (NOT to "helper").
+      // For child (subagent) lanes: the canonical display identity is always the parent agent
+      // embedded in the session key: agent:{parentAgentId}:subagent:{uuid} -> {parentAgentId}.
       let fallback: string;
       if (isAdoptableChildLane(parsed.lane)) {
-        if (parsed.residentAgentId === "main") {
-          let bestActor: string | undefined;
-          for (const arr of pendingSpawnAttributionsByResident.values()) {
-            for (const attr of arr) {
-              if (attr.actorId && attr.actorId !== "helper" && attr.actorId !== UNKNOWN_CHILD_ACTOR_ID) {
-                bestActor = attr.actorId;
-                break;
-              }
-            }
-            if (bestActor) break;
-          }
-          fallback = bestActor || "main";
-        } else {
-          const residentVisible = canonicalVisibleAgentId(parsed.residentAgentId);
-          fallback = residentVisible || UNKNOWN_CHILD_ACTOR_ID;
-        }
+        const residentVisible = canonicalVisibleAgentId(parsed.residentAgentId);
+        fallback = residentVisible || "main";
       } else {
         fallback = canonicalVisibleAgentId(rawSessionAgentId) || canonicalVisibleAgentId(parsed.residentAgentId) || "main";
       }

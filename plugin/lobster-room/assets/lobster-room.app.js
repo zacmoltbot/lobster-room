@@ -2200,16 +2200,23 @@
           // Build tag (backend)
           MODEL.buildTag = data.buildTag || '';
 
-          // Agents from API.
-          MODEL.agents = (data.agents || []).map(a => ({
-            id: a.id,
-            name: a.name,
-            state: a.state || 'wait',
-            x: a.x,
-            y: a.y,
-            meta: a.meta || null,
-            debug: a.debug,
-          }));
+          // Agents from API — canonicalize ids for all UI surfaces.
+          MODEL.agents = (data.agents || []).map(a => {
+            const debugDecision = a && a.debug && a.debug.decision ? a.debug.decision : null;
+            const debugDetails = debugDecision && debugDecision.details && typeof debugDecision.details === 'object' ? debugDecision.details : null;
+            const sessionKey = String((debugDetails && (debugDetails.sessionKey || debugDetails.feedTruthSessionKey)) || (debugDecision && debugDecision.sessionKey) || '').trim();
+            const canonicalId = feedCanonicalAgentId(a && a.id, {sessionKey}) || feedCanonicalAgentId(debugDecision && debugDecision.agentId, {sessionKey}) || feedCanonicalAgentId(a && a.name, {sessionKey}) || String(a && a.id || '').trim();
+            return {
+              id: canonicalId,
+              rawId: a && a.id,
+              name: a.name,
+              state: a.state || 'wait',
+              x: a.x,
+              y: a.y,
+              meta: a.meta || null,
+              debug: a.debug,
+            };
+          });
           // Keep last-known-good snapshot so we can keep rendering on transient errors.
           MODEL.lastGoodAgents = MODEL.agents;
           MODEL.lastGoodAt = Date.now();
@@ -2778,13 +2785,35 @@
       return (t && Array.isArray(t.items)) ? t.items : [];
     }
 
-    function feedNormalizeAgentId(v){
-      let id0 = String(v || '').trim();
+    const FEED_RUNTIME_AGENT_ALIASES = {
+      helper: '',
+      unknown: '',
+      'workspace-main': 'main',
+      'workspace-main-agent': 'main',
+      'workspace-coding-agent': 'coding_agent',
+      'workspace-qa-agent': 'qa_agent',
+    };
+
+    function feedSessionParentAgentId(sessionKey){
+      try{
+        const sk = String(sessionKey || '').trim();
+        const m = sk.match(/^agent:([^:]+):subagent:[^:]+$/i);
+        return m ? String(m[1] || '').trim() : '';
+      }catch{return ''}
+    }
+
+    function feedCanonicalAgentId(value, opts){
+      const options = (opts && typeof opts === 'object') ? opts : {};
+      const sessionParent = feedSessionParentAgentId(options.sessionKey || options.childSessionKey || '');
+      if(sessionParent) return feedCanonicalAgentId(sessionParent);
+      let id0 = String(value || '').trim();
       if(!id0) return '';
       const m = id0.match(/^[^@]+@(.+)$/);
       if(m) id0 = String(m[1] || '').trim();
       if(!id0) return '';
       if(/^agent:/i.test(id0)){
+        const parsedParent = feedSessionParentAgentId(id0);
+        if(parsedParent) return feedCanonicalAgentId(parsedParent);
         const parts = id0.split(':').filter(Boolean);
         if(parts.length >= 2) id0 = String(parts[1] || '').trim();
       }
@@ -2792,8 +2821,13 @@
       if(id0.includes('/')) id0 = id0.split('/')[0].trim();
       const lower = id0.toLowerCase();
       if(!id0) return '';
+      if(Object.prototype.hasOwnProperty.call(FEED_RUNTIME_AGENT_ALIASES, lower)) return FEED_RUNTIME_AGENT_ALIASES[lower] || '';
       if(lower === 'subagent' || lower === 'spawn' || lower === 'cron' || lower === 'discord') return '';
       return id0;
+    }
+
+    function feedNormalizeAgentId(v, opts){
+      return feedCanonicalAgentId(v, opts);
     }
 
     function feedMatchesAgentFilter(v){
@@ -3500,9 +3534,8 @@
             const agentIds = new Set();
             if(j0 && Array.isArray(j0.agents)){
               for(const a of j0.agents){
-                const id = String(a && a.id || '');
-                const m = id.match(/^resident@(.+)$/);
-                agentIds.add(m ? m[1] : id);
+                const id = feedCanonicalAgentId(a && a.id, {sessionKey: a && a.debug && a.debug.decision && a.debug.decision.details && a.debug.decision.details.sessionKey});
+                if(id) agentIds.add(id);
               }
             }
 
