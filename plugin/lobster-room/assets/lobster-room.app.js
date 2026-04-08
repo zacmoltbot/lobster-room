@@ -1220,8 +1220,48 @@
       }
     }
 
-    function refreshLegend(){
+    function inferTaskResidentState(task){
+      const items = Array.isArray(task && task.items) ? task.items : [];
+      for(let i=items.length-1;i>=0;i--){
+        const uiState = inferActivityFromFeedItem(items[i]);
+        if(uiState) return mapActivityToUiState(uiState);
+      }
+      return (task && task.status === 'running') ? 'think' : 'wait';
+    }
+
+    function currentResidents(){
+      const byId = new Map();
       const agents = Array.isArray(MODEL.agents) ? MODEL.agents : [];
+      for(const raw of agents){
+        const agent = raw && typeof raw === 'object' ? raw : null;
+        if(!agent) continue;
+        const canonicalId = feedNormalizeAgentId(agent.id || agent.rawId || agent.name || '');
+        if(!canonicalId) continue;
+        byId.set(canonicalId, Object.assign({}, agent, {
+          id: canonicalId,
+          name: agent.name || canonicalId,
+        }));
+      }
+
+      const tasks = Array.isArray(FEED.tasks) ? FEED.tasks : [];
+      for(const task of tasks){
+        if(!task || task.status !== 'running') continue;
+        const canonicalId = feedNormalizeAgentId(task.agentId || '');
+        if(!canonicalId || byId.has(canonicalId)) continue;
+        byId.set(canonicalId, {
+          id: canonicalId,
+          name: canonicalId,
+          state: inferTaskResidentState(task),
+          meta: { taskFallback: true },
+          debug: { decision: { currentTruthSource: 'feed-task-fallback', taskId: task.id || null, sessionKey: task.sessionKey || null } },
+        });
+      }
+
+      return Array.from(byId.values()).sort((a, b)=> String(a && a.id || '').localeCompare(String(b && b.id || '')));
+    }
+
+    function refreshLegend(){
+      const agents = currentResidents();
       const counts = { reply: 0, think: 0, tool: 0, build: 0, wait: 0, err: 0 };
       for(const a of agents){
         const st = String(a && a.state || 'idle').toLowerCase();
@@ -1771,7 +1811,7 @@
       const room = document.getElementById('room');
       if(!MODEL.nodeById) MODEL.nodeById = {};
 
-      const placed = layoutAgentsByZone(MODEL.agents);
+      const placed = layoutAgentsByZone(currentResidents());
       const nextIds = new Set(placed.map(a=>a.id));
 
       // Remove nodes that disappeared
@@ -2912,7 +2952,7 @@
       // "Now" section — all agents always shown, with current state as label
       if(nowEl){
         const lines = [];
-        const agents = Array.isArray(MODEL.agents) ? MODEL.agents : [];
+        const agents = currentResidents();
         const latestRowByAgent = new Map();
         for(const row of rows){
           const rowAgent = feedNormalizeAgentId(row && row.agentId);
@@ -2946,26 +2986,6 @@
           const summary = summaryFinal && summaryFinal.toLowerCase() !== humanState.toLowerCase() ? summaryFinal : '';
           const summaryView = feedNowSummaryDisplay(humanState, ageMs, summary);
           lines.push({ agent: '@' + id, state: humanState, age, ageMs, summary, summaryView });
-        }
-        // Also show running subagent tasks from FEED.tasks — these reflect actual live subagent
-        // work even when MODEL.agents heartbeat hasn't updated (subagent activity is not
-        // reflected in the parent agent's state). Skip agents already covered by the loop above.
-        const runningTasks = (FEED.tasks || []).filter(t => t && t.status === 'running');
-        for (const t of runningTasks) {
-          const taskAgentId = feedNormalizeAgentId(t && t.agentId);
-          if (!taskAgentId || !feedMatchesAgentFilter(taskAgentId)) continue;
-          // Skip if this agent was already added to lines by the MODEL.agents loop above
-          if (lines.some(line => line.agent === '@' + taskAgentId)) continue;
-          const taskTitle = String(t.title || '').trim();
-          const taskEndTs = Number(t.endTs || 0);
-          const taskStartTs = Number(t.startTs || 0);
-          const taskLastTs = taskEndTs || taskStartTs || 0;
-          const taskAge = taskLastTs ? feedUpdatedAge(taskLastTs) : '';
-          const taskAgeMs = taskLastTs ? Math.max(0, Date.now() - taskLastTs) : null;
-          const humanState = 'active now';
-          const summary = taskTitle || '';
-          const summaryView = feedNowSummaryDisplay(humanState, taskAgeMs, summary);
-          lines.push({ agent: '@' + taskAgentId, state: humanState, age: taskAge, ageMs: taskAgeMs, summary, summaryView });
         }
         // Sort agents alphabetically — stable every poll, no active-first reordering
         lines.sort((a, b)=> String(a.agent).localeCompare(String(b.agent)));
@@ -3166,6 +3186,8 @@
           // Keep UI stable: show only "live" (latency is noisy and looks like a timer).
           FEED.pollStatus = 'live';
           feedRender();
+          try{ renderAgents(); }catch{}
+          try{ refreshLegend(); }catch{}
         }
       }catch(e){
         feedLog('poll error', e);
@@ -3372,6 +3394,8 @@
           const img = document.getElementById('room-bg');
           if(!room || !img) return;
           room.classList.add('has-bg');
+          const roomId = (j && j.roomId) ? String(j.roomId) : 'default';
+          MODEL.activeRoomId = roomId;
           let fallbackApplied = false;
           img.onload = () => {
             ensureLayout(false);
@@ -3389,9 +3413,11 @@
             try{ img.src = './assets/default-room.jpg?v=' + Date.now(); }catch{}
             try{ statusEl.textContent = 'Current room: (fallback image)'; }catch{}
           };
-          // Cache-busting strategy A: use versioned URL param derived from room-image/info.updatedAt.
-          // Backend serves ./api/room-image with long-lived immutable caching.
-          img.src = apiPath('./api/room-image?v=' + ((j && j.updatedAt) ? j.updatedAt : 0));
+          // Cache-busting must include roomId as well as updatedAt.
+          // Bundled rooms can persist the same updatedAt value across sessions, and /api/room-image
+          // is served immutable, so room-only switches need their own cache namespace.
+          const cacheKey = encodeURIComponent(roomId) + ':' + String((j && j.updatedAt) ? j.updatedAt : 0);
+          img.src = apiPath('./api/room-image?v=' + cacheKey);
           const nm = (j && j.roomName) ? j.roomName : '—';
           statusEl.textContent = 'Current room: ' + nm;
         }catch{
