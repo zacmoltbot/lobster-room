@@ -1645,11 +1645,109 @@ export default {
 
     const canonicalVisibleAgentId = (value: unknown): string => canonicalizeRuntimeAgentToken(value);
 
+    const PERSISTED_AGENT_ID_STOPWORDS = new Set([
+      "a",
+      "an",
+      "the",
+      "this",
+      "that",
+      "these",
+      "those",
+      "someone",
+      "somebody",
+      "anyone",
+      "anybody",
+      "everyone",
+      "everybody",
+      "nobody",
+      "agent",
+      "subagent",
+      "assistant",
+      "helper",
+      "worker",
+      "coder",
+      "writer",
+      "reviewer",
+      "researcher",
+      "runtime",
+      "system",
+      "resident",
+      "spawn",
+      "cron",
+      "discord",
+      "unknown",
+    ]);
+
+    const isPersistedPollutedAgentId = (value: unknown): boolean => {
+      const visible = canonicalVisibleAgentId(value);
+      if (!visible) return true;
+      return PERSISTED_AGENT_ID_STOPWORDS.has(visible.toLowerCase());
+    };
+
+    const lineageCanonicalAgentIds = (extra?: { sessionKeys?: Array<unknown>; residentAgentIds?: Array<unknown>; parentSessionKeys?: Array<unknown>; actorIds?: Array<unknown> }): Set<string> => {
+      const out = new Set<string>();
+      const addId = (raw: unknown) => {
+        const id = canonicalResidentAgentId(raw);
+        if (id && !isPersistedPollutedAgentId(id)) out.add(id);
+      };
+      const addSessionKey = (raw: unknown) => {
+        if (typeof raw !== "string") return;
+        const sk = String(raw).trim();
+        if (!sk) return;
+        const parsed = parseSessionIdentity(sk);
+        addId(parsed.residentAgentId);
+      };
+      const envRaw = (process.env.LOBSTER_ROOM_AGENT_IDS || "").trim();
+      if (envRaw) {
+        for (const raw of envRaw.split(",")) addId(raw);
+      }
+      const agentListRaw = Array.isArray(api.config?.agents?.list) ? api.config.agents.list : [];
+      for (const agent of agentListRaw) addId(agent?.id);
+      for (const rawId of activity.keys()) addId(rawId);
+      const snapAgentIds = snap && snap.agents ? Object.keys(snap.agents) : [];
+      for (const rawId of snapAgentIds) addId(rawId);
+      for (const rawId of spawnedSessionAgentIds.values()) addId(rawId);
+      for (const sessionKey of spawnedSessionAgentIds.keys()) addSessionKey(sessionKey);
+      for (const entry of observedChildSessions.values()) {
+        addId(entry.residentAgentId);
+        addId(entry.actorId);
+        addSessionKey(entry.sessionKey);
+        for (const parentSessionKey of entry.parentSessionKeys || []) addSessionKey(parentSessionKey);
+      }
+      for (const queue of pendingSpawnAttributionsByParent.values()) {
+        for (const entry of queue) {
+          addId(entry.residentAgentId);
+          addId(entry.actorId);
+          addSessionKey(entry.parentSessionKey);
+          addSessionKey(entry.childSessionKey);
+        }
+      }
+      for (const raw of extra?.residentAgentIds || []) addId(raw);
+      for (const raw of extra?.actorIds || []) addId(raw);
+      for (const raw of extra?.sessionKeys || []) addSessionKey(raw);
+      for (const raw of extra?.parentSessionKeys || []) addSessionKey(raw);
+      out.add("main");
+      return out;
+    };
+
+    const canonicalPersistedActorId = (value: unknown, extra?: { sessionKeys?: Array<unknown>; residentAgentIds?: Array<unknown>; parentSessionKeys?: Array<unknown>; actorIds?: Array<unknown> }): string => {
+      const visible = canonicalVisibleAgentId(value);
+      if (!visible || isPersistedPollutedAgentId(visible)) return "";
+      const lineageIds = lineageCanonicalAgentIds({
+        sessionKeys: extra?.sessionKeys || [],
+        residentAgentIds: extra?.residentAgentIds || [],
+        parentSessionKeys: extra?.parentSessionKeys || [],
+        actorIds: [],
+      });
+      if (lineageIds.has(visible)) return visible;
+      return "";
+    };
+
     const isVisibleSnapshotAgentKey = (value: unknown): boolean => {
       if (typeof value !== "string") return false;
       const raw = String(value).trim();
       if (!raw) return false;
-      const visible = canonicalVisibleAgentId(raw);
+      const visible = canonicalPersistedActorId(raw);
       return !!visible && raw === visible;
     };
 
@@ -1657,8 +1755,9 @@ export default {
       const out: Record<string, { state: ActivityState; sinceMs: number; lastEventMs: number; details?: any }> = {};
       if (!agents || typeof agents !== "object") return out;
       for (const [key, value] of Object.entries(agents)) {
-        if (!isVisibleSnapshotAgentKey(key)) continue;
-        out[key] = value as { state: ActivityState; sinceMs: number; lastEventMs: number; details?: any };
+        const visible = canonicalPersistedActorId(key);
+        if (!visible || visible !== key) continue;
+        out[visible] = value as { state: ActivityState; sinceMs: number; lastEventMs: number; details?: any };
       }
       return out;
     };
@@ -1770,11 +1869,15 @@ export default {
 
         const referenceNow = nowMs();
         const spawned = data?.spawnedSessionAgentIds;
+        let shouldRewritePersistedState = false;
         if (spawned && typeof spawned === "object") {
           for (const [key, value] of Object.entries(spawned)) {
             const sk = typeof key === "string" ? key.trim() : "";
-            const agentId = canonicalVisibleAgentId(value);
-            if (!sk || !shouldPersistSpawnedSessionAgent(sk, agentId)) continue;
+            const agentId = canonicalPersistedActorId(value, { sessionKeys: [sk] });
+            if (!sk || !shouldPersistSpawnedSessionAgent(sk, agentId)) {
+              shouldRewritePersistedState = true;
+              continue;
+            }
             if (!spawnedSessionAgentIds.has(sk)) spawnedSessionAgentIds.set(sk, agentId);
           }
         }
@@ -1783,8 +1886,15 @@ export default {
         for (const raw of pending) {
           const parentSessionKey = typeof raw?.parentSessionKey === "string" ? raw.parentSessionKey.trim() : "";
           const residentAgentId = canonicalResidentAgentId(raw?.residentAgentId || parentSessionKey);
-          const actorId = canonicalVisibleAgentId(raw?.actorId);
-          if (!parentSessionKey || !residentAgentId || !actorId) continue;
+          const actorId = canonicalPersistedActorId(raw?.actorId, {
+            sessionKeys: [raw?.childSessionKey],
+            residentAgentIds: [residentAgentId],
+            parentSessionKeys: [parentSessionKey],
+          });
+          if (!parentSessionKey || !residentAgentId || !actorId) {
+            shouldRewritePersistedState = true;
+            continue;
+          }
           const entry: PendingSpawnAttribution = {
             actorId,
             parentSessionKey,
@@ -1806,21 +1916,31 @@ export default {
           const sessionKey = typeof raw?.sessionKey === "string" ? raw.sessionKey.trim() : "";
           if (!sessionKey || spawnedSessionAgentIds.has(sessionKey) || !hasAdoptableChildProof(sessionKey, raw?.residentAgentId)) continue;
           const residentAgentId = canonicalResidentAgentId(raw?.residentAgentId || sessionKey);
-          if (!residentAgentId) continue;
+          if (!residentAgentId) {
+            shouldRewritePersistedState = true;
+            continue;
+          }
           const matcher = extractSpawnMatcherHints(raw);
           const parentSessionKeys = Array.isArray(raw?.parentSessionKeys)
             ? raw.parentSessionKeys.map((value: any) => typeof value === "string" ? value.trim() : "").filter(Boolean)
             : [];
+          const actorId = canonicalPersistedActorId(matcher.actorId, {
+            sessionKeys: [sessionKey],
+            residentAgentIds: [residentAgentId],
+            parentSessionKeys,
+          }) || undefined;
+          if (matcher.actorId && !actorId) shouldRewritePersistedState = true;
           observedChildSessions.set(sessionKey, {
             sessionKey,
             residentAgentId,
             parentSessionKeys: Array.from(new Set(parentSessionKeys)),
-            actorId: matcher.actorId || undefined,
+            actorId,
             label: matcher.label || undefined,
             task: matcher.task || undefined,
             observedAt: typeof raw?.observedAt === "number" && Number.isFinite(raw.observedAt) ? raw.observedAt : referenceNow,
           });
         }
+        if (shouldRewritePersistedState) await persistSpawnAttributionState();
       } catch {
         if (!spawnAttributionStateHydrated) spawnAttributionStateHydrated = true;
       }
@@ -1945,36 +2065,7 @@ export default {
       "it",
     ]);
 
-    const knownCanonicalSpawnAgentIds = (): Set<string> => {
-      const out = new Set<string>();
-      const envRaw = (process.env.LOBSTER_ROOM_AGENT_IDS || "").trim();
-      if (envRaw) {
-        for (const raw of envRaw.split(",")) {
-          const id = canonicalResidentAgentId(raw);
-          if (id) out.add(id);
-        }
-      }
-      const agentListRaw = Array.isArray(api.config?.agents?.list) ? api.config.agents.list : [];
-      for (const agent of agentListRaw) {
-        const id = canonicalResidentAgentId(agent?.id);
-        if (id) out.add(id);
-      }
-      for (const rawId of activity.keys()) {
-        const id = canonicalResidentAgentId(rawId);
-        if (id && id !== UNKNOWN_CHILD_ACTOR_ID) out.add(id);
-      }
-      const snapAgentIds = snap && snap.agents ? Object.keys(snap.agents) : [];
-      for (const rawId of snapAgentIds) {
-        const id = canonicalResidentAgentId(rawId);
-        if (id && id !== UNKNOWN_CHILD_ACTOR_ID) out.add(id);
-      }
-      for (const visibleActorId of spawnedSessionAgentIds.values()) {
-        const id = canonicalResidentAgentId(visibleActorId);
-        if (id && id !== UNKNOWN_CHILD_ACTOR_ID) out.add(id);
-      }
-      out.add("main");
-      return out;
-    };
+    const knownCanonicalSpawnAgentIds = (): Set<string> => lineageCanonicalAgentIds();
 
     const normalizeKnownSpawnActorId = (value: unknown, options?: { requireKnown?: boolean }): string => {
       const visible = canonicalVisibleAgentId(value);
@@ -3720,7 +3811,12 @@ export default {
         try {
           const txt = await fs.readFile(snapshotPath, "utf8");
           const obj = JSON.parse(txt);
-          if (obj && typeof obj === "object" && typeof (obj as any).buildTag === "string") snapDisk = obj as any;
+          if (obj && typeof obj === "object" && typeof (obj as any).buildTag === "string") {
+            snapDisk = {
+              ...(obj as any),
+              agents: pruneSnapshotAgents((obj as any).agents),
+            } as any;
+          }
         } catch {
           snapDisk = null;
         }
