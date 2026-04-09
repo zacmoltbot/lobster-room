@@ -222,7 +222,6 @@ Each task card helps you answer the important questions at a glance:
 - **Status** — running, finished, or failed
 - **When** it last updated
 
-Open a task to see more detail when you need it, while keeping the default view compact and easy to scan.
 
 For API payloads and low-level feed operations, see **API smoke tests** above.
 
