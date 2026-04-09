@@ -125,6 +125,15 @@ curl -sS -X POST 'https://<openclaw-host>/lobster-room/api/lobster-room' \
   -d '{"op":"feedGet","limit":120,"includeRaw":true}'
 ```
 
+Additional feed operations:
+
+- `feedGet` (tasks + latest preview)
+  - `{"op":"feedGet","limit":300,"agentId":"","includeRaw":false}`
+  - If `includeRaw=true`, tasks include `items[]` with sanitized event payloads.
+- `feedSummarize` (plain-language summary)
+  - `{"op":"feedSummarize","sessionKey":"agent:...","maxItems":300}`
+  - or `{"op":"feedSummarize","sinceMs": <epoch_ms>, "maxItems":300}`
+
 If you omit the `content-type: application/json` header, the request may be treated as a regular status poll and you’ll get the standard room state payload instead of the op response.
 
 ### Important: updates require a Gateway restart
@@ -215,14 +224,7 @@ Each task card helps you answer the important questions at a glance:
 
 Open a task to see more detail when you need it, while keeping the default view compact and easy to scan.
 
-API endpoints (multiplexed via POST JSON on `/lobster-room/api/lobster-room`):
-
-- `feedGet` (tasks + latest preview)
-  - `{"op":"feedGet","limit":300,"agentId":"","includeRaw":false}`
-  - If `includeRaw=true`, tasks include `items[]` with sanitized event payloads.
-- `feedSummarize` (plain-language summary)
-  - `{"op":"feedSummarize","sessionKey":"agent:...","maxItems":300}`
-  - or `{"op":"feedSummarize","sinceMs": <epoch_ms>, "maxItems":300}`
+For API payloads and low-level feed operations, see **API smoke tests** above.
 
 ### After uploading a new room background
 
