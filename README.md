@@ -13,7 +13,6 @@ A cute, practical OpenClaw room dashboard that visualizes your **agents, session
 - **Room consistency fixes**: switching rooms, rehydration, and default-room reset now stay visually and logically in sync
 - **Cleaner Settings IA**: Settings is reorganized into **Room Setup**, **Appearance**, and **History & Agents** for faster editing
 - **Stronger feed UX**: humanized task wording, better parent/child attribution, and fewer duplicate / unknown agent rows
-- **Homepage demo refresh**: updated animated demo and screenshots now match the current v0.3.0 UI behavior
 
 **Links**
 - Portal: `https://<openclaw-host>/lobster-room/`
