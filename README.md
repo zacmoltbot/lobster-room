@@ -202,28 +202,18 @@ Each entry includes:
 - `agentId` (derived from `sessionKey` when available)
 - `data` (best-effort; e.g. `toolName`, and for `exec` we include the command)
 
-### Message Feed v2 (docked)
+### Task Feed
 
-The UI includes a **Message Feed** panel (📰 Feed) that is **docked on the right** of the room.
+The UI includes a **Task Feed** panel (📰 Feed) that turns live agent activity into readable updates.
 
-Instead of raw hook rows, it aggregates events into human-readable **Task cards** (grouped by `sessionKey` when available). Each task shows:
+Each task card helps you answer the important questions at a glance:
 
-- start time
-- `agentId`
-- status (`running` / `done` / `error`)
-- short title + 1–2 line summary
+- **Who** is working
+- **What** they are doing
+- **Status** — running, finished, or failed
+- **When** it last updated
 
-You can expand a task to view the underlying raw events for debugging.
-
-#### Demo: sub-agent task
-
-To validate multi-agent grouping, spawn a sub-agent from any run that has tool access to `sessions_spawn`.
-
-Example prompt to your assistant:
-
-- "Spawn a sub-agent to write a short plan for X, then report back."
-
-In the feed, you should see a parent task (the `sessions_spawn` tool call) and a separate task grouped under the spawned sub-agent `sessionKey`.
+Open a task to see more detail when you need it, while keeping the default view compact and easy to scan.
 
 API endpoints (multiplexed via POST JSON on `/lobster-room/api/lobster-room`):
 
